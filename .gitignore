@@ -1,0 +1,18 @@
+# Build outputs
+dist/
+cache/
+snapshots/
+build/
+.venv/
+
+# python cache
+*.pyc
+
+# User logs
+*.log
+
+# Other
+*.tmp
+
+# ignore GitHub configuration/workflow folder
+.github/
