@@ -101,6 +101,8 @@ def _get_scoresaber_leaderboards_ranked(
 
     # キャッシュから既存譜面データを読み込み
     cached_total = len(leaderboards) #load_cached_ranked_maps(cached_leaderboards, leaderboards, existing_lb_ids)
+    latest_total = 0
+    new_total = cached_total
 
     # 1ページだけ最新のメタデータを取りに行き、total が増えていなければキャッシュをそのまま返す
     try:
@@ -118,15 +120,15 @@ def _get_scoresaber_leaderboards_ranked(
             data = resp.json()
             meta = data.get("metadata") or {}
             try:
-                new_total = int(meta.get("total", 0))
+                latest_total = int(meta.get("total", 0))
                 per_page = int(meta.get("itemsPerPage", 0)) or 1
             except (TypeError, ValueError):
-                new_total = cached_total
+                latest_total = cached_total
                 per_page = 100
 
-            print(f"既存キャッシュの総譜面数: {cached_total}, 新しい総譜面数: {new_total} ページあたり: {per_page}")
+            print(f"既存キャッシュの総譜面数: {cached_total}, 最新総譜面数: {latest_total} ページあたり: {per_page}")
             # total が増えていなければキャッシュをそのまま利用
-            if new_total <= cached_total:
+            if latest_total <= cached_total:
                 if progress is not None:
                     # ページ数情報が無いので 1/1 として通知
                     progress(1, 1)
@@ -134,18 +136,18 @@ def _get_scoresaber_leaderboards_ranked(
                 return leaderboards
             
             # total が増えている場合は、キャッシュ済みの最後のページ以降だけを追加取得する
-            print(f"ScoreSaberリーダーボードに新しい譜面が追加されています。{new_total - cached_total}件の差分を取得し、キャッシュを更新します...")                
-            print(f"既存キャッシュの総譜面数: {cached_total}, 新しい総譜面数: {new_total} ページあたり: {per_page}")
-            
+            print(f"ScoreSaberリーダーボードに新しい譜面が追加されています。{latest_total - cached_total}件の差分を取得し、キャッシュを更新します...")                
+           
             append_leaderboards = []
             data_lbs = data.get("leaderboards") or []
-            is_exist_break = add_leaderboards(append_leaderboards, existing_lb_ids, data_lbs)
+            add_leaderboards(append_leaderboards, existing_lb_ids, data_lbs)
+            new_total = cached_total + len(append_leaderboards)
             
             max_cached_page = math.ceil(cached_total / per_page)
             total_pages_new = math.ceil(new_total / per_page)
             print(f"既存キャッシュの最終ページ: {max_cached_page}, 新しい総ページ数: {total_pages_new}")    
-            
-            if not is_exist_break or cached_total < new_total:
+            print(f"取得済み譜面数: {new_total}, 最新総譜面数: {latest_total} ")
+            if new_total < latest_total:
                 total_maps_new = cached_total
                 page_no += 1
                 
@@ -173,15 +175,14 @@ def _get_scoresaber_leaderboards_ranked(
                         data_page = resp_page.json()
                         data_lbs = data_page.get("leaderboards") or []
                         
-                        is_exist_break = add_leaderboards(append_leaderboards, existing_lb_ids, data_lbs)
-                        if is_exist_break:
-                            # 既存データと重複が発生した場合、かつ、マップ数が一致した場合は終了
-                            total_maps_new = cached_total + len(append_leaderboards)
-                            if total_maps_new >= new_total:
-                                print("既存データと重複が発生し、かつ、総譜面数が一致したため取得を終了します。")
-                                break
-                            else:
-                                print("総譜面数不一致：total_maps_new:", total_maps_new, " new_total:", new_total)
+                        add_leaderboards(append_leaderboards, existing_lb_ids, data_lbs)
+                        new_total = cached_total + len(append_leaderboards)
+                            # マップ数が一致した場合は終了
+                        if new_total >= latest_total:
+                            print("総譜面数が一致したため取得を終了します。：new_total:", new_total, " latest_total:", latest_total)
+                            break
+                        else:
+                            print("総譜面数不一致：new_total:", new_total, " latest_total:", latest_total)
                     except Exception:  # noqa: BLE001
                         break
                     # ページ情報をキャッシュ用に保存
@@ -200,6 +201,9 @@ def _get_scoresaber_leaderboards_ranked(
                 # キャッシュを保存
                 try:
                     leaderboards[:0] = append_leaderboards
+                    # leaderboardsをidの降順でソートする
+                    leaderboards.sort(key=lambda x: x.get("id", 0), reverse=True)
+
                     _save_cached_ranked_maps(cache_path, leaderboards, \
                                                 max_pages=total_pages_new, \
                                                 total_maps=len(leaderboards))
@@ -229,9 +233,6 @@ def add_leaderboards(leaderboards, existing_lb_ids, data_lbs):
         if lb_id not in existing_lb_ids:
             leaderboards.append(lb)
             existing_lb_ids[lb_id] = lb
-        else:
-            print(f"譜面ID {lb_id} は既に存在")
-            return True
         
 def _get_scoresaber_player_scores(
     scoresaber_id: str,
