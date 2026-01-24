@@ -12,7 +12,6 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QGridLayout,
-    QHBoxLayout,
     QLabel,
     QPushButton,
     QTableWidget,
@@ -22,10 +21,8 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QSplitter,
     QStyledItemDelegate,
-    QStyleOptionViewItem,
 )
 
-from .snapshot import Snapshot, SNAPSHOT_DIR, BASE_DIR
 from .snapshot import Snapshot, SNAPSHOT_DIR, BASE_DIR, RESOURCES_DIR
 
 
@@ -177,11 +174,11 @@ class SnapshotCompareDialog(QDialog):
 
         # 下部: 左右3つの比較テーブル（上段系 / ScoreSaber★別 / BeatLeader★別）
         splitter = QSplitter(Qt.Orientation.Horizontal, self)
-        
+
         # 左: プレイヤー/AccSaber 指標
         self.table = QTableWidget(0, 4, splitter)
         self.table.verticalHeader().setDefaultSectionSize(14)  # 行の高さを少し詰める
-        
+
         self.table.setHorizontalHeaderLabels([
             "Metric",
             "A",
@@ -1122,7 +1119,7 @@ class SnapshotCompareDialog(QDialog):
             return numeric, "" if text is None else str(text)
 
         def _set_star_row(table: QTableWidget, row: int, label: str,  # type: ignore[name-defined]
-                           clear_a, clear_b, avg_a, avg_b) -> None:
+                          clear_a, clear_b, avg_a, avg_b) -> None:
             """★別テーブルの 1 行分 (Clear + AvgAcc) を設定する。"""
 
             while table.rowCount() <= row:
@@ -1224,4 +1221,3 @@ class SnapshotCompareDialog(QDialog):
             _set_star_row(self.bl_star_table, row_bl, "Total", bl_clear_total_a, bl_clear_total_b, bl_avg_total_a, bl_avg_total_b)
 
         self.table.resizeColumnsToContents()
-

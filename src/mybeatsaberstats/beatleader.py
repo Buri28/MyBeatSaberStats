@@ -70,7 +70,6 @@ def fetch_player(player_id: str, session: Optional[requests.Session] = None) -> 
     )
 
 
-
 def fetch_players_ranking(
     min_pp: float = 0.0,
     session: Optional[requests.Session] = None,

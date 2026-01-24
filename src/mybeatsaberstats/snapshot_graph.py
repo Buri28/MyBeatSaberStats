@@ -778,4 +778,3 @@ class _GraphItemWidget(QWidget):
         t_max = datetime(last_date.year, last_date.month, last_date.day, 0, 0, 0)
 
         self.chart.set_data(points, label, t_min=t_min, t_max=t_max, y_as_int=y_as_int)
-

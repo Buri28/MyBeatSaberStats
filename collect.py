@@ -1,12 +1,12 @@
 import sys
 from pathlib import Path
 
+from mybeatsaberstats.collector.collector import main
+
 ROOT = Path(__file__).resolve().parent
 SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
-
-from mybeatsaberstats.collector import main
 
 
 if __name__ == "__main__":
