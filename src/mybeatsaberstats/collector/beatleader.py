@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from collections import defaultdict
 from datetime import datetime
@@ -18,6 +18,10 @@ BL_BASE_URL = "https://api.beatleader.xyz"
 
 
 def _load_cached_pages(path: Path) -> Optional[list[dict]]:
+    """
+    BeatLeader等のAPIレスポンスをキャッシュしたJSONファイルからページリストを読み込む。
+    壊れている場合や形式違いはNoneを返す。
+    """
     print("Entering _load_cached_pages")
     if not path.exists():
         return None
@@ -32,6 +36,9 @@ def _load_cached_pages(path: Path) -> Optional[list[dict]]:
 
 
 def _save_cached_pages(path: Path, pages: list[dict]) -> None:
+    """
+    ページリストをキャッシュファイル(JSON)として保存する。
+    """
     print("Entering _save_cached_pages")
     payload = {
         "fetched_at": datetime.utcnow().isoformat() + "Z",
@@ -48,6 +55,10 @@ def _get_beatleader_leaderboards_ranked(
     session: requests.Session,
     progress: Optional[Callable[[int, Optional[int]], None]] = None,
 ) -> list[dict]:
+    """
+    BeatLeaderのRanked譜面リストをAPIから全件取得し、キャッシュも利用する。
+    進捗コールバック(progress)対応。
+    """
     print("Entering _get_beatleader_leaderboards_ranked")
     cache_path = CACHE_DIR / "beatleader_ranked_maps.json"
 
@@ -209,6 +220,9 @@ def _get_beatleader_leaderboards_ranked(
 
 
 def _get_beatleader_player_scores(player_id: str, session: requests.Session) -> list[dict]:
+    """
+    BeatLeaderのプレイヤースコア一覧をAPIから全件取得し、キャッシュも利用する。
+    """
     print("Entering _get_beatleader_player_scores")
     cache_path = CACHE_DIR / f"beatleader_player_scores_{player_id}.json"
 
@@ -254,6 +268,10 @@ def _get_beatleader_player_scores(player_id: str, session: requests.Session) -> 
 
 
 def _get_beatleader_player_stats(player_id: str, session: requests.Session) -> dict:
+    """
+    BeatLeaderのプレイヤー統計情報(scoreStats)を取得。
+    失敗時は空dict。
+    """
     print("Entering _get_beatleader_player_stats")
     url = BL_BASE_URL + f"/player/{player_id}/scores/stats"
     try:
@@ -276,6 +294,10 @@ def _get_beatleader_player_stats(player_id: str, session: requests.Session) -> d
 
 
 def _extract_beatleader_accuracy(score_info: dict) -> Optional[float]:
+    """
+    BeatLeaderスコアオブジェクトから精度(%)を推定して返す。
+    形式の違いも吸収。
+    """
     print("Entering _extract_beatleader_accuracy")
     if not isinstance(score_info, dict):
         return None
@@ -315,6 +337,9 @@ def _extract_beatleader_accuracy(score_info: dict) -> Optional[float]:
 
 
 def collect_beatleader_star_stats(beatleader_id: str, session: Optional[requests.Session] = None) -> list[StarClearStat]:
+    """
+    BeatLeaderのRanked譜面・プレイヤースコアから星別クリア数・NF数・平均精度を集計。
+    """
     print("Entering collect_beatleader_star_stats")
     if not beatleader_id:
         return []
