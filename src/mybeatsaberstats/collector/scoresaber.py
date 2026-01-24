@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from collections import defaultdict
 from datetime import datetime
@@ -249,6 +249,11 @@ def _get_scoresaber_player_stats(scoresaber_id: str, session: requests.Session) 
 
 
 def _fetch_scoresaber_player_basic(steam_id: str, session: requests.Session) -> dict:
+    """ScoreSaber のプレイヤー情報を /player/{id}/full から取得して ScoreSaberPlayer に詰める。
+
+    players_index.json に存在しないプレイヤーのスナップショット作成時に利用する。
+    失敗した場合は None を返す。
+    """
     print("Entering _fetch_scoresaber_player_basic")
     url = SCORESABER_PLAYER_FULL_URL.format(player_id=steam_id)
     try:
@@ -268,6 +273,19 @@ def _fetch_scoresaber_player_basic(steam_id: str, session: requests.Session) -> 
 
 
 def _collect_star_stats_from_scoresaber(scoresaber_id: str, session: requests.Session) -> list[StarClearStat]:
+    """ScoreSaber の Ranked マップとプレイヤースコアから★別統計を集計する。
+
+    - /api/leaderboards?ranked=true で Ranked マップ一覧を取得し、★別の「全譜面(Map数)」を集計
+    - /api/player/{id}/scores でプレイヤースコアを取得し、各 Ranked マップごとに
+            * NF なしスコアが1つでもあれば → クリア
+            * NF しか無ければ → NF
+        と判定して★別にカウント
+    - クリア率 = クリア数 / Map数
+
+    API 仕様の変更やネットワークエラーなどで途中失敗した場合は、
+    その時点までに集計できた結果だけを用いる（完全に失敗した場合は空リスト）。
+    """
+    
     print("Entering _collect_star_stats_from_scoresaber")
     if not scoresaber_id:
         return []

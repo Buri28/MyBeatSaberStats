@@ -1,4 +1,8 @@
+﻿
 from __future__ import annotations
+def _is_steam_id(value: str | None) -> bool:
+    return isinstance(value, str) and value.isdigit() and len(value) == 17
+from ..ranking_view import _load_player_index
 
 from dataclasses import asdict
 from datetime import datetime
@@ -24,6 +28,12 @@ from ..accsaber import (
     ACCSABER_MIN_AP_GLOBAL,
     ACCSABER_MIN_AP_SKILL,
 )
+from .accsaber import (
+    _accsaber_profile_exists,
+    _load_list_cache,
+    _find_accsaber_for_scoresaber_id,
+    _find_accsaber_skill_for_scoresaber_id,
+)
 
 # キャッシュディレクトリ(app.py と同じ BASE_DIR / "cache" を利用)
 CACHE_DIR = BASE_DIR / "cache"
@@ -40,53 +50,6 @@ BEATLEADER_LEADERBOARDS_URL = "https://api.beatleader.xyz/leaderboards"
 BL_BASE_URL = "https://api.beatleader.xyz"
 
 
-def _accsaber_profile_exists(steam_id: str, session: requests.Session) -> bool:
-    """指定した SteamID の AccSaber プロフィールが存在するかを確認する。
-
-    Remix の data ルート
-    https://accsaber.com/profile/{steam_id}?page=1&_data=routes%2Fprofile%2F%24playerId%2F%28%24category%29%2F%28scores%29
-    にアクセスし、JSON の totalCount が 0 の場合は「未参加」とみなして False を返す。
-
-    ネットワークエラーや JSON でないレスポンスなど、不確実な場合は True（参加している前提）とする。
-    """
-
-    base_url = f"https://accsaber.com/profile/{steam_id}"
-    params = {
-        "page": "1",
-        "_data": "routes/profile/$playerId/($category)/(scores)",
-    }
-
-    try:
-        resp = session.get(base_url, params=params, timeout=10)
-    except Exception:  # noqa: BLE001
-        # ネットワークエラー等の場合は AccSaber 参加とみなして従来どおりリーダーボードを読む
-        return True
-
-    # プロフィール data ルート自体が 404 の場合は未参加とみなす
-    if resp.status_code == 404:
-        return False
-
-    # JSON が返ってきていれば scores.pageInfo.totalCount で判定する
-    try:
-        data = resp.json()
-        print(f"AccSaber profile data for {steam_id}: {data}")
-    except Exception:  # noqa: BLE001
-        # HTML など別形式の場合は、UI 側の Page Not Found 判定などが絡む可能性もあるが
-        # 確実に未参加とは言い切れないので True 扱いにする
-        return True
-
-    scores_obj = data.get("scores") or {}
-    total = scores_obj.get("totalCount")
-    try:
-        # totalCount は 0 または正の整数を想定
-        print(f"totalCount: {total}")
-        total_int = int(total)  # type: ignore[arg-type]
-    except (TypeError, ValueError):  # noqa: BLE001
-        # totalCount が無い / 数値でない場合も安全側で True 扱い
-        return True
-
-    # totalCount が 0 なら AccSaber 上にスコアがなく、事実上未参加とみなす
-    return total_int > 0
 
 
 def _save_player_index(index: Dict[str, Dict[str, object]]) -> None:
@@ -163,148 +126,6 @@ def rebuild_player_index_from_global() -> None:
         key = (_norm_name(p.name), p.country.upper())
         ss_by_name_country.setdefault(key, []).append(p)
 
-    bl_by_name_country: Dict[tuple[str, str], list[BeatLeaderPlayer]] = {}
-    for p in bl_global:
-        if not p.name or not p.country:
-            continue
-        key = (_norm_name(p.name), p.country.upper())
-        bl_by_name_country.setdefault(key, []).append(p)
-
-    # ScoreSaber 側: 17桁の数値IDだけ SteamID とみなしてインデックス化
-    for p in ss_global:
-        if not p.id:
-            continue
-        if not _is_steam_id(p.id):
-            continue
-        entry = index.setdefault(p.id, {})
-        entry["scoresaber"] = p
-
-    # BeatLeader 側: 同じく 17桁の数値IDだけ SteamID とみなす
-    for p in bl_global:
-        if not p.id:
-            continue
-        if not _is_steam_id(p.id):
-            continue
-        entry = index.setdefault(p.id, {})
-        entry["beatleader"] = p
-
-    # 名前+国コードで一意に対応する ScoreSaber / BeatLeader プレイヤー同士を、
-    # ScoreSaber の ID をキーとして紐付ける。
-    for key, ss_list in ss_by_name_country.items():
-        bl_list = bl_by_name_country.get(key)
-        if not bl_list:
-            continue
-
-        if len(ss_list) != 1 or len(bl_list) != 1:
-            continue
-
-        ss_p = ss_list[0]
-        bl_p = bl_list[0]
-        if not ss_p.id:
-            continue
-
-        entry = index.setdefault(ss_p.id, {})
-        if "scoresaber" not in entry:
-            entry["scoresaber"] = ss_p
-        if "beatleader" not in entry:
-            entry["beatleader"] = bl_p
-
-    # 空エントリを除外して保存
-    index_filtered = {k: v for k, v in index.items() if v}
-    _save_player_index(index_filtered)
-
-
-def _is_steam_id(value: str | None) -> bool:
-    """17桁の数値のみを SteamID とみなす簡易判定。"""
-
-    if not value:
-        return False
-    return len(value) == 17 and value.isdecimal()
-
-
-def _load_list_cache(path: Path, cls):
-    """汎用のリストキャッシュローダー。壊れていれば空リストを返す。"""
-
-    if not path.exists():
-        return []
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        if isinstance(data, list):
-            return [cls(**item) for item in data if isinstance(item, dict)]
-    except Exception:  # noqa: BLE001
-        return []
-    return []
-
-
-def _load_player_index() -> Dict[str, Dict[str, object]]:
-    """players_index.json を読み込んで辞書形式で返す。壊れていれば空 dict。"""
-
-    path = CACHE_DIR / "players_index.json"
-    if not path.exists():
-        return {}
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-        index: Dict[str, Dict[str, object]] = {}
-        if isinstance(raw, list):
-            for row in raw:
-                if not isinstance(row, dict):
-                    continue
-                sid = str(row.get("steam_id") or "")
-                if not sid:
-                    continue
-                entry: Dict[str, object] = {}
-                ss = row.get("scoresaber")
-                bl = row.get("beatleader")
-                if isinstance(ss, dict):
-                    try:
-                        entry["scoresaber"] = ScoreSaberPlayer(**ss)
-                    except TypeError:
-                        pass
-                if isinstance(bl, dict):
-                    try:
-                        entry["beatleader"] = BeatLeaderPlayer(**bl)
-                    except TypeError:
-                        pass
-                if entry:
-                    index[sid] = entry
-        return index
-    except Exception:  # noqa: BLE001
-        return {}
-
-
-def _find_accsaber_for_scoresaber_id(
-    scoresaber_id: str,
-    session: Optional[requests.Session] = None,
-) -> Optional[AccSaberPlayer]:
-    """AccSaber Overall リーダーボードから指定 ScoreSaber ID のプレイヤーを探す。
-
-    まずローカルキャッシュ(accsaber_ranking.json)を参照し、見つからない場合は必要に応じて
-    fetch_overall を使って API からページング検索する（ベストエフォート）。
-    """
-
-    if not scoresaber_id:
-        return None
-
-    # 1) 既存の AccSaber グローバルランキングキャッシュから検索
-    acc_path = CACHE_DIR / "accsaber_ranking.json"
-    players = _load_list_cache(acc_path, AccSaberPlayer)
-    for p in players:
-        if getattr(p, "scoresaber_id", None) == scoresaber_id:
-            return p
-
-    # 2) キャッシュに無い場合は、可能であれば API から Overall リーダーボードをページング検索
-    if session is None:
-        return None
-
-    try:
-        return _find_accsaber_skill_for_scoresaber_id(
-            scoresaber_id,
-            fetch_overall,
-            session=session,
-            max_pages=200,
-        )
-    except Exception:  # noqa: BLE001
-        return None
 
 
 def _load_accsaber_players() -> list[AccSaberPlayer]:
