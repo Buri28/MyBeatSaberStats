@@ -300,7 +300,9 @@ class SnapshotCompareDialog(QDialog):
         self.combo_a.clear()
         self.combo_b.clear()
         self._snapshots_by_player.clear()
-
+        
+        # print文は日本語で
+        print("スナップショットを読み込んでいます:", SNAPSHOT_DIR)
         # 日付の新しい順（降順）で読み込みつつ、プレイヤーごとにグループ化
         paths: List[Path] = sorted(SNAPSHOT_DIR.glob("*.json"), reverse=True)
         for path in paths:
@@ -321,7 +323,9 @@ class SnapshotCompareDialog(QDialog):
         # プレイヤー選択コンボを構築（最新スナップショットの名前を使う）
         for sid, snaps in sorted(self._snapshots_by_player.items()):
             latest = snaps[0]
+            print("最新のスナップショット (プレイヤー):", sid, latest.taken_at)
             name = latest.scoresaber_name or latest.beatleader_name or ""
+            print("プレイヤーをコンボに追加:", sid, name)
             if name:
                 label = f"{name} ({sid})"
             else:

@@ -14,11 +14,9 @@ CACHE_DIR = BASE_DIR / "cache"
 
 def _accsaber_profile_exists(steam_id: str, session: requests.Session) -> bool:
     """指定した SteamID の AccSaber プロフィールが存在するかを確認する。
-
     Remix の data ルート
     https://accsaber.com/profile/{steam_id}?page=1&_data=routes%2Fprofile%2F%24playerId%2F%28%24category%29%2F%28scores%29
     にアクセスし、JSON の totalCount が 0 の場合は「未参加」とみなして False を返す。
-
     ネットワークエラーや JSON でないレスポンスなど、不確実な場合は True（参加している前提）とする。
     """
     
