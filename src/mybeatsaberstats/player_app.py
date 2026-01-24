@@ -5,11 +5,10 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 import json
-import re
 from datetime import datetime, timezone
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor, QPalette, QIcon
+from PySide6.QtGui import QColor, QIcon
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -26,7 +25,6 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QProgressDialog,
     QStyledItemDelegate,
-    QStyleOptionViewItem,
 )
 
 from .snapshot import Snapshot, SNAPSHOT_DIR, BASE_DIR, RESOURCES_DIR, StarClearStat
@@ -34,7 +32,7 @@ from .accsaber import AccSaberPlayer, get_accsaber_playlist_map_counts
 from .snapshot_view import SnapshotCompareDialog
 from .snapshot_graph import SnapshotGraphDialog
 from .app import MainWindow as RankingWindow
-from .collector import (
+from .collector.collector import (
     collect_beatleader_star_stats,
     create_snapshot_for_steam_id,
     ensure_global_rank_caches,
@@ -87,7 +85,7 @@ class PercentageBarDelegate(QStyledItemDelegate):
         ratio = max(0.0, min(1.0, ratio))
 
         painter.save()
-        #rect = option.rect.adjusted(2, 2, -2, -2)
+        # rect = option.rect.adjusted(2, 2, -2, -2)
         rect = option.rect.adjusted(1, 1, -1, -1)
         bar_width = int(rect.width() * ratio)
         bar_rect = rect.adjusted(0, 0, bar_width - rect.width(), 0)
@@ -184,11 +182,11 @@ class PlayerWindow(QMainWindow):
 
         # 1 列目の上段テーブル: ScoreSaber / BeatLeader の各種指標を 1 表にまとめる
         self.main_table = QTableWidget(0, 3, self)
-        self.main_table.setHorizontalHeaderLabels(["Metric", "", ""])
         self.main_table.verticalHeader().setDefaultSectionSize(14)  # 行の高さを少し詰める
-         
+
         # 1 列目の下段テーブル: AccSaber 用の指標
         self.acc_table = QTableWidget(0, 5, self)
+        self.main_table.setHorizontalHeaderLabels(["Metric", "", ""])
         self.acc_table.verticalHeader().setDefaultSectionSize(14)  # 行の高さを少し詰める
         # AccSaber の表であることが分かるよう、ヘッダに明示する
         self.acc_table.setHorizontalHeaderLabels([
@@ -205,7 +203,7 @@ class PlayerWindow(QMainWindow):
         self.star_table.verticalHeader().setDefaultSectionSize(14)  # 行の高さを少し詰める
         self.star_table.setStyleSheet("QTableWidget::item { padding: 0px; margin: 0px; }")
         self.star_table.verticalHeader().setMinimumSectionSize(0)
-        
+
         self.star_table.setHorizontalHeaderLabels([
             "★",
             "Maps",
@@ -218,7 +216,7 @@ class PlayerWindow(QMainWindow):
 
         # 3 列目: BeatLeader 版 ★統計テーブル
         self.bl_star_table = QTableWidget(0, 7, self)
-        self.bl_star_table.verticalHeader().setDefaultSectionSize(14)  # 行の高さを少し詰める   
+        self.bl_star_table.verticalHeader().setDefaultSectionSize(14)  # 行の高さを少し詰める
         self.bl_star_table.setHorizontalHeaderLabels([
             "★",
             "Maps",
@@ -283,7 +281,7 @@ class PlayerWindow(QMainWindow):
 
         # ScoreSaber: Clear Rate (3列目) と Avg ACC (4列目)
         self.star_table.setItemDelegateForColumn(3, perc_clear)
-        
+
         self.star_table.setItemDelegateForColumn(4, perc_acc)
         # BeatLeader: Clear Rate / Avg ACC
         self.bl_star_table.setItemDelegateForColumn(3, perc_clear)
@@ -1067,7 +1065,7 @@ class PlayerWindow(QMainWindow):
 
             avg_acc_text = f"{s.average_acc:.2f}" if getattr(s, "average_acc", None) is not None else ""
             self.star_table.setItem(row, 4, QTableWidgetItem(avg_acc_text))
-            
+
             self.star_table.setItem(row, 5, QTableWidgetItem(str(s.nf_count)))
             item5 = self.star_table.item(row, 5)
             if item5 is not None:
