@@ -162,7 +162,7 @@ def _get_scoresaber_leaderboards_ranked(
             new_total = cached_total + len(append_leaderboards)
             
             max_cached_page = math.ceil(cached_total / per_page)
-            total_pages_new = math.ceil(new_total / per_page)
+            total_pages_new = math.ceil(latest_total / per_page)
             print(f"既存キャッシュの最終ページ: {max_cached_page}, 新しい総ページ数: {total_pages_new}")    
             print(f"取得済み譜面数: {new_total}, 最新総譜面数: {latest_total} ")
             if new_total < latest_total:
