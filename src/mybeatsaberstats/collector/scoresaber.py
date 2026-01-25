@@ -11,6 +11,7 @@ import requests
 from ..scoresaber import ScoreSaberPlayer
 from ..snapshot import BASE_DIR, StarClearStat
 from typing import Optional, Dict, TypedDict, Callable
+from .map_store import MapStore
 
 CACHE_DIR = BASE_DIR / "cache"
 
@@ -19,24 +20,24 @@ SCORESABER_PLAYER_SCORES_URL = "https://scoresaber.com/api/player/{player_id}/sc
 SCORESABER_PLAYER_FULL_URL = "https://scoresaber.com/api/player/{player_id}/full"
 
 
-def _load_cached_rank_maps(path: Path) -> Optional[list[dict]]:
+def _load_cached_rank_maps(path: Path) -> Optional[dict]:
     """
     ScoreSaber等のAPIレスポンスをキャッシュしたJSONファイルからページリストを読み込む。
     壊れている場合や形式違いはNoneを返す。
     """
-    print("Entering _load_cached_rank_maps")
+    print("■Call scoresaber._load_cached_rank_maps")
     if not path.exists():
         return None
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
         leaderboards = raw.get("leaderboards")
-        if isinstance(leaderboards, list):
+        if isinstance(leaderboards, dict):
             return leaderboards
     except Exception:
         return None
     return None
 
-def _save_cached_ranked_maps(path: Path, ranked_maps: list[dict], max_pages: int, total_maps: int) -> None:
+def _save_cached_ranked_maps(path: Path, ranked_maps: dict, max_pages: int, total_maps: int) -> None:
     """
     ページリストをキャッシュファイル(JSON)として保存する。
     """
@@ -90,7 +91,7 @@ def _save_cached_pages(path: Path, pages: list[dict]) -> None:
 def _get_scoresaber_leaderboards_ranked(
     session: requests.Session,
     progress: Optional[Callable[[int, Optional[int]], None]] = None,
-) -> list[dict]:
+) -> dict:
     """ScoreSaber の Ranked leaderboards をキャッシュ付きで全件取得する。
 
     progress が指定されている場合は、0.0〜1.0 の範囲で簡易的に進捗をコールバックする。
@@ -101,22 +102,22 @@ def _get_scoresaber_leaderboards_ranked(
 
     # コンソール出力は日本語、画面表示は英語
     print("ScoreSaberのRanked譜面をキャッシュ付きで取得中...")
-    leaderboards: list[dict] = []
+    leaderboards = {}
+    
     cached_leaderboards = _load_cached_rank_maps(cache_path)
     print(f"既存のScoreSaberリーダーボードキャッシュを読み込み完了。{len(cached_leaderboards) if cached_leaderboards is not None else 0}件")
 
     #すべての譜面データのidを格納するdicationaryを作成
-    existing_lb_ids = {}
+    #existing_lb_ids = {}
     if cached_leaderboards is not None:
-        # 重複を省くため、IDをキーにした辞書に格納
-        for lb in cached_leaderboards:
-            lb_id = lb.get("id")
-            if existing_lb_ids.get(lb_id) is None:
-                existing_lb_ids[lb_id] = lb
-                leaderboards.append(lb)
-    
-    print("既存のScoreSaberリーダーボードキャッシュを読み込み中...")
+        leaderboards = cached_leaderboards
+        # # 重複を省くため、IDをキーにした辞書に格納
+        # for lb in cached_leaderboards:
+        #     lb_id = lb.get("id")
+        #     if leaderboards.get(lb_id) is None:
+        #         leaderboards[lb_id] = lb
 
+    
     # キャッシュから既存譜面データを読み込み
     cached_total = len(leaderboards) #load_cached_ranked_maps(cached_leaderboards, leaderboards, existing_lb_ids)
     latest_total = 0
@@ -156,9 +157,9 @@ def _get_scoresaber_leaderboards_ranked(
             # total が増えている場合は、キャッシュ済みの最後のページ以降だけを追加取得する
             print(f"ScoreSaberリーダーボードに新しい譜面が追加されています。{latest_total - cached_total}件の差分を取得し、キャッシュを更新します...")                
            
-            append_leaderboards = []
+            append_leaderboards : dict = {}
             data_lbs = data.get("leaderboards") or []
-            add_leaderboards(append_leaderboards, existing_lb_ids, data_lbs)
+            add_leaderboards(append_leaderboards, leaderboards, data_lbs)
             new_total = cached_total + len(append_leaderboards)
             
             max_cached_page = math.ceil(cached_total / per_page)
@@ -193,7 +194,7 @@ def _get_scoresaber_leaderboards_ranked(
                         data_page = resp_page.json()
                         data_lbs = data_page.get("leaderboards") or []
                         
-                        add_leaderboards(append_leaderboards, existing_lb_ids, data_lbs)
+                        add_leaderboards(append_leaderboards, leaderboards, data_lbs)
                         new_total = cached_total + len(append_leaderboards)
                             # マップ数が一致した場合は終了
                         if new_total >= latest_total:
@@ -218,9 +219,9 @@ def _get_scoresaber_leaderboards_ranked(
                 print("ScoreSaberリーダーボードの保存中...")
                 # キャッシュを保存
                 try:
-                    leaderboards[:0] = append_leaderboards
+                    leaderboards.update(append_leaderboards)
                     # leaderboardsをidの降順でソートする
-                    leaderboards.sort(key=lambda x: x.get("id", 0), reverse=True)
+                    leaderboards :dict = dict(sorted(leaderboards.items(), key=lambda x: x[1].get("id", 0), reverse=True)   )
 
                     _save_cached_ranked_maps(cache_path, leaderboards, \
                                                 max_pages=total_pages_new, \
@@ -245,11 +246,11 @@ def _get_scoresaber_leaderboards_ranked(
     print("ScoreSaberリーダーボードのキャッシュは最新です。②")
     return leaderboards
 
-def add_leaderboards(leaderboards, existing_lb_ids, data_lbs):    
+def add_leaderboards(leaderboards: dict, existing_lb_ids: dict, data_lbs: list):    
     for lb in data_lbs:
         lb_id = lb.get("id")
         if lb_id not in existing_lb_ids:
-            leaderboards.append(lb)
+            leaderboards[lb_id] = lb
             existing_lb_ids[lb_id] = lb
 
 def _get_scoresaber_player_scores_old(
@@ -823,8 +824,10 @@ def _collect_star_stats_from_scoresaber(scoresaber_id: str, session: requests.Se
     star_map_count: dict[int, int] = defaultdict(int)
     leaderboard_star_bucket: dict[str, int] = {}
 
-    leaderboards = _get_scoresaber_leaderboards_ranked(session)
-    for lb in leaderboards:
+    leaderboards: dict = _get_scoresaber_leaderboards_ranked(session)
+    print(f"取得した Ranked リーダーボード件数: {len(leaderboards)}")
+
+    for lb in leaderboards.values():
         # 念のため ranked フラグを確認
         if lb.get("ranked") is False:
             continue
@@ -903,10 +906,21 @@ def _collect_star_stats_from_scoresaber(scoresaber_id: str, session: requests.Se
         if lb_id_raw is None:
             continue
         lb_id = str(lb_id_raw)
+
+        map_store = MapStore()
+        ss_ranked_maps = map_store.ss_ranked_maps
+        if ss_ranked_maps is None:
+            print("ScoreSaber Ranked マップ情報が MapStore から取得できません。")
+        if lb_id  in ss_ranked_maps.keys():
+            #print(f"ScoreSaber Ranked マップ情報を取得 leaderboard ID: {lb_id}")
+            leaderboard = ss_ranked_maps[lb_id]
+
+        #print(f"処理中 leaderboard ID: {lb_id_raw} ranked={rank_leaderboard.get('ranked')} stars={rank_leaderboard.get('stars')}")
         tmp_stars = leaderboard.get("stars")  # or diff.get("stars")
         ranked_flag = leaderboard.get("ranked")
         if ranked_flag is False:
             continue
+        #print(f"●処理中 leaderboard ID: {lb_id} ranked={ranked_flag} stars={tmp_stars}")
 
         # if lb_id == "685895" or lb_id == "682135":
         #     print(f"●処理中 leaderboard ID: {lb_id}")
@@ -953,8 +967,8 @@ def _collect_star_stats_from_scoresaber(scoresaber_id: str, session: requests.Se
         else:
             state["clear"] = True
             
-            if star_bucket == 11:
-                print(f"★クリア済み leaderboard ID: {lb_id} 星: {star_bucket} songName: {leaderboard.get('songName')}")
+            # if star_bucket == 11:
+            #     print(f"★クリア済み leaderboard ID: {lb_id} 星: {star_bucket} songName: {leaderboard.get('songName')}")
             
             # print(f"★クリア済み leaderboard ID: {lb_id} 星: {star_bucket}")
 
