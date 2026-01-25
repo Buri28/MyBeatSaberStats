@@ -995,7 +995,6 @@ def collect_beatleader_star_stats(beatleader_id: str, session: Optional[requests
             state["ss"] = True
         else:
             state["clear"] = True
-
             # NF/SS なしスコアの精度(%)を best_acc として保持
             acc = _extract_beatleader_accuracy(score_info) if isinstance(score_info, dict) else None
             if acc is not None:

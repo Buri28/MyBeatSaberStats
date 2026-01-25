@@ -53,6 +53,24 @@ def _save_cached_ranked_maps(path: Path, ranked_maps: list[dict], max_pages: int
     except Exception:
         return
 
+def _save_cached_player_scores(path: Path, scores: dict) -> None:
+    """
+    ページリストをキャッシュファイル(JSON)として保存する。
+    """
+    print("Entering _save_cached_player_scores")
+    # score_idsをキーで降順ソート
+    scores = dict(sorted(scores.items(), key=lambda item: item[0], reverse=True))
+    payload = {
+        "fetched_at": datetime.utcnow().isoformat() + "Z",
+        "total_play_count": len(scores),
+        "scores": scores,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        return
+
 def _save_cached_pages(path: Path, pages: list[dict]) -> None:
     """
     ページリストをキャッシュファイル(JSON)として保存する。
@@ -233,8 +251,8 @@ def add_leaderboards(leaderboards, existing_lb_ids, data_lbs):
         if lb_id not in existing_lb_ids:
             leaderboards.append(lb)
             existing_lb_ids[lb_id] = lb
-        
-def _get_scoresaber_player_scores(
+
+def _get_scoresaber_player_scores_old(
     scoresaber_id: str,
     session: requests.Session,
     progress: Optional[Callable[[int, Optional[int]], None]] = None,
@@ -456,6 +474,163 @@ def _get_scoresaber_player_scores(
     return scores
 
 
+def _get_scoresaber_player_scores(
+    scoresaber_id: str,
+    session: requests.Session,
+    progress: Optional[Callable[[int, Optional[int]], None]] = None,
+) -> list[dict]:
+    """ScoreSaber のプレイヤースコアをキャッシュ付きで全件取得する。
+
+    progress が与えられた場合、現在のページ番号と推定最大ページ数を通知する。
+    """
+
+    cache_path = CACHE_DIR / f"scoresaber_player_scores_{scoresaber_id}.json"
+    cache_path2 = CACHE_DIR / f"scoresaber_player_scores2_{scoresaber_id}.json"
+    # スコアIDのDictonaryを作成して重複を排除
+    score_ids = {}
+
+    print(f"ScoreSaberのキャッシュ読み込み: {scoresaber_id}")
+    
+    cached_pages = None
+    cached_scores = None
+    if Path.exists(cache_path2):
+        cached_scores = _load_cached_player_scores(cache_path2)
+    else:
+        cached_pages = _load_cached_pages(cache_path)
+
+    scores: list[dict] = []
+    pages: list[dict] = []
+    if cached_pages is not None:
+        # キャッシュからスコアを抽出
+        print(f"ScoreSaberのキャッシュ読み込み成功: {scoresaber_id} ページ数: {len(cached_pages)}")
+        for page_obj in cached_pages:
+            if not isinstance(page_obj, dict):
+                continue
+            data = page_obj.get("data") or {}
+            pages.append(page_obj)
+            items = data.get("playerScores") 
+            print(f"ScoreSaberのキャッシュ読み込み中: {scoresaber_id} ページデータ件数: {len(items) if isinstance(items, list) else 0}")
+            if isinstance(items, list):
+                for it in items:
+                    scoreDict =  it.get("score")
+                    if not isinstance(scoreDict, dict):
+                        continue
+                    score_id = scoreDict.get("id")
+                    if score_id not in score_ids:
+                        score_ids[score_id] = it
+                    scores.append(it)
+    if cached_scores is not None:
+        print(f"ScoreSaberのキャッシュ読み込み成功: {scoresaber_id} スコア件数: {len(cached_scores)}")
+        for it in cached_scores.values():
+            scoreDict =  it.get("score")
+            if not isinstance(scoreDict, dict):
+                continue
+            score_id = scoreDict.get("id")
+            if score_id not in score_ids:
+                score_ids[score_id] = it
+            scores.append(it)
+
+    print(f"ScoreSaberのキャッシュ読み込み完了: {scoresaber_id} 件数: {len(score_ids)}")
+
+    append_pages: list[dict] = []
+    limit_param = 100
+    latest_total = 0
+    try:
+        url = SCORESABER_PLAYER_SCORES_URL.format(player_id=scoresaber_id)
+        params_check = {"limit": str(limit_param), "sort": "recent", "page": "1"}
+        resp = session.get(url, params=params_check, timeout=10)
+        print(f"最新スコアチェック... URL: {resp.url} params: {params_check}")
+        if resp.status_code != 404:
+            resp.raise_for_status()
+            data = resp.json()
+            items = data.get("playerScores") 
+            # metadataからtotalを取得
+            metadata = data.get("metadata") 
+            latest_total = metadata.get("total")
+            print(f"最新スコアの総譜面数: {latest_total} for {scoresaber_id}")
+            append_pages.append({"page": 1, "params": params_check, "data": data})
+
+            for item in items:
+                scoreDict =  item.get("score")
+                if not isinstance(scoreDict, dict):
+                    continue
+                score_id = scoreDict.get("id")
+                if score_id not in score_ids:
+                    score_ids[score_id] = item
+    except Exception:  # noqa: BLE001
+        # If anything goes wrong during the freshness check, fall back to cached data
+        pass
+
+    if progress is not None:
+        # キャッシュ読み込み時は 1 ページのみとして通知
+        progress(1, 1)
+    
+    page = 1
+    max_pages_sc: int | None = None
+
+    while True:
+        url = SCORESABER_PLAYER_SCORES_URL.format(player_id=scoresaber_id)
+        params = {
+            "limit": str(limit_param),
+            "sort": "recent",
+            "page": str(page),
+        }
+        print(f"ScoreSaberのキャッシュ取得API呼び出し: {scoresaber_id} ページ: {page}")
+        try:
+            resp = session.get(url, params=params, timeout=10)
+            print(f"Fetching ScoreSaber player scores page {page} for star stats... URL: {resp.url} params: {params}")
+            if resp.status_code == 404:
+                break
+            resp.raise_for_status()
+        except Exception:  # noqa: BLE001
+            break
+
+        try:
+            data = resp.json()
+        except Exception:  # noqa: BLE001
+            break
+
+        append_pages.append({"page": page, "params": params, "data": data})
+
+        items = data.get("playerScores")
+        if isinstance(items, list):
+            for it in items:
+                scoreDict =  it.get("score")
+                if not isinstance(scoreDict, dict):
+                    continue
+                score_id = scoreDict.get("id")
+                if score_id not in score_ids:
+                    score_ids[score_id] = it
+                    scores.append(it)
+        
+        print(f"ScoreSaberのキャッシュ取得中: {scoresaber_id} ページ: {page} 最新譜面数: {latest_total}  取得件数: {len(items)} 総件数: {len(score_ids)}")
+
+        # ページ進捗をコールバックで通知
+        if progress is not None:
+            progress(page, max_pages_sc)
+        if latest_total <= len(score_ids):
+            print("ScoreSaberのキャッシュ取得完了条件に達しました。総譜面数に到達しました。" f"ページ: {page} 総件数: {len(score_ids)}")
+            break
+        if len(items) < limit_param or (max_pages_sc is not None and page >= max_pages_sc):
+            # print文は日本語で
+            print("ScoreSaberのキャッシュ取得完了条件に達しました。" f"ページ: {page} アイテム数: {len(items)}")
+            break
+
+        page += 1
+
+    if score_ids:
+        try:
+            _save_cached_player_scores(cache_path2, score_ids)
+            
+            if cached_pages is not None:
+                pages[:0] = append_pages
+                _save_cached_pages(cache_path, pages)
+        except Exception:  # noqa: BLE001
+            pass
+    print(f"ScoreSaberのキャッシュ返却: {scoresaber_id} 件数: {len(score_ids)} scores件数: {len(scores)}")
+    return scores
+
+
 # def _get_scoresaber_player_scores(scoresaber_id: str, session: requests.Session, progress: Optional[Callable[[int, Optional[int]], None]] = None) -> list[dict]:
 #     """ScoreSaber のプレイヤースコアをキャッシュ付きで全件取得する。
 
@@ -550,6 +725,24 @@ def _load_cached_pages(path: Path) -> Optional[list[dict]]:
         if isinstance(pages, list):
             # 各要素は dict 想定だが、型が怪しいものは後段で弾く
             return pages
+    except Exception:  # noqa: BLE001
+        return None
+    return None
+def _load_cached_player_scores(path: Path) -> Optional[dict]:
+    """共通のプレイヤースコアキャッシュローダー。
+
+    フォーマット: {"fetched_at": str, "total_play_count": int, "scores": {score_id: score_dict, ...}}
+    という形を想定し、scores dict を返す。
+    壊れたファイルや形式違いの場合は None を返して再取得させる。
+    """
+
+    if not path.exists():
+        return None
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        scores = raw.get("scores")
+        if isinstance(scores, dict):
+            return scores
     except Exception:  # noqa: BLE001
         return None
     return None
@@ -678,6 +871,7 @@ def _collect_star_stats_from_scoresaber(scoresaber_id: str, session: requests.Se
     star_acc_sum: dict[int, float] = defaultdict(float)
     star_acc_count: dict[int, int] = defaultdict(int)
 
+    # TODO ★はscoresaber_ranked_maps.jsonから取得したい
     # leaderboardId ごとに「クリア有り / NF有り / SS有り」とベスト精度を記録する
     class _PerLeaderboardState(TypedDict):
         star: int
@@ -758,6 +952,10 @@ def _collect_star_stats_from_scoresaber(scoresaber_id: str, session: requests.Se
             state["ss"] = True
         else:
             state["clear"] = True
+            
+            if star_bucket == 11:
+                print(f"★クリア済み leaderboard ID: {lb_id} 星: {star_bucket} songName: {leaderboard.get('songName')}")
+            
             # print(f"★クリア済み leaderboard ID: {lb_id} 星: {star_bucket}")
 
             # NF/SS なしスコアの精度(%)を best_acc として保持
