@@ -24,6 +24,7 @@ from .scoresaber import _get_scoresaber_player_stats
 from .scoresaber import _fetch_scoresaber_player_basic
 from .scoresaber import _load_cached_pages, _save_cached_pages
 from ..beatleader import BeatLeaderPlayer, fetch_player as fetch_bl_player, fetch_players_ranking
+from .map_store import MapStore
 
 from ..accsaber import (
     AccSaberPlayer,
@@ -346,7 +347,8 @@ def ensure_global_rank_caches(
             except Exception:  # noqa: BLE001
                 # Skill AP 詳細取得に失敗しても Overall 自体は使えるようにする
                 pass
-
+            map_store_instance = MapStore()
+            map_store_instance.acc_players = {p.scoresaber_id: p for p in acc_players if p.scoresaber_id}   
             _save_list_cache(acc_rank_path, acc_players)
         except Exception:  # noqa: BLE001
             _step(0.30, "Failed to fetch AccSaber ranking (continuing)...")
@@ -377,6 +379,8 @@ def ensure_global_rank_caches(
                 ss_basic = None
             if ss_basic is not None and ss_basic.country:
                 target_country = ss_basic.country.upper()
+            map_store_instance = MapStore()
+            map_store_instance.ss_basic_info[steam_id] = ss_basic
 
             if not target_country:
                 try:
@@ -385,6 +389,8 @@ def ensure_global_rank_caches(
                     bl_basic = None
                 if bl_basic is not None and bl_basic.country:
                     target_country = bl_basic.country.upper()
+                map_store_instance = MapStore()
+                map_store_instance.bl_basic_info[steam_id] = bl_basic
 
     # ScoreSaber (4000pp 以上) - target_country があればその国に絞る
     try:
@@ -425,12 +431,14 @@ def ensure_global_rank_caches(
                 f"Fetching BeatLeader rankings... (page {page})",
             ),
         )
+
         if target_country:
             bl_players = [
                 p for p in bl_all_players if (p.country or "").upper() == target_country
             ]
         else:
             bl_players = bl_all_players
+
         _save_list_cache(bl_rank_path, bl_players)
     except Exception:  # noqa: BLE001
         _step(0.90, "Failed to fetch BeatLeader rankings (continuing)...")
@@ -1346,7 +1354,7 @@ def create_snapshot_for_steam_id(
     事前に GUI 側の Full Sync などで players_index.json / accsaber_ranking.json を
     用意しておく前提。
     """
-
+    print (f"■Call collector.create_snapshot_for_steam_id: {steam_id}")
     if session is None:
         session = requests.Session()
 
@@ -1367,7 +1375,7 @@ def create_snapshot_for_steam_id(
 
     # ランキングキャッシュが全て揃っているか確認
     # コメントは日本語、画面の表示は英語
-    print("1.ランキングキャッシュの確認...")
+    print("1.1 ランキングキャッシュの確認...")
     need_ranking_fetch = not (ss_rank_path.exists() and bl_rank_path.exists() and acc_rank_path.exists())
 
     if need_ranking_fetch:
@@ -1375,7 +1383,7 @@ def create_snapshot_for_steam_id(
             def _fullsync_progress(message: str, frac: float) -> None:
                 # 0.00 → 0.02 を Full Sync 用に使う
                 _step(0.02 * frac, message)
-            print("1.1 ランキングキャッシュ作成...")
+            print("1.1.1 ランキングキャッシュ作成...")
             ensure_global_rank_caches(session=session, progress=_fullsync_progress, steam_id=steam_id)
         except Exception:  # noqa: BLE001
             # ランキングキャッシュの準備に失敗しても、可能な範囲でスナップショット作成を続行する
@@ -1405,7 +1413,9 @@ def create_snapshot_for_steam_id(
 
         # ScoreSaber のリーダーボード取得中もプログレスバーが動くようにする
         print("2. ScoreSaber Ranked Maps キャッシュ更新...")
-        _get_scoresaber_leaderboards_ranked(session, progress=_ss_leaderboard_progress)
+        leaderboards = _get_scoresaber_leaderboards_ranked(session, progress=_ss_leaderboard_progress)
+        map_store = MapStore()
+        map_store.ss_ranked_maps = leaderboards
     except Exception:  # noqa: BLE001
         pass
 
@@ -1426,23 +1436,28 @@ def create_snapshot_for_steam_id(
             phase_percent = int(phase_frac * 100)
             msg = f"Updating BeatLeader Ranked Maps ({phase_percent}%, page {page_text})..."
             _step(global_ratio, msg)
-
+        print("3. BeatLeader Ranked Maps キャッシュ更新...")
         _get_beatleader_leaderboards_ranked(session, progress=_bl_leaderboard_progress)
     except Exception:  # noqa: BLE001
         pass
 
     # プレイヤーインデックスを読み込み、必要なら API からプレイヤー情報を補完する
+    print("4. プレイヤーインデックスの確認...")
     _step(0.08, "Loading player index...")
     player_index = _load_player_index()
-
+    print("4.1 プレイヤーインデックスの確認完了。")
     # players_index.json がまだ無い / 空の場合は、可能であれば
     # scoresaber_ALL / beatleader_ALL からインデックスを自動再構築する。
     if not player_index:
         try:
             rebuild_player_index_from_global()
             player_index = _load_player_index()
+            print("4.2 プレイヤーインデックスの再構築完了。")
         except Exception:  # noqa: BLE001
             player_index = {}
+    map_store = MapStore()
+    map_store.player_index = player_index
+    
     entry = player_index.get(steam_id)
     if not entry:
         # players_index.json に存在しない場合でも、可能であれば ScoreSaber / BeatLeader
@@ -1453,11 +1468,15 @@ def create_snapshot_for_steam_id(
         if _is_steam_id(steam_id):
             _step(0.10, "Fetching player from ScoreSaber / BeatLeader...")
             try:
+                print("4.3 players_index.json に存在しない SteamID。ScoreSaber から情報取得を試みます...")
                 ss = _fetch_scoresaber_player_basic(steam_id, session)
+                map_store.ss_players[steam_id] = ss
             except Exception:  # noqa: BLE001
                 ss = None
             try:
+                print("4.4 BeatLeader から情報取得を試みます...")
                 bl = fetch_bl_player(steam_id, session=session)
+                map_store.bl_players[steam_id] = bl
             except Exception:  # noqa: BLE001
                 bl = None
 
@@ -1512,10 +1531,12 @@ def create_snapshot_for_steam_id(
 
                 _step(0.15 + 0.05 * frac, msg)
 
+            print("5. ScoreSaber プレイヤースコアキャッシュ更新...")
             _get_scoresaber_player_scores(scoresaber_id, session, progress=_ss_scores_progress)
         except Exception:  # noqa: BLE001
             pass
-
+        
+        print("6. ScoreSaber プレイヤーステータス取得...")
         _step(0.20, "Fetching ScoreSaber player stats...")
         stats = _get_scoresaber_player_stats(scoresaber_id, session)
         if stats:
@@ -1572,14 +1593,16 @@ def create_snapshot_for_steam_id(
                     msg = f"Fetching BeatLeader player scores (page {page}/?)..."
 
                 _step(0.30 + 0.05 * frac, msg)
-
+            print("7. BeatLeader プレイヤースコアキャッシュ更新...")
             _get_beatleader_player_scores(beatleader_id, session, progress=_bl_scores_progress)
         except Exception:  # noqa: BLE001
             pass
-
+        
+        print("8. BeatLeader プレイヤーステータス取得...")
         _step(0.35, "Fetching BeatLeader player stats...")
         bl_stats = _get_beatleader_player_stats(beatleader_id, session)
         if bl_stats:
+            print("8.1 BeatLeader プレイヤーステータス取得完了。")
             # BeatLeader の averageRankedAccuracy は 0.0-1.0 の値なので、百分率に揃えるため 100 倍する。
             try:
                 bl_avg = bl_stats.get("averageRankedAccuracy")
@@ -1605,6 +1628,7 @@ def create_snapshot_for_steam_id(
 
     # AccSaber ランク / プレイ回数: まずは Overall のキャッシュから紐付け。
     # *_rank_global にグローバル順位、*_rank_country に国別順位を保持する。
+    print("9. AccSaber プレイヤーステータス取得...")
     _step(0.40, "Loading AccSaber overall cache...")
     acc_overall = _find_accsaber_for_scoresaber_id(scoresaber_id, session=session) if scoresaber_id else None
     # グローバルランク
@@ -1667,6 +1691,7 @@ def create_snapshot_for_steam_id(
     # True / Standard / Tech は必要になったときだけ API 経由で取得（ベストエフォート）。
     if scoresaber_id:
         try:
+            print("9.1 AccSaber True プレイヤーステータス取得...")
             _step(0.45, "Fetching AccSaber True leaderboard...")
             acc_true = _find_accsaber_skill_for_scoresaber_id(scoresaber_id, fetch_true, session=session)
         except Exception:  # noqa: BLE001
@@ -1677,6 +1702,7 @@ def create_snapshot_for_steam_id(
             acc_true_ap = _parse_ap(getattr(acc_true, "total_ap", ""))
 
         try:
+            print("9.2 AccSaber Standard プレイヤーステータス取得...")
             _step(0.50, "Fetching AccSaber Standard leaderboard...")
             acc_standard = _find_accsaber_skill_for_scoresaber_id(scoresaber_id, fetch_standard, session=session)
         except Exception:  # noqa: BLE001
@@ -1687,6 +1713,7 @@ def create_snapshot_for_steam_id(
             acc_standard_ap = _parse_ap(getattr(acc_standard, "total_ap", ""))
 
         try:
+            print("9.3 AccSaber Tech プレイヤーステータス取得...")
             _step(0.55, "Fetching AccSaber Tech leaderboard...")
             acc_tech = _find_accsaber_skill_for_scoresaber_id(scoresaber_id, fetch_tech, session=session)
         except Exception:  # noqa: BLE001
@@ -1698,6 +1725,7 @@ def create_snapshot_for_steam_id(
 
         # JP 国内順位は accsaber_ranking.json 全体と players_index.json を使って計算する
         try:
+            print("9.4 AccSaber 国内ランク計算...")
             _step(0.60, "Loading AccSaber players for JP ranks...")
             acc_players = _load_accsaber_players()
         except Exception:  # noqa: BLE001
@@ -1766,6 +1794,7 @@ def create_snapshot_for_steam_id(
 
     # ScoreSaber / BeatLeader のスコア一覧から★別統計を集計する（失敗した場合は空リスト）。
     try:
+        print("9.5 ScoreSaber ★別統計集計...")
         _step(0.70, "Collecting ScoreSaber star stats...")
         star_stats: list[StarClearStat] = _collect_star_stats_from_scoresaber(scoresaber_id, session) if scoresaber_id else []
     except Exception:  # noqa: BLE001
@@ -1773,13 +1802,16 @@ def create_snapshot_for_steam_id(
         star_stats = []
 
     try:
+        print("9.6 BeatLeader ★別統計集計...") 
         _step(0.80, "Collecting BeatLeader star stats...")
         beatleader_star_stats: list[StarClearStat] = (
             collect_beatleader_star_stats(beatleader_id, session) if beatleader_id else []
         )
     except Exception:  # noqa: BLE001
         beatleader_star_stats = []
-
+        print("9.6 BeatLeader ★別統計集計完了。")
+    # スナップショットオブジェクトを構築して保存する
+    print("10. スナップショットオブジェクト構築...")
     now = datetime.utcnow().replace(microsecond=0)
 
     snapshot = Snapshot(
@@ -1824,7 +1856,7 @@ def create_snapshot_for_steam_id(
         star_stats=star_stats,
         beatleader_star_stats=beatleader_star_stats,
     )
-
+    print("10.1 スナップショットオブジェクト構築完了。")
     _step(0.90, "Saving snapshot...")
 
     if snapshot_dir is not None:
@@ -1834,6 +1866,7 @@ def create_snapshot_for_steam_id(
     else:
         path = snapshot.save()
 
+    print(f"10.2 スナップショット保存完了: {path}")
     _step(1.0, f"Done: {path.name}")
     return snapshot
 

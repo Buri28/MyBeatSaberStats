@@ -37,6 +37,7 @@ from .collector.collector import (
     create_snapshot_for_steam_id,
     ensure_global_rank_caches,
 )
+from mybeatsaberstats.collector.map_store import MapStore
 
 
 class PercentageBarDelegate(QStyledItemDelegate):
@@ -413,7 +414,12 @@ class PlayerWindow(QMainWindow):
             QApplication.processEvents()
 
         try:
+            # print文は日本語
+            print(f"1.スナップショットを取得中: {steam_id}")
             snapshot = create_snapshot_for_steam_id(steam_id, progress=_on_progress)
+            map_store_instance = MapStore()
+            map_store_instance.snapshots[steam_id] = snapshot
+
         except Exception as exc:  # noqa: BLE001
             # キャンセルによる中断の場合はエラーダイアログを出さずに静かに抜ける
             if not cancelled["value"]:
@@ -665,7 +671,8 @@ class PlayerWindow(QMainWindow):
 
     def reload_snapshots(self) -> None:
         """snapshots フォルダを読み直して、プレイヤー一覧を更新する。"""
-
+        
+        print("■collector.reload_snapshots:スナップショットを再読み込みしています...")
         previous_id = self._current_player_id()
         self._snapshots_by_player.clear()
         self.player_combo.clear()
