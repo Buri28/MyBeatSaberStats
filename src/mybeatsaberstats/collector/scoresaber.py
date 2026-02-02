@@ -253,226 +253,226 @@ def add_leaderboards(leaderboards: dict, existing_lb_ids: dict, data_lbs: list):
             leaderboards[lb_id] = lb
             existing_lb_ids[lb_id] = lb
 
-def _get_scoresaber_player_scores_old(
-    scoresaber_id: str,
-    session: requests.Session,
-    progress: Optional[Callable[[int, Optional[int]], None]] = None,
-) -> list[dict]:
-    """ScoreSaber のプレイヤースコアをキャッシュ付きで全件取得する。
+# def _get_scoresaber_player_scores_old(
+#     scoresaber_id: str,
+#     session: requests.Session,
+#     progress: Optional[Callable[[int, Optional[int]], None]] = None,
+# ) -> list[dict]:
+#     """ScoreSaber のプレイヤースコアをキャッシュ付きで全件取得する。
 
-    progress が与えられた場合、現在のページ番号と推定最大ページ数を通知する。
-    """
+#     progress が与えられた場合、現在のページ番号と推定最大ページ数を通知する。
+#     """
 
-    cache_path = CACHE_DIR / f"scoresaber_player_scores_{scoresaber_id}.json"
+#     cache_path = CACHE_DIR / f"scoresaber_player_scores_{scoresaber_id}.json"
 
-    print(f"ScoreSaberのキャッシュ読み込み: {scoresaber_id}")
-    cached_pages = _load_cached_pages(cache_path)
-    if cached_pages is not None:
-        print(f"ScoreSaberのキャッシュ読み込み成功: {scoresaber_id}")
+#     print(f"ScoreSaberのキャッシュ読み込み: {scoresaber_id}")
+#     cached_pages = _load_cached_pages(cache_path)
+#     if cached_pages is not None:
+#         print(f"ScoreSaberのキャッシュ読み込み成功: {scoresaber_id}")
 
-        # Try to read cached fetched_at timestamp (if available) so we can check
-        # whether there are new "recent" scores to fetch.
-        fetched_at: Optional[datetime] = None
-        try:
-            raw = json.loads(cache_path.read_text(encoding="utf-8"))
-            fa = raw.get("fetched_at")
-            if isinstance(fa, str) and fa:
-                if fa.endswith("Z"):
-                    fa = fa[:-1]
-                fetched_at = datetime.fromisoformat(fa)
-        except Exception:  # noqa: BLE001
-            fetched_at = None
+#         # Try to read cached fetched_at timestamp (if available) so we can check
+#         # whether there are new "recent" scores to fetch.
+#         fetched_at: Optional[datetime] = None
+#         try:
+#             raw = json.loads(cache_path.read_text(encoding="utf-8"))
+#             fa = raw.get("fetched_at")
+#             if isinstance(fa, str) and fa:
+#                 if fa.endswith("Z"):
+#                     fa = fa[:-1]
+#                 fetched_at = datetime.fromisoformat(fa)
+#         except Exception:  # noqa: BLE001
+#             fetched_at = None
 
-        # Aggregate existing cached scores
-        scores: list[dict] = []
-        for page_obj in cached_pages:
-            if not isinstance(page_obj, dict):
-                continue
-            data = page_obj.get("data") or {}
-            items = data.get("playerScores") or data.get("scores") or []
-            if isinstance(items, list):
-                scores.extend(it for it in items if isinstance(it, dict))
+#         # Aggregate existing cached scores
+#         scores: list[dict] = []
+#         for page_obj in cached_pages:
+#             if not isinstance(page_obj, dict):
+#                 continue
+#             data = page_obj.get("data") or {}
+#             items = data.get("playerScores") or data.get("scores") or []
+#             if isinstance(items, list):
+#                 scores.extend(it for it in items if isinstance(it, dict))
 
-        # If this cache was produced with sort=recent and we have a fetched_at,
-        # check page 1 of the API for newer items and fetch new pages if necessary.
-        try:
-            page1 = None
-            for p in cached_pages:
-                if isinstance(p, dict) and p.get("page") == 1:
-                    page1 = p
-                    break
-            sort_is_recent = False
-            limit_param = 100
-            if page1:
-                params_page1 = page1.get("params") or {}
-                if isinstance(params_page1, dict):
-                    if params_page1.get("sort") == "recent":
-                        sort_is_recent = True
-                    if params_page1.get("limit"):
-                        try:
-                            # Ensure we convert to string first to handle non-str types
-                            limit_param = int(str(params_page1.get("limit")))
-                        except Exception:  # noqa: BLE001
-                            limit_param = 100
+#         # If this cache was produced with sort=recent and we have a fetched_at,
+#         # check page 1 of the API for newer items and fetch new pages if necessary.
+#         try:
+#             page1 = None
+#             for p in cached_pages:
+#                 if isinstance(p, dict) and p.get("page") == 1:
+#                     page1 = p
+#                     break
+#             sort_is_recent = False
+#             limit_param = 100
+#             if page1:
+#                 params_page1 = page1.get("params") or {}
+#                 if isinstance(params_page1, dict):
+#                     if params_page1.get("sort") == "recent":
+#                         sort_is_recent = True
+#                     if params_page1.get("limit"):
+#                         try:
+#                             # Ensure we convert to string first to handle non-str types
+#                             limit_param = int(str(params_page1.get("limit")))
+#                         except Exception:  # noqa: BLE001
+#                             limit_param = 100
 
-            if fetched_at is not None and sort_is_recent:
-                url = SCORESABER_PLAYER_SCORES_URL.format(player_id=scoresaber_id)
-                params_check = {"limit": str(limit_param), "sort": "recent", "page": "1"}
-                resp = session.get(url, params=params_check, timeout=10)
-                print(f"最新スコアチェック... URL: {resp.url} params: {params_check}")
-                if resp.status_code != 404:
-                    resp.raise_for_status()
-                    data = resp.json()
-                    items = data.get("playerScores") or data.get("scores") or []
-                    if isinstance(items, list) and items:
-                        first = items[0]
-                        score_obj = first.get("score") if isinstance(first, dict) else first
-                        tstr = None
-                        if isinstance(score_obj, dict):
-                            tstr = score_obj.get("timeSet")
+#             if fetched_at is not None and sort_is_recent:
+#                 url = SCORESABER_PLAYER_SCORES_URL.format(player_id=scoresaber_id)
+#                 params_check = {"limit": str(limit_param), "sort": "recent", "page": "1"}
+#                 resp = session.get(url, params=params_check, timeout=10)
+#                 print(f"最新スコアチェック... URL: {resp.url} params: {params_check}")
+#                 if resp.status_code != 404:
+#                     resp.raise_for_status()
+#                     data = resp.json()
+#                     items = data.get("playerScores") or data.get("scores") or []
+#                     if isinstance(items, list) and items:
+#                         first = items[0]
+#                         score_obj = first.get("score") if isinstance(first, dict) else first
+#                         tstr = None
+#                         if isinstance(score_obj, dict):
+#                             tstr = score_obj.get("timeSet")
 
-                        if isinstance(tstr, str):
-                            try:
-                                tcmp = datetime.fromisoformat(tstr[:-1]) if tstr.endswith("Z") else datetime.fromisoformat(tstr)
-                            except Exception:
-                                tcmp = None
+#                         if isinstance(tstr, str):
+#                             try:
+#                                 tcmp = datetime.fromisoformat(tstr[:-1]) if tstr.endswith("Z") else datetime.fromisoformat(tstr)
+#                             except Exception:
+#                                 tcmp = None
 
-                            if tcmp is not None and tcmp > fetched_at:
-                                new_pages: list[dict] = []
-                                max_new_pages = 50
-                                for page_num in range(1, max_new_pages + 1):
-                                    params_page = {"limit": str(limit_param), "sort": "recent", "page": str(page_num)}
-                                    try:
-                                        resp_page = session.get(url, params=params_page, timeout=10)
-                                        if resp_page.status_code == 404:
-                                            break
-                                        resp_page.raise_for_status()
-                                    except Exception:  # noqa: BLE001
-                                        break
+#                             if tcmp is not None and tcmp > fetched_at:
+#                                 new_pages: list[dict] = []
+#                                 max_new_pages = 50
+#                                 for page_num in range(1, max_new_pages + 1):
+#                                     params_page = {"limit": str(limit_param), "sort": "recent", "page": str(page_num)}
+#                                     try:
+#                                         resp_page = session.get(url, params=params_page, timeout=10)
+#                                         if resp_page.status_code == 404:
+#                                             break
+#                                         resp_page.raise_for_status()
+#                                     except Exception:  # noqa: BLE001
+#                                         break
 
-                                    try:
-                                        data_page = resp_page.json()
-                                    except Exception:  # noqa: BLE001
-                                        break
+#                                     try:
+#                                         data_page = resp_page.json()
+#                                     except Exception:  # noqa: BLE001
+#                                         break
 
-                                    items_page = data_page.get("playerScores") or data_page.get("scores") or []
-                                    if not items_page:
-                                        break
+#                                     items_page = data_page.get("playerScores") or data_page.get("scores") or []
+#                                     if not items_page:
+#                                         break
 
-                                    first_page = items_page[0]
-                                    score_first_page = first_page.get("score") if isinstance(first_page, dict) else first_page
-                                    tfirst = None
-                                    if isinstance(score_first_page, dict):
-                                        tfirst = score_first_page.get("timeSet")
-                                    if isinstance(tfirst, str):
-                                        try:
-                                            tfirst_dt = datetime.fromisoformat(tfirst[:-1]) if tfirst.endswith("Z") else datetime.fromisoformat(tfirst)
-                                        except Exception:
-                                            tfirst_dt = None
-                                    else:
-                                        tfirst_dt = None
+#                                     first_page = items_page[0]
+#                                     score_first_page = first_page.get("score") if isinstance(first_page, dict) else first_page
+#                                     tfirst = None
+#                                     if isinstance(score_first_page, dict):
+#                                         tfirst = score_first_page.get("timeSet")
+#                                     if isinstance(tfirst, str):
+#                                         try:
+#                                             tfirst_dt = datetime.fromisoformat(tfirst[:-1]) if tfirst.endswith("Z") else datetime.fromisoformat(tfirst)
+#                                         except Exception:
+#                                             tfirst_dt = None
+#                                     else:
+#                                         tfirst_dt = None
 
-                                    if tfirst_dt is None or not (tfirst_dt > fetched_at):
-                                        break
+#                                     if tfirst_dt is None or not (tfirst_dt > fetched_at):
+#                                         break
 
-                                    new_pages.append({"page": page_num, "params": params_page, "data": data_page})
+#                                     new_pages.append({"page": page_num, "params": params_page, "data": data_page})
 
-                                if new_pages:
-                                    last_new_page = new_pages[-1].get("page") or 0
-                                    remaining_cached = [p for p in cached_pages if (p.get("page") or 0) > last_new_page]
-                                    pages_merged = new_pages + remaining_cached
-                                    try:
-                                        _save_cached_pages(cache_path, pages_merged)
-                                    except Exception:  # noqa: BLE001
-                                        pass
+#                                 if new_pages:
+#                                     last_new_page = new_pages[-1].get("page") or 0
+#                                     remaining_cached = [p for p in cached_pages if (p.get("page") or 0) > last_new_page]
+#                                     pages_merged = new_pages + remaining_cached
+#                                     try:
+#                                         _save_cached_pages(cache_path, pages_merged)
+#                                     except Exception:  # noqa: BLE001
+#                                         pass
 
-                                    scores = []
-                                    for page_obj in pages_merged:
-                                        if not isinstance(page_obj, dict):
-                                            continue
-                                        data = page_obj.get("data") or {}
-                                        items = data.get("playerScores") or data.get("scores") or []
-                                        if isinstance(items, list):
-                                            scores.extend(it for it in items if isinstance(it, dict))
+#                                     scores = []
+#                                     for page_obj in pages_merged:
+#                                         if not isinstance(page_obj, dict):
+#                                             continue
+#                                         data = page_obj.get("data") or {}
+#                                         items = data.get("playerScores") or data.get("scores") or []
+#                                         if isinstance(items, list):
+#                                             scores.extend(it for it in items if isinstance(it, dict))
 
-        except Exception:  # noqa: BLE001
-            # If anything goes wrong during the freshness check, fall back to cached data
-            pass
+#         except Exception:  # noqa: BLE001
+#             # If anything goes wrong during the freshness check, fall back to cached data
+#             pass
 
-        if progress is not None:
-            # キャッシュ読み込み時は 1 ページのみとして通知
-            progress(1, 1)
-        print(f"ScoreSaberのキャッシュ返却: {scoresaber_id} 件数: {len(scores)}")
-        return scores
+#         if progress is not None:
+#             # キャッシュ読み込み時は 1 ページのみとして通知
+#             progress(1, 1)
+#         print(f"ScoreSaberのキャッシュ返却: {scoresaber_id} 件数: {len(scores)}")
+#         return scores
 
-    pages: list[dict] = []
-    scores: list[dict] = []
+#     pages: list[dict] = []
+#     scores: list[dict] = []
 
-    page = 1
-    max_pages_sc: int | None = None
-    page_size = 100
+#     page = 1
+#     max_pages_sc: int | None = None
+#     page_size = 100
 
-    while True:
-        url = SCORESABER_PLAYER_SCORES_URL.format(player_id=scoresaber_id)
-        params = {
-            "limit": str(page_size),
-            "sort": "recent",
-            "page": str(page),
-        }
-        print(f"ScoreSaberのキャッシュ取得API呼び出し: {scoresaber_id} ページ: {page}")
-        try:
-            resp = session.get(url, params=params, timeout=10)
-            print(f"Fetching ScoreSaber player scores page {page} for star stats... URL: {resp.url} params: {params}")
-            if resp.status_code == 404:
-                break
-            resp.raise_for_status()
-        except Exception:  # noqa: BLE001
-            break
+#     while True:
+#         url = SCORESABER_PLAYER_SCORES_URL.format(player_id=scoresaber_id)
+#         params = {
+#             "limit": str(page_size),
+#             "sort": "recent",
+#             "page": str(page),
+#         }
+#         print(f"ScoreSaberのキャッシュ取得API呼び出し: {scoresaber_id} ページ: {page}")
+#         try:
+#             resp = session.get(url, params=params, timeout=10)
+#             print(f"Fetching ScoreSaber player scores page {page} for star stats... URL: {resp.url} params: {params}")
+#             if resp.status_code == 404:
+#                 break
+#             resp.raise_for_status()
+#         except Exception:  # noqa: BLE001
+#             break
 
-        try:
-            data = resp.json()
-        except Exception:  # noqa: BLE001
-            break
+#         try:
+#             data = resp.json()
+#         except Exception:  # noqa: BLE001
+#             break
 
-        pages.append({"page": page, "params": params, "data": data})
+#         pages.append({"page": page, "params": params, "data": data})
 
-        if max_pages_sc is None:
-            meta = data.get("metadata") or {}
-            try:
-                total = int(meta.get("total", 0))
-                per_page = int(meta.get("itemsPerPage", page_size)) or page_size
-            except (TypeError, ValueError):
-                total = 0
-                per_page = page_size
+#         if max_pages_sc is None:
+#             meta = data.get("metadata") or {}
+#             try:
+#                 total = int(meta.get("total", 0))
+#                 per_page = int(meta.get("itemsPerPage", page_size)) or page_size
+#             except (TypeError, ValueError):
+#                 total = 0
+#                 per_page = page_size
 
-            if total > 0 and per_page > 0:
-                computed_pages = math.ceil(total / per_page)
-                max_pages_sc = min(computed_pages, 300)
-            else:
-                max_pages_sc = 100
+#             if total > 0 and per_page > 0:
+#                 computed_pages = math.ceil(total / per_page)
+#                 max_pages_sc = min(computed_pages, 300)
+#             else:
+#                 max_pages_sc = 100
 
-        items = data.get("playerScores") or data.get("scores") or []
-        if not items:
-            break
-        if isinstance(items, list):
-            scores.extend(it for it in items if isinstance(it, dict))
+#         items = data.get("playerScores") or data.get("scores") or []
+#         if not items:
+#             break
+#         if isinstance(items, list):
+#             scores.extend(it for it in items if isinstance(it, dict))
 
-        # ページ進捗をコールバックで通知
-        if progress is not None:
-            progress(page, max_pages_sc)
+#         # ページ進捗をコールバックで通知
+#         if progress is not None:
+#             progress(page, max_pages_sc)
 
-        if len(items) < page_size or (max_pages_sc is not None and page >= max_pages_sc):
-            break
+#         if len(items) < page_size or (max_pages_sc is not None and page >= max_pages_sc):
+#             break
 
-        page += 1
+#         page += 1
 
-    if pages:
-        try:
-            _save_cached_pages(cache_path, pages)
-        except Exception:  # noqa: BLE001
-            pass
+#     if pages:
+#         try:
+#             _save_cached_pages(cache_path, pages)
+#         except Exception:  # noqa: BLE001
+#             pass
 
-    return scores
+#     return scores
 
 
 def _get_scoresaber_player_scores(
@@ -485,8 +485,8 @@ def _get_scoresaber_player_scores(
     progress が与えられた場合、現在のページ番号と推定最大ページ数を通知する。
     """
 
+    # cache_path = CACHE_DIR / f"scoresaber_player_scores_{scoresaber_id}.json"
     cache_path = CACHE_DIR / f"scoresaber_player_scores_{scoresaber_id}.json"
-    cache_path2 = CACHE_DIR / f"scoresaber_player_scores2_{scoresaber_id}.json"
     # スコアIDのDictonaryを作成して重複を排除
     score_ids = {}
 
@@ -494,32 +494,32 @@ def _get_scoresaber_player_scores(
     
     cached_pages = None
     cached_scores = None
-    if Path.exists(cache_path2):
-        cached_scores = _load_cached_player_scores(cache_path2)
-    else:
-        cached_pages = _load_cached_pages(cache_path)
+    if Path.exists(cache_path):
+        cached_scores = _load_cached_player_scores(cache_path)
+    # else:
+    #     cached_pages = _load_cached_pages(cache_path)
 
     scores: list[dict] = []
     pages: list[dict] = []
-    if cached_pages is not None:
-        # キャッシュからスコアを抽出
-        print(f"ScoreSaberのキャッシュ読み込み成功: {scoresaber_id} ページ数: {len(cached_pages)}")
-        for page_obj in cached_pages:
-            if not isinstance(page_obj, dict):
-                continue
-            data = page_obj.get("data") or {}
-            pages.append(page_obj)
-            items = data.get("playerScores") 
-            print(f"ScoreSaberのキャッシュ読み込み中: {scoresaber_id} ページデータ件数: {len(items) if isinstance(items, list) else 0}")
-            if isinstance(items, list):
-                for it in items:
-                    scoreDict =  it.get("score")
-                    if not isinstance(scoreDict, dict):
-                        continue
-                    score_id = scoreDict.get("id")
-                    if score_id not in score_ids:
-                        score_ids[score_id] = it
-                    scores.append(it)
+    # if cached_pages is not None:
+    #     # キャッシュからスコアを抽出
+    #     print(f"ScoreSaberのキャッシュ読み込み成功: {scoresaber_id} ページ数: {len(cached_pages)}")
+    #     for page_obj in cached_pages:
+    #         if not isinstance(page_obj, dict):
+    #             continue
+    #         data = page_obj.get("data") or {}
+    #         pages.append(page_obj)
+    #         items = data.get("playerScores") 
+    #         print(f"ScoreSaberのキャッシュ読み込み中: {scoresaber_id} ページデータ件数: {len(items) if isinstance(items, list) else 0}")
+    #         if isinstance(items, list):
+    #             for it in items:
+    #                 scoreDict =  it.get("score")
+    #                 if not isinstance(scoreDict, dict):
+    #                     continue
+    #                 score_id = scoreDict.get("id")
+    #                 if score_id not in score_ids:
+    #                     score_ids[score_id] = it
+    #                 scores.append(it)
     if cached_scores is not None:
         print(f"ScoreSaberのキャッシュ読み込み成功: {scoresaber_id} スコア件数: {len(cached_scores)}")
         for it in cached_scores.values():
@@ -621,11 +621,11 @@ def _get_scoresaber_player_scores(
 
     if score_ids:
         try:
-            _save_cached_player_scores(cache_path2, score_ids)
+            _save_cached_player_scores(cache_path, score_ids)
             
-            if cached_pages is not None:
-                pages[:0] = append_pages
-                _save_cached_pages(cache_path, pages)
+            # if cached_pages is not None:
+            #     pages[:0] = append_pages
+            #     _save_cached_pages(cache_path, pages)
         except Exception:  # noqa: BLE001
             pass
     print(f"ScoreSaberのキャッシュ返却: {scoresaber_id} 件数: {len(score_ids)} scores件数: {len(scores)}")
@@ -874,7 +874,6 @@ def _collect_star_stats_from_scoresaber(scoresaber_id: str, session: requests.Se
     star_acc_sum: dict[int, float] = defaultdict(float)
     star_acc_count: dict[int, int] = defaultdict(int)
 
-    # TODO ★はscoresaber_ranked_maps.jsonから取得したい
     # leaderboardId ごとに「クリア有り / NF有り / SS有り」とベスト精度を記録する
     class _PerLeaderboardState(TypedDict):
         star: int
@@ -920,33 +919,14 @@ def _collect_star_stats_from_scoresaber(scoresaber_id: str, session: requests.Se
         ranked_flag = leaderboard.get("ranked")
         if ranked_flag is False:
             continue
-        #print(f"●処理中 leaderboard ID: {lb_id} ranked={ranked_flag} stars={tmp_stars}")
 
-        # if lb_id == "685895" or lb_id == "682135":
-        #     print(f"●処理中 leaderboard ID: {lb_id}")
-
-        # Ranked マップ一覧に存在しない ID は無視（非 Ranked など）
-        # if lb_id not in leaderboard_star_bucket:
-        #     # print(f"スキップ non-ranked leaderboard ID: {lb_id}")
-        #     continue
-
-        # if lb_id == "685895" or lb_id == "682135":
-        #     print(f"●2 処理中 leaderboard ID: {lb_id}")
         star_bucket = -1
         if tmp_stars is not None:
             star_bucket: int = int(tmp_stars)
 
         if star_bucket < 0:
             continue
-        # star_bucket = leaderboard_star_bucket[lb_id]
-        # if star_bucket != 11:
-        #     # TODO
-        #     continue
-        # if lb_id == "685895" or lb_id == "682135":
-            # print(f"●3 処理中 leaderboard ID: {lb_id}")
-        # print(f"処理中 leaderboard ID: {lb_id} 星: {star_bucket}")
-        # if lb_id == "685895" or lb_id == "685896" or lb_id == "682135":
-        #     print(f"★処理中 leaderboard ID: {lb_id} 星: {star_bucket}")
+
         state = per_leaderboard.get(lb_id)
         if state is None:
             state = _PerLeaderboardState(star=star_bucket, clear=False, nf=False, ss=False, best_acc=None)
