@@ -23,6 +23,10 @@ from .scoresaber import _get_scoresaber_leaderboards_ranked
 from .scoresaber import _get_scoresaber_player_stats
 from .scoresaber import _fetch_scoresaber_player_basic
 from .scoresaber import _load_cached_pages, _save_cached_pages
+from .beatleader import (
+    _get_beatleader_player_scores as _bl_get_beatleader_player_scores,
+    collect_beatleader_star_stats as _bl_collect_beatleader_star_stats,
+)
 from ..beatleader import BeatLeaderPlayer, fetch_player as fetch_bl_player, fetch_players_ranking
 from .map_store import MapStore
 
@@ -49,9 +53,9 @@ CACHE_DIR = BASE_DIR / "cache"
 SCORESABER_MIN_PP_GLOBAL = 4000.0
 BEATLEADER_MIN_PP_GLOBAL = 5000.0
 
-SCORESABER_LEADERBOARDS_URL = "https://scoresaber.com/api/leaderboards"
-SCORESABER_PLAYER_SCORES_URL = "https://scoresaber.com/api/player/{player_id}/scores"
-SCORESABER_PLAYER_FULL_URL = "https://scoresaber.com/api/player/{player_id}/full"
+# SCORESABER_LEADERBOARDS_URL = "https://scoresaber.com/api/leaderboards"
+# SCORESABER_PLAYER_SCORES_URL = "https://scoresaber.com/api/player/{player_id}/scores"
+# SCORESABER_PLAYER_FULL_URL = "https://scoresaber.com/api/player/{player_id}/full"
 
 BEATLEADER_LEADERBOARDS_URL = "https://api.beatleader.xyz/leaderboards"
 BL_BASE_URL = "https://api.beatleader.xyz"
@@ -671,126 +675,17 @@ def _get_beatleader_player_scores(
     session: requests.Session,
     progress: Optional[Callable[[int, Optional[int]], None]] = None,
 ) -> list[dict]:
-    """BeatLeader のプレイヤースコアをキャッシュ付きで全件取得する。
+    """BeatLeader のプレイヤースコア取得を beatleader.py 側の実装に委譲するラッパー。
 
-    /player/{id}/scores はページングAPIなので、ScoreSaber と同様に
-    limit(count) と page を付けて複数ページを取得する。
-    旧バージョンの「単純なリストキャッシュ」が残っている場合は無効として扱い、
-    新しいページ形式のキャッシュで上書きする。
+    実際の API 呼び出しとキャッシュ処理は
+    src/mybeatsaberstats/collector/beatleader.py 内の
+    _get_beatleader_player_scores に集約する。
     """
 
     if not beatleader_id:
         return []
 
-    cache_path = CACHE_DIR / f"beatleader_player_scores_{beatleader_id}.json"
-
-    # 旧形式（単純な list）キャッシュは _load_cached_pages では読めないので、
-    # AttributeError などで弾かれて None が返る。必要なら削除して再取得してもよいが、
-    # ここではそのまま上書きする。
-    cached_pages = _load_cached_pages(cache_path)
-
-    # sortBy=date, order=desc を付けて取得するようにしたので、
-    # params に sortBy=date が含まれていない古いキャッシュは無効として扱う。
-    if cached_pages is not None:
-        has_sort_by_date = False
-        for page in cached_pages:
-            if not isinstance(page, dict):
-                continue
-            params = page.get("params") or {}
-            if isinstance(params, dict) and params.get("sortBy") == "date":
-                has_sort_by_date = True
-                break
-        if not has_sort_by_date:
-            cached_pages = None
-
-    if cached_pages is not None:
-        scores: list[dict] = []
-        for page_obj in cached_pages:
-            if not isinstance(page_obj, dict):
-                continue
-            data = page_obj.get("data") or {}
-            items = data.get("data") or data.get("scores") or []
-            if isinstance(items, list):
-                scores.extend(it for it in items if isinstance(it, dict))
-
-        if progress is not None:
-            progress(1, 1)
-        return scores
-
-    pages: list[dict] = []
-    scores: list[dict] = []
-
-    page = 1
-    max_pages_sc: int | None = None
-    page_size = 100
-
-    while True:
-        url = f"{BL_BASE_URL}/player/{beatleader_id}/scores"
-        params = {
-            "page": str(page),
-            "count": str(page_size),
-            # sortBy=date を指定すると、ランク・非ランクや完走していないスコアも含めた
-            # 時系列順のスコア一覧が取得できる。
-            "sortBy": "date",
-            "order": "desc",
-        }
-
-        try:
-            resp = session.get(url, params=params, timeout=10)
-            print(
-                f"Fetching BeatLeader player scores page {page} for star stats... "
-                f"URL: {resp.url} params: {params}"
-            )
-            if resp.status_code == 404:
-                break
-            resp.raise_for_status()
-        except Exception:  # noqa: BLE001
-            break
-
-        try:
-            data = resp.json()
-        except Exception:  # noqa: BLE001
-            break
-
-        pages.append({"page": page, "params": params, "data": data})
-
-        if max_pages_sc is None:
-            meta = data.get("metadata") or {}
-            try:
-                total = int(meta.get("total", 0))
-                per_page = int(meta.get("itemsPerPage", page_size)) or page_size
-            except (TypeError, ValueError):
-                total = 0
-                per_page = page_size
-
-            if total > 0 and per_page > 0:
-                computed_pages = math.ceil(total / per_page)
-                max_pages_sc = min(computed_pages, 300)
-            else:
-                max_pages_sc = 100
-
-        items = data.get("data") or data.get("scores") or []
-        if not items:
-            break
-        if isinstance(items, list):
-            scores.extend(it for it in items if isinstance(it, dict))
-
-        # ページ進捗をコールバックで通知
-        if progress is not None:
-            progress(page, max_pages_sc)
-
-        if len(items) < page_size or (max_pages_sc is not None and page >= max_pages_sc):
-            break
-
-        page += 1
-
-    if pages:
-        try:
-            _save_cached_pages(cache_path, pages)
-        except Exception:  # noqa: BLE001
-            pass
-
-    return scores
+    return _bl_get_beatleader_player_scores(beatleader_id, session, progress)
 
 
 # def _extract_scoresaber_accuracy(score_info: dict) -> Optional[float]:
@@ -888,227 +783,9 @@ def _extract_beatleader_accuracy(score_info: dict) -> Optional[float]:
 
 
 def collect_beatleader_star_stats(beatleader_id: str, session: Optional[requests.Session] = None) -> list[StarClearStat]:
-    """BeatLeader の RankedMap 一覧とプレイヤースコアから★別統計を集計する。
+    """BeatLeader ★別統計収集を beatleader.py 側の実装に委譲するラッパー。"""
 
-    ScoreSaber 側の _collect_star_stats_from_scoresaber と同様の形で、
-    StarClearStat のリストを返す。
-    """
-
-    if not beatleader_id:
-        return []
-
-    if session is None:
-        session = requests.Session()
-
-    # 1) BeatLeader の Ranked leaderboards 一覧から★別の「全譜面(Map数)」を集計
-    leaderboards = _get_beatleader_leaderboards_ranked(session)
-    if not leaderboards:
-        return []
-
-    star_map_count: dict[int, int] = defaultdict(int)
-    leaderboard_star_bucket: dict[str, int] = {}
-
-    for lb in leaderboards:
-        if not isinstance(lb, dict):
-            continue
-
-        diff = lb.get("difficulty") or {}
-
-        # BeatLeader の difficulty.status が 3 のものを Ranked とみなす。
-        try:
-            status_val = int(diff.get("status", 0))
-        except (TypeError, ValueError):
-            status_val = 0
-        if status_val != 3:
-            continue
-
-        stars_value = diff.get("stars") or diff.get("difficultyRating")
-        if stars_value is None:
-            continue
-        try:
-            stars = float(stars_value)
-        except (TypeError, ValueError):
-            continue
-
-        if not (stars >= 0):
-            continue
-
-        star_bucket = int(stars)
-        if star_bucket < 0:
-            star_bucket = 0
-
-        lb_id_raw = lb.get("id") or diff.get("leaderboardId") or diff.get("id")
-        if lb_id_raw is None:
-            continue
-        lb_id = str(lb_id_raw)
-
-        leaderboard_star_bucket[lb_id] = star_bucket
-        star_map_count[star_bucket] += 1
-
-    if not star_map_count or not leaderboard_star_bucket:
-        return []
-
-    # 2) プレイヤースコアから各 Ranked マップのクリア / NF 状態を集計（キャッシュ利用）
-    scores = _get_beatleader_player_scores(beatleader_id, session)
-
-    star_clear_count: dict[int, int] = defaultdict(int)
-    star_nf_count: dict[int, int] = defaultdict(int)
-    star_ss_count: dict[int, int] = defaultdict(int)
-    star_acc_sum: dict[int, float] = defaultdict(float)
-    star_acc_count: dict[int, int] = defaultdict(int)
-
-    per_leaderboard: dict[str, dict] = {}
-
-    for item in scores:
-        leaderboard = item.get("leaderboard") if isinstance(item, dict) else None
-        if leaderboard is None and isinstance(item, dict):
-            leaderboard = item
-
-        if not isinstance(leaderboard, dict):
-            continue
-
-        diff = leaderboard.get("difficulty") or {}
-
-        lb_id_raw = leaderboard.get("id") or diff.get("leaderboardId") or diff.get("id")
-        if lb_id_raw is None:
-            continue
-        lb_id = str(lb_id_raw)
-
-        # Ranked 一覧に存在しない ID は無視
-        if lb_id not in leaderboard_star_bucket:
-            continue
-
-        star_bucket = leaderboard_star_bucket[lb_id]
-
-        state = per_leaderboard.get(lb_id)
-        if state is None:
-            state = {"star": star_bucket, "clear": False, "nf": False, "ss": False, "best_acc": None}
-            per_leaderboard[lb_id] = state
-
-        score_info = item.get("score") if isinstance(item, dict) else None
-        if not isinstance(score_info, dict):
-            score_info = item if isinstance(item, dict) else None
-
-        modifiers = ""
-        if isinstance(score_info, dict):
-            modifiers = str(score_info.get("modifiers") or "")
-
-        mods_upper = modifiers.upper()
-        is_nf = "NF" in mods_upper
-        is_ss = "SS" in mods_upper
-
-        if is_nf:
-            state["nf"] = True
-        elif is_ss:
-            state["ss"] = True
-        else:
-            state["clear"] = True
-            # NF/SS なしスコアの精度(%)を best_acc として保持
-            acc = _extract_beatleader_accuracy(score_info) if isinstance(score_info, dict) else None
-            if acc is not None:
-                best = state.get("best_acc")
-                if best is None or acc > best:
-                    state["best_acc"] = acc
-
-    for state in per_leaderboard.values():
-        star_bucket = int(state["star"])
-        has_clear = bool(state["clear"])
-        has_nf = bool(state["nf"])
-        has_ss = bool(state["ss"])
-
-        if has_clear:
-            star_clear_count[star_bucket] += 1
-            # クリア済み譜面については best_acc を★別に集計
-            best_acc = state.get("best_acc")  # type: ignore[assignment]
-            if isinstance(best_acc, (int, float)) and math.isfinite(float(best_acc)):
-                star_acc_sum[star_bucket] += float(best_acc)
-                star_acc_count[star_bucket] += 1
-        elif has_nf:
-            star_nf_count[star_bucket] += 1
-        elif has_ss:
-            star_ss_count[star_bucket] += 1
-
-    stats: list[StarClearStat] = []
-
-    for star in sorted(star_map_count.keys()):
-        map_count = star_map_count[star]
-        clear_count = star_clear_count.get(star, 0)
-        nf_count = star_nf_count.get(star, 0)
-        ss_count = star_ss_count.get(star, 0)
-        clear_rate = (clear_count / map_count) if map_count > 0 else 0.0
-
-        avg_acc: float | None
-        cnt = star_acc_count.get(star, 0)
-        if cnt > 0:
-            avg_acc = star_acc_sum.get(star, 0.0) / cnt
-        else:
-            avg_acc = None
-
-        stats.append(
-            StarClearStat(
-                star=star,
-                map_count=map_count,
-                clear_count=clear_count,
-                nf_count=nf_count,
-                ss_count=ss_count,
-                clear_rate=clear_rate,
-                average_acc=avg_acc,
-            )
-        )
-
-    return stats
-
-
-# def _get_scoresaber_player_stats(scoresaber_id: str, session: requests.Session) -> dict:
-#     """ScoreSaber の /player/{id}/full からスコア統計を取得する。
-
-#     戻り値は scoreStats 部分の dict。失敗した場合は空 dict を返す。
-#     """
-
-#     if not scoresaber_id:
-#         return {}
-
-#     url = SCORESABER_PLAYER_FULL_URL.format(player_id=scoresaber_id)
-#     try:
-#         resp = session.get(url, timeout=10)
-#         print(f"Fetching ScoreSaber player stats... URL: {resp.url}")
-#         if resp.status_code == 404:
-#             return {}
-#         resp.raise_for_status()
-#     except Exception:  # noqa: BLE001
-#         return {}
-
-#     try:
-#         data = resp.json()
-#     except Exception:  # noqa: BLE001
-#         return {}
-
-#     stats = data.get("scoreStats")
-#     if isinstance(stats, dict):
-#         return stats
-#     return {}
-
-
-# def _fetch_scoresaber_player_basic(
-#     scoresaber_id: str,
-#     session: requests.Session,
-# ) -> Optional[ScoreSaberPlayer]:
-#     """ScoreSaber のプレイヤー情報を /player/{id}/full から取得して ScoreSaberPlayer に詰める。
-
-#     players_index.json に存在しないプレイヤーのスナップショット作成時に利用する。
-#     失敗した場合は None を返す。
-#     """
-
-#     if not scoresaber_id:
-#         return None
-
-#     url = SCORESABER_PLAYER_FULL_URL.format(player_id=scoresaber_id)
-#     try:
-#         resp = session.get(url, timeout=10)
-#         print(f"Fetching ScoreSaber player info... URL: {resp.url}")
-#         if resp.status_code == 404:
-#             return None
-#         resp.raise_for_status()
+    return _bl_collect_beatleader_star_stats(beatleader_id, session)
 #     except Exception:  # noqa: BLE001
 #         return None
 
@@ -1354,19 +1031,24 @@ def create_snapshot_for_steam_id(
     事前に GUI 側の Full Sync などで players_index.json / accsaber_ranking.json を
     用意しておく前提。
     """
-    print (f"■Call collector.create_snapshot_for_steam_id: {steam_id}")
+    # 外部から渡される progress(message, frac) を、この関数内では _step(frac, message)
+    # という形で扱えるようにするヘルパー。
+    def _step(frac: float, message: str) -> None:
+        if progress is None:
+            return
+        progress(message, frac)
+
+    def _rethrow_if_cancelled(exc: Exception) -> None:
+        """進捗ダイアログのキャンセル(RuntimeError('SNAPSHOT_CANCELLED'))だけは握りつぶさずに再スローする。"""
+        if isinstance(exc, RuntimeError) and str(exc) == "SNAPSHOT_CANCELLED":
+            raise
+
+    # 以下の処理では requests.Session を必須とする関数を多数呼び出すため、
+    # この関数内では session を必ず非 None の Session インスタンスに正規化して扱う。
     if session is None:
         session = requests.Session()
+    assert session is not None
 
-    def _step(ratio: float, message: str) -> None:
-        """進捗コールバック呼び出しのヘルパー。"""
-        if progress is not None:
-            # GUI 側のキャンセルなどを確実に伝播させるため、
-            # progress コールバック内の例外は握りつぶさずそのまま送出する
-            progress(message, max(0.0, min(1.0, ratio)))
-
-    # 必要であれば ScoreSaber / BeatLeader / AccSaber のグローバルランキングキャッシュと
-    # players_index.json を用意する。
     # 条件: accsaber_ranking.json / scoresaber_ranking.json / beatleader_ranking.json のうち
     # いずれか1つでも存在しない場合のみランキング取得を行う。
     ss_rank_path = CACHE_DIR / "scoresaber_ranking.json"
@@ -1385,7 +1067,8 @@ def create_snapshot_for_steam_id(
                 _step(0.02 * frac, message)
             print("1.1.1 ランキングキャッシュ作成...")
             ensure_global_rank_caches(session=session, progress=_fullsync_progress, steam_id=steam_id)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            _rethrow_if_cancelled(exc)
             # ランキングキャッシュの準備に失敗しても、可能な範囲でスナップショット作成を続行する
             pass
     
@@ -1416,7 +1099,8 @@ def create_snapshot_for_steam_id(
         leaderboards = _get_scoresaber_leaderboards_ranked(session, progress=_ss_leaderboard_progress)
         map_store = MapStore()
         map_store.ss_ranked_maps = leaderboards
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        _rethrow_if_cancelled(exc)
         pass
 
     try:
@@ -1438,7 +1122,8 @@ def create_snapshot_for_steam_id(
             _step(global_ratio, msg)
         print("3. BeatLeader Ranked Maps キャッシュ更新...")
         _get_beatleader_leaderboards_ranked(session, progress=_bl_leaderboard_progress)
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        _rethrow_if_cancelled(exc)
         pass
 
     # プレイヤーインデックスを読み込み、必要なら API からプレイヤー情報を補完する
@@ -1453,7 +1138,8 @@ def create_snapshot_for_steam_id(
             rebuild_player_index_from_global()
             player_index = _load_player_index()
             print("4.2 プレイヤーインデックスの再構築完了。")
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            _rethrow_if_cancelled(exc)
             player_index = {}
     map_store = MapStore()
     map_store.player_index = player_index
@@ -1471,13 +1157,15 @@ def create_snapshot_for_steam_id(
                 print("4.3 players_index.json に存在しない SteamID。ScoreSaber から情報取得を試みます...")
                 ss = _fetch_scoresaber_player_basic(steam_id, session)
                 map_store.ss_players[steam_id] = ss
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                _rethrow_if_cancelled(exc)
                 ss = None
             try:
                 print("4.4 BeatLeader から情報取得を試みます...")
                 bl = fetch_bl_player(steam_id, session=session)
                 map_store.bl_players[steam_id] = bl
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                _rethrow_if_cancelled(exc)
                 bl = None
 
         if ss is None and bl is None:
@@ -1494,7 +1182,8 @@ def create_snapshot_for_steam_id(
         player_index[steam_id] = entry
         try:
             _save_player_index(player_index)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            _rethrow_if_cancelled(exc)
             # インデックス保存に失敗してもスナップショット作成自体は続行する
             pass
 
@@ -1533,7 +1222,8 @@ def create_snapshot_for_steam_id(
 
             print("5. ScoreSaber プレイヤースコアキャッシュ更新...")
             _get_scoresaber_player_scores(scoresaber_id, session, progress=_ss_scores_progress)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            _rethrow_if_cancelled(exc)
             pass
         
         print("6. ScoreSaber プレイヤーステータス取得...")
@@ -1595,7 +1285,8 @@ def create_snapshot_for_steam_id(
                 _step(0.30 + 0.05 * frac, msg)
             print("7. BeatLeader プレイヤースコアキャッシュ更新...")
             _get_beatleader_player_scores(beatleader_id, session, progress=_bl_scores_progress)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            _rethrow_if_cancelled(exc)
             pass
         
         print("8. BeatLeader プレイヤーステータス取得...")
