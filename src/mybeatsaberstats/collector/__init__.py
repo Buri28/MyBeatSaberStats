@@ -13,6 +13,7 @@ __all__ = [
     "ensure_global_rank_caches",
     "collect_beatleader_star_stats",
     "create_snapshot_for_steam_id",
+    "SnapshotOptions",
 ]
 
 if TYPE_CHECKING:
@@ -22,6 +23,7 @@ if TYPE_CHECKING:
         ensure_global_rank_caches,
         collect_beatleader_star_stats,
         create_snapshot_for_steam_id,
+        SnapshotOptions,
     )
 
 

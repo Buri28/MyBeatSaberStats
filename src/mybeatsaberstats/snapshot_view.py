@@ -959,6 +959,9 @@ class SnapshotCompareDialog(QDialog):
         row_main += 1
 
         # AccSaber Rank (Global + Country を 1 行にまとめる)
+        # Country Rank はスナップショット撮影時に計算した保存値をそのまま使う。
+        # キャッシュを再計算すると snap_a / snap_b が「同じ現時点のランク」を参照してしまい
+        # 比較が無意味になるため。
         row_main = _set_combined_rank_row(
             row_main,
             "[AS] Overall Rank",

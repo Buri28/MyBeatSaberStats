@@ -7,13 +7,20 @@ from typing import Dict, List, Optional
 import json
 from datetime import datetime, timezone
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QDateTime
 from PySide6.QtGui import QColor, QIcon
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
+    QDateTimeEdit,
+    QDialog,
+    QDialogButtonBox,
+    QFormLayout,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QPushButton,
     QSplitter,
@@ -36,8 +43,123 @@ from .collector.collector import (
     collect_beatleader_star_stats,
     create_snapshot_for_steam_id,
     ensure_global_rank_caches,
+    SnapshotOptions,
 )
 from mybeatsaberstats.collector.map_store import MapStore
+
+
+class TakeSnapshotDialog(QDialog):
+    """スナップショット取得時にSteamIDとデータ取得オプションを選択するダイアログ。"""
+
+    def __init__(self, parent=None, default_steam_id: str = "") -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Take Snapshot")
+        self.setMinimumWidth(420)
+
+        layout = QVBoxLayout(self)
+
+        # SteamID入力
+        form = QFormLayout()
+        self._id_edit = QLineEdit(default_steam_id, self)
+        form.addRow("SteamID:", self._id_edit)
+        layout.addLayout(form)
+
+        # データ取得オプション
+        group = QGroupBox("Fetch Options", self)
+        group_layout = QVBoxLayout(group)
+
+        self._cb_ss_ranked_maps = QCheckBox("ScoreSaber Ranked Maps", self)
+        self._cb_bl_ranked_maps = QCheckBox("BeatLeader Ranked Maps", self)
+        self._cb_scoresaber     = QCheckBox("ScoreSaber (Player Info / Scores / Stats)", self)
+        self._cb_beatleader     = QCheckBox("BeatLeader (Player Info / Scores / Stats)", self)
+        self._cb_accsaber       = QCheckBox("AccSaber (Rank)", self)
+
+        for cb in (
+            self._cb_ss_ranked_maps,
+            self._cb_bl_ranked_maps,
+            self._cb_scoresaber,
+            self._cb_beatleader,
+            self._cb_accsaber,
+        ):
+            cb.setChecked(True)
+            group_layout.addWidget(cb)
+
+        layout.addWidget(group)
+
+        # スコア取得をどこまで遡るか（ギャップ補完用）
+        until_group = QGroupBox("Fetch Until (for backfilling gaps)", self)
+        until_layout = QFormLayout(until_group)
+
+        # ScoreSaber fetch_until
+        ss_row = QHBoxLayout()
+        self._cb_ss_until = QCheckBox(self)
+        self._cb_ss_until.setChecked(False)
+        self._dt_ss_until = QDateTimeEdit(QDateTime.currentDateTime(), self)
+        self._dt_ss_until.setDisplayFormat("yyyy-MM-dd HH:mm:ss")
+        self._dt_ss_until.setCalendarPopup(True)
+        self._dt_ss_until.setEnabled(False)
+        self._cb_ss_until.toggled.connect(self._dt_ss_until.setEnabled)
+        ss_row.addWidget(self._cb_ss_until)
+        ss_row.addWidget(self._dt_ss_until, 1)
+        until_layout.addRow("ScoreSaber fetch until:", ss_row)
+
+        # BeatLeader fetch_until
+        bl_row = QHBoxLayout()
+        self._cb_bl_until = QCheckBox(self)
+        self._cb_bl_until.setChecked(False)
+        self._dt_bl_until = QDateTimeEdit(QDateTime.currentDateTime(), self)
+        self._dt_bl_until.setDisplayFormat("yyyy-MM-dd HH:mm:ss")
+        self._dt_bl_until.setCalendarPopup(True)
+        self._dt_bl_until.setEnabled(False)
+        self._cb_bl_until.toggled.connect(self._dt_bl_until.setEnabled)
+        bl_row.addWidget(self._cb_bl_until)
+        bl_row.addWidget(self._dt_bl_until, 1)
+        until_layout.addRow("BeatLeader fetch until:", bl_row)
+
+        layout.addWidget(until_group)
+
+        # OK / Cancel
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
+            self,
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def steam_id(self) -> str:
+        return self._id_edit.text().strip()
+
+    def snapshot_options(self) -> SnapshotOptions:
+        ss_until: Optional[datetime] = None
+        if self._cb_ss_until.isChecked():
+            qdt = self._dt_ss_until.dateTime()
+            ss_until = datetime(
+                qdt.date().year(), qdt.date().month(), qdt.date().day(),
+                qdt.time().hour(), qdt.time().minute(), qdt.time().second(),
+            )
+
+        bl_until: Optional[datetime] = None
+        if self._cb_bl_until.isChecked():
+            qdt = self._dt_bl_until.dateTime()
+            bl_until = datetime(
+                qdt.date().year(), qdt.date().month(), qdt.date().day(),
+                qdt.time().hour(), qdt.time().minute(), qdt.time().second(),
+            )
+
+        return SnapshotOptions(
+            fetch_ss_ranked_maps=self._cb_ss_ranked_maps.isChecked(),
+            fetch_bl_ranked_maps=self._cb_bl_ranked_maps.isChecked(),
+            fetch_scoresaber=self._cb_scoresaber.isChecked(),
+            fetch_beatleader=self._cb_beatleader.isChecked(),
+            fetch_accsaber=self._cb_accsaber.isChecked(),
+            fetch_ss_star_stats=True,
+            fetch_bl_star_stats=True,
+            ss_fetch_until=ss_until,
+            bl_fetch_until=bl_until,
+            ss_ranked_until=ss_until,
+            bl_ranked_until=bl_until,
+        )
 
 
 class PercentageBarDelegate(QStyledItemDelegate):
@@ -175,6 +297,16 @@ class PlayerWindow(QMainWindow):
 
         top_row.addStretch(1)
         layout.addLayout(top_row)
+
+        # --- キャッシュ情報行: SS/BL player_scores の最終読み込み日時と総スコア数 ---
+        cache_info_row = QHBoxLayout()
+        self._ss_cache_label = QLabel("ScoreSaber scores: -")
+        self._bl_cache_label = QLabel("BeatLeader scores: -")
+        cache_info_row.addWidget(self._ss_cache_label)
+        cache_info_row.addSpacing(24)
+        cache_info_row.addWidget(self._bl_cache_label)
+        cache_info_row.addStretch(1)
+        layout.addLayout(cache_info_row)
 
         # --- 中央〜下部: 3 列レイアウト ---
         # 1 列目: 上段に ScoreSaber/BeatLeader、下段に AccSaber
@@ -333,6 +465,31 @@ class PlayerWindow(QMainWindow):
     def _settings_path(self) -> Path:
         return self._cache_dir() / "player_window.json"
 
+    def _read_score_cache_meta(self, filename: str) -> Optional[tuple]:
+        """キャッシュ JSON から (fetched_at ローカル時刻文字列, total_play_count) を返す。
+
+        ファイルが存在しない、または読み取れない場合は None を返す。
+        """
+        path = self._cache_dir() / filename
+        if not path.exists():
+            return None
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            fetched_at_str = raw.get("fetched_at")
+            total_play_count = raw.get("total_play_count")
+            if fetched_at_str is None or total_play_count is None:
+                return None
+            # UTC → ローカル時刻に変換
+            fa = fetched_at_str
+            if fa.endswith("Z"):
+                fa = fa[:-1]
+            dt_utc = datetime.fromisoformat(fa).replace(tzinfo=timezone.utc)
+            dt_local = dt_utc.astimezone()
+            local_str = dt_local.strftime("%Y-%m-%d %H:%M:%S")
+            return (local_str, int(total_play_count))
+        except Exception:  # noqa: BLE001
+            return None
+
     def _load_last_player_id(self) -> Optional[str]:
         """前回 Stats 画面で表示していたプレイヤーの SteamID を読み込む。"""
 
@@ -368,7 +525,7 @@ class PlayerWindow(QMainWindow):
             return
 
     def _take_snapshot_for_current_player(self) -> bool:
-        """Snapshot 取得時に任意の SteamID も入力できるようにする。
+        """Snapshot 取得時に任意の SteamID と取得オプションを選択できるダイアログを表示する。
 
         戻り値: スナップショットが正常に作成できたら True、それ以外は False。
         （ボタンから呼ばれる通常利用では戻り値は無視される。）
@@ -377,22 +534,16 @@ class PlayerWindow(QMainWindow):
         # デフォルトは現在選択中のプレイヤーID（なければ空文字）
         current_id = self._current_player_id() or ""
 
-        # 入力ダイアログで SteamID / players_index のキーを指定可能にする
-        from PySide6.QtWidgets import QInputDialog  # ローカルインポートで依存を限定
-
-        text, ok = QInputDialog.getText(
-            self,
-            "Take Snapshot",
-            "SteamID (or key in players_index.json):",
-            text=current_id,
-        )
-        if not ok:
+        dlg = TakeSnapshotDialog(self, default_steam_id=current_id)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
             return False
 
-        steam_id = text.strip()
+        steam_id = dlg.steam_id()
         if not steam_id:
             QMessageBox.warning(self, "Take Snapshot", "SteamID is empty.")
             return False
+
+        options = dlg.snapshot_options()
 
         # スナップショット取得処理の途中でキャンセルできるように、Cancel ボタン付きの
         # QProgressDialog を用意し、キャンセル状態をフラグで管理する。
@@ -416,7 +567,7 @@ class PlayerWindow(QMainWindow):
         try:
             # print文は日本語
             print(f"1.スナップショットを取得中: {steam_id}")
-            snapshot = create_snapshot_for_steam_id(steam_id, progress=_on_progress)
+            snapshot = create_snapshot_for_steam_id(steam_id, progress=_on_progress, options=options)
             map_store_instance = MapStore()
             map_store_instance.snapshots[steam_id] = snapshot
 
@@ -454,29 +605,49 @@ class PlayerWindow(QMainWindow):
         return list(stats)
 
     def _load_player_index_countries(self) -> None:
-        """players_index.json から ScoreSaber ID ごとの国コードを読み込む。"""
+        """players_index.json から ScoreSaber ID ごとの国コードを読み込む。
 
-        path = self._cache_dir() / "players_index.json"
+        players_index.json に登録されていないプレイヤー（BL-only として登録されているが
+        実際は SS にも存在するプレイヤー等）は、scoresaber_ranking.json からも補完する。
+        """
+
+        cache_dir = self._cache_dir()
+        path = cache_dir / "players_index.json"
         self._ss_country_by_id.clear()
 
-        if not path.exists():
-            return
+        if path.exists():
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                for row in data:
+                    if not isinstance(row, dict):
+                        continue
+                    ss = row.get("scoresaber")
+                    if not isinstance(ss, dict):
+                        continue
+                    sid = str(ss.get("id") or "")
+                    country = str(ss.get("country") or "").upper()
+                    if sid and country:
+                        self._ss_country_by_id[sid] = country
+            except Exception:  # noqa: BLE001
+                pass
 
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:  # noqa: BLE001
-            return
-
-        for row in data:
-            if not isinstance(row, dict):
+        # players_index に無い SS プレイヤーを scoresaber_ranking.json から補完
+        # （BL-only として登録されているが実際は SS にも存在するプレイヤー対応）
+        for ss_cache in ["scoresaber_ranking.json", "scoresaber_JP.json", "scoresaber_ALL.json"]:
+            ss_path = cache_dir / ss_cache
+            if not ss_path.exists():
                 continue
-            ss = row.get("scoresaber")
-            if not isinstance(ss, dict):
+            try:
+                ss_data = json.loads(ss_path.read_text(encoding="utf-8"))
+                for item in ss_data:
+                    if not isinstance(item, dict):
+                        continue
+                    sid = str(item.get("id") or "")
+                    country = str(item.get("country") or "").upper()
+                    if sid and country and sid not in self._ss_country_by_id:
+                        self._ss_country_by_id[sid] = country
+            except Exception:  # noqa: BLE001
                 continue
-            sid = str(ss.get("id") or "")
-            country = str(ss.get("country") or "").upper()
-            if sid and country:
-                self._ss_country_by_id[sid] = country
 
     def _load_accsaber_players(self) -> None:
         """AccSaber の overall キャッシュからプレイヤー一覧を読み込む。"""
@@ -766,14 +937,32 @@ class PlayerWindow(QMainWindow):
         self.bl_star_table.setRowCount(0)
         steam_id = self._current_player_id()
         if steam_id is None:
+            self._ss_cache_label.setText("ScoreSaber scores: -")
+            self._bl_cache_label.setText("BeatLeader scores: -")
             return
 
         snaps = self._snapshots_by_player.get(steam_id)
         if not snaps:
+            self._ss_cache_label.setText("ScoreSaber scores: -")
+            self._bl_cache_label.setText("BeatLeader scores: -")
             return
 
         snaps.sort(key=lambda s: s.taken_at)
         snap = snaps[-1]
+
+        # --- キャッシュ情報ラベル更新 ---
+        ss_id = snap.scoresaber_id
+        bl_id = snap.beatleader_id or steam_id
+        ss_meta = self._read_score_cache_meta(f"scoresaber_player_scores_{ss_id}.json") if ss_id else None
+        bl_meta = self._read_score_cache_meta(f"beatleader_player_scores_{bl_id}.json")
+        if ss_meta:
+            self._ss_cache_label.setText(f"SS scores: {ss_meta[1]} maps  (fetched: {ss_meta[0]})")
+        else:
+            self._ss_cache_label.setText("SS scores: -")
+        if bl_meta:
+            self._bl_cache_label.setText(f"BL scores: {bl_meta[1]} maps  (fetched: {bl_meta[0]})")
+        else:
+            self._bl_cache_label.setText("BL scores: -")
 
         # Snapshot の取得時刻をローカル時刻に変換して表示用文字列を作る
         taken_text = snap.taken_at
@@ -909,22 +1098,12 @@ class PlayerWindow(QMainWindow):
         self.main_table.resizeColumnsToContents()
 
         # AccSaber テーブル（Overall / True / Standard / Tech の Global Rank / Country Rank / PlayCount）
-        # Country Rank はスナップショットに保存されている値があればそれを優先し、
-        # 無ければ現在のキャッシュから計算する。
-        if any([
-            snap.accsaber_overall_rank_country,
-            snap.accsaber_true_rank_country,
-            snap.accsaber_standard_rank_country,
-            snap.accsaber_tech_rank_country,
-        ]):
-            overall_country_rank = snap.accsaber_overall_rank_country
-            true_country_rank = snap.accsaber_true_rank_country
-            standard_country_rank = snap.accsaber_standard_rank_country
-            tech_country_rank = snap.accsaber_tech_rank_country
-        else:
-            overall_country_rank, true_country_rank, standard_country_rank, tech_country_rank = self._compute_acc_country_ranks(
-                snap.scoresaber_id or snap.steam_id,
-            )
+        # Country Rank はスナップショット撮影時点の保存値を使う。
+        # 新規スナップショット撮影時にコレクターが正しく計算して保存する。
+        overall_country_rank = snap.accsaber_overall_rank_country
+        true_country_rank = snap.accsaber_true_rank_country
+        standard_country_rank = snap.accsaber_standard_rank_country
+        tech_country_rank = snap.accsaber_tech_rank_country
 
         # AccSaber の Country Rank はプレイヤーの国コードに基づいて表示する。
         # Rank 表示は「GlobalRank (🇨🇦 CountryRank)」のような形式にまとめる。
