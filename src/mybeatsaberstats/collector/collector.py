@@ -1204,6 +1204,33 @@ def create_snapshot_for_steam_id(
     scoresaber_ranked_play_count: Optional[int] = None
 
     if scoresaber_id:
+        # まず ScoreSaber の基本情報（PP / ランク）を最新化しておく。
+        # players_index.json 側のキャッシュが古いままだと、Snapshot 上の
+        # global_rank / country_rank も更新されないため、対象プレイヤー分だけ
+        # /player/{id}/full を叩いて最新値に差し替える。
+        try:
+            print("5. ScoreSaber 基本情報更新...")
+            ss_latest = _fetch_scoresaber_player_basic(scoresaber_id, session)
+        except Exception as exc:  # noqa: BLE001
+            _rethrow_if_cancelled(exc)
+            ss_latest = None
+
+        if ss_latest is not None:
+            scoresaber_name = ss_latest.name or scoresaber_name
+            scoresaber_country = ss_latest.country or scoresaber_country
+            scoresaber_pp = ss_latest.pp
+            scoresaber_rank_global = ss_latest.global_rank
+            scoresaber_rank_country = ss_latest.country_rank
+
+            # 可能であれば players_index.json 側の ScoreSaber 情報も更新しておく
+            try:
+                entry["scoresaber"] = ss_latest
+                _save_player_index(player_index)
+            except Exception as exc:  # noqa: BLE001
+                _rethrow_if_cancelled(exc)
+                # インデックス更新に失敗してもスナップショット作成は続行する
+                pass
+
         # スナップショット取得時にプレイヤースコアキャッシュも更新しておく。
         try:
             _step(0.15, "Fetching ScoreSaber player scores (page 1/?)...")
@@ -1251,10 +1278,30 @@ def create_snapshot_for_steam_id(
             except (TypeError, ValueError):
                 pass
 
-    # BeatLeader 側は、キャッシュに無い場合は API から1回だけ取得してみる。
+    # BeatLeader 側も、Snapshot 取得時に基本情報（PP / ランク）を最新化しておく。
+    # players_index.json 由来の BeatLeader 情報が古いままだと、
+    # snapshot 上の beatleader_rank_global / beatleader_rank_country も更新されないため、
+    # 対象プレイヤー分だけ /player/{id} を叩いて最新値に差し替える。
     beatleader: Optional[BeatLeaderPlayer] = bl
-    if beatleader is None and scoresaber_id:
-        beatleader = fetch_bl_player(scoresaber_id, session=session)
+    if scoresaber_id:
+        try:
+            print("6. BeatLeader 基本情報更新...")
+            bl_latest = fetch_bl_player(scoresaber_id, session=session)
+        except Exception as exc:  # noqa: BLE001
+            _rethrow_if_cancelled(exc)
+            bl_latest = None
+
+        if bl_latest is not None:
+            beatleader = bl_latest
+
+            # 可能であれば players_index.json 側の BeatLeader 情報も更新しておく
+            try:
+                entry["beatleader"] = bl_latest
+                _save_player_index(player_index)
+            except Exception as exc:  # noqa: BLE001
+                _rethrow_if_cancelled(exc)
+                # インデックス更新に失敗してもスナップショット作成は続行する
+                pass
 
     beatleader_id: Optional[str] = beatleader.id if beatleader is not None else None
     beatleader_name: Optional[str] = beatleader.name if beatleader is not None else None
