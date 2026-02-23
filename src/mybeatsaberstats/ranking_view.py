@@ -102,9 +102,9 @@ class RankingDialog(QDialog):
 
         self.table = QTableWidget(0, 11, self)
         self.table.setHorizontalHeaderLabels([
-            "SS Rank",          # 0
-            "Player",           # 1
-            "Country",          # 2
+            "Player",           # 0
+            "Country",          # 1
+            "SS Rank",          # 2
             "SS PP",            # 3
             "BL PP",            # 4
             "BL Global Rank",   # 5

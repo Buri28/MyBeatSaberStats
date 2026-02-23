@@ -47,35 +47,39 @@ BEATLEADER_MIN_PP_GLOBAL = 5000.0
 
 # ランキングテーブルのカラム論理インデックスを定数で管理する。
 # 見た目の左から右への並び順と一致するように定義しておく。
-COL_SS_GLOBAL_RANK = 0
-COL_SS_COUNTRY_RANK = 1
-COL_BL_GLOBAL_RANK = 2
-COL_BL_COUNTRY_RANK = 3
+# 並び: Player | Country | SS(🚩🌍 PP) | BL(🌍🚩 PP) | ACC(🌍🚩 AP) | True(🌍🚩 AP) | Std(🌍🚩 AP) | Tech(🌍🚩 AP) | AvgACC | Plays
+COL_PLAYER = 0
+COL_COUNTRY = 1
 
-COL_ACC_RANK = 4
-COL_TRUE_ACC_RANK = 5
-COL_STANDARD_ACC_RANK = 6
-COL_TECH_ACC_RANK = 7
+COL_SS_PP = 2
+COL_SS_GLOBAL_RANK = 3
+COL_SS_COUNTRY_RANK = 4
+COL_SS_PLAYS = 5
 
-COL_ACC_COUNTRY_RANK = 8
-COL_TRUE_ACC_COUNTRY_RANK = 9
-COL_STANDARD_ACC_COUNTRY_RANK = 10
-COL_TECH_ACC_COUNTRY_RANK = 11
+COL_BL_PP = 6
+COL_BL_GLOBAL_RANK = 7
+COL_BL_COUNTRY_RANK = 8
+COL_BL_PLAYS = 9
 
-COL_PLAYER = 12
-COL_COUNTRY = 13
+COL_AP = 10
+COL_ACC_RANK = 11
+COL_ACC_COUNTRY_RANK = 12
 
-COL_SS_PP = 14
-COL_SS_PLAYS = 15
-COL_BL_PP = 16
-COL_BL_PLAYS = 17
+COL_TRUE_AP = 13
+COL_TRUE_ACC_RANK = 14
+COL_TRUE_ACC_COUNTRY_RANK = 15
 
-COL_AP = 18
-COL_TRUE_AP = 19
-COL_STANDARD_AP = 20
-COL_TECH_AP = 21
+COL_STANDARD_AP = 16
+COL_STANDARD_ACC_RANK = 17
+COL_STANDARD_ACC_COUNTRY_RANK = 18
+
+COL_TECH_AP = 19
+COL_TECH_ACC_RANK = 20
+COL_TECH_ACC_COUNTRY_RANK = 21
+
 COL_AVG_ACC = 22
 COL_PLAYS = 23
+# 合計 24 列 (SS_PLAYS=5, BL_PLAYS=9 は非表示)
 
 
 class NumericTableWidgetItem(QTableWidgetItem):
@@ -217,33 +221,35 @@ class MainWindow(QMainWindow):
         # カラム名を「見た目の左から右の順」に定義しておく。
         # ※ 論理インデックスもこの順と一致する。
         headers = [""] * self.table.columnCount()
-        headers[COL_SS_GLOBAL_RANK] = "🌍"              # ScoreSaber Global Rank
-        headers[COL_SS_COUNTRY_RANK] = "🚩"             # ScoreSaber Country Rank
-        headers[COL_BL_GLOBAL_RANK] = "🌍"              # BeatLeader Global Rank
-        headers[COL_BL_COUNTRY_RANK] = "🚩"             # BeatLeader Country Rank
-
-        headers[COL_ACC_RANK] = "🌍"                    # AccSaber Overall Rank
-        headers[COL_TRUE_ACC_RANK] = "True🌍"                # True Acc Rank
-        headers[COL_STANDARD_ACC_RANK] = "Std🌍"            # Standard Acc Rank
-        headers[COL_TECH_ACC_RANK] = "Tech🌍"                # Tech Acc Rank
-
-        headers[COL_ACC_COUNTRY_RANK] = "🚩"            # AccSaber Overall Country Rank
-        headers[COL_TRUE_ACC_COUNTRY_RANK] = "True🚩"        # True Acc Country Rank
-        headers[COL_STANDARD_ACC_COUNTRY_RANK] = "Std🚩"    # Standard Acc Country Rank
-        headers[COL_TECH_ACC_COUNTRY_RANK] = "Tech🚩"        # Tech Acc Country Rank
-
         headers[COL_PLAYER] = "Player"
         headers[COL_COUNTRY] = "🚩"
 
-        headers[COL_SS_PP] = "PP"                      # ScoreSaber PP
-        headers[COL_SS_PLAYS] = ""                     # removed Plays column
-        headers[COL_BL_PP] = "PP"                      # BeatLeader PP
-        headers[COL_BL_PLAYS] = ""                     # removed Plays column
+        headers[COL_SS_COUNTRY_RANK] = "🚩"             # ScoreSaber Country Rank
+        headers[COL_SS_GLOBAL_RANK] = "🌍"              # ScoreSaber Global Rank
+        headers[COL_SS_PP] = "PP"                       # ScoreSaber PP
+        headers[COL_SS_PLAYS] = ""                      # hidden
 
-        headers[COL_AP] = "AP"                         # AccSaber Overall AP
+        headers[COL_BL_GLOBAL_RANK] = "🌍"              # BeatLeader Global Rank
+        headers[COL_BL_COUNTRY_RANK] = "🚩"             # BeatLeader Country Rank
+        headers[COL_BL_PP] = "PP"                       # BeatLeader PP
+        headers[COL_BL_PLAYS] = ""                      # hidden
+
+        headers[COL_ACC_RANK] = "🌍"                    # AccSaber Overall Rank
+        headers[COL_ACC_COUNTRY_RANK] = "🚩"            # AccSaber Overall Country Rank
+        headers[COL_AP] = "AP"                          # AccSaber Overall AP
+
+        headers[COL_TRUE_ACC_RANK] = "True🌍"            # True Acc Rank
+        headers[COL_TRUE_ACC_COUNTRY_RANK] = "True🚩"    # True Acc Country Rank
         headers[COL_TRUE_AP] = "True AP"
+
+        headers[COL_STANDARD_ACC_RANK] = "Std🌍"         # Standard Acc Rank
+        headers[COL_STANDARD_ACC_COUNTRY_RANK] = "Std🚩" # Standard Acc Country Rank
         headers[COL_STANDARD_AP] = "Std AP"
+
+        headers[COL_TECH_ACC_RANK] = "Tech🌍"            # Tech Acc Rank
+        headers[COL_TECH_ACC_COUNTRY_RANK] = "Tech🚩"    # Tech Acc Country Rank
         headers[COL_TECH_AP] = "Tech AP"
+
         headers[COL_AVG_ACC] = "Avg ACC"
         headers[COL_PLAYS] = "Plays"
         self.table.setHorizontalHeaderLabels(headers)
@@ -252,27 +258,28 @@ class MainWindow(QMainWindow):
         self._apply_header_icons()
 
         # 代表的なカラムの初期幅を設定
-        self.table.setColumnWidth(COL_SS_GLOBAL_RANK, 60)
-        self.table.setColumnWidth(COL_SS_COUNTRY_RANK, 40)
-        self.table.setColumnWidth(COL_BL_GLOBAL_RANK, 60)
-        self.table.setColumnWidth(COL_BL_COUNTRY_RANK, 40)
-
-        self.table.setColumnWidth(COL_ACC_RANK, 45)
-        self.table.setColumnWidth(COL_TRUE_ACC_RANK, 65)
-        self.table.setColumnWidth(COL_STANDARD_ACC_RANK, 65)
-        self.table.setColumnWidth(COL_TECH_ACC_RANK, 65)
-
-        self.table.setColumnWidth(COL_ACC_COUNTRY_RANK, 45)
-        self.table.setColumnWidth(COL_TRUE_ACC_COUNTRY_RANK, 65)
-        self.table.setColumnWidth(COL_STANDARD_ACC_COUNTRY_RANK, 65)
-        self.table.setColumnWidth(COL_TECH_ACC_COUNTRY_RANK, 65)
-
-        self.table.setColumnWidth(COL_PLAYER, 220)   # Player 列は名前が見やすいように広めに
+        self.table.setColumnWidth(COL_PLAYER, 220)     # Player 列は名前が見やすいように広めに
         self.table.setColumnWidth(COL_COUNTRY, 40)
 
-        # Plays 列は非表示にしたため列幅設定を削除
-        # (ScoreSaber/BeatLeader Plays columns hidden)
-        # Hide ScoreSaber/BeatLeader Plays columns (data removed)
+        self.table.setColumnWidth(COL_SS_COUNTRY_RANK, 40)
+        self.table.setColumnWidth(COL_SS_GLOBAL_RANK, 60)
+        self.table.setColumnWidth(COL_SS_PP, 80)
+
+        self.table.setColumnWidth(COL_BL_GLOBAL_RANK, 60)
+        self.table.setColumnWidth(COL_BL_COUNTRY_RANK, 40)
+        self.table.setColumnWidth(COL_BL_PP, 80)
+
+        self.table.setColumnWidth(COL_ACC_RANK, 45)
+        self.table.setColumnWidth(COL_ACC_COUNTRY_RANK, 45)
+
+        self.table.setColumnWidth(COL_TRUE_ACC_RANK, 65)
+        self.table.setColumnWidth(COL_TRUE_ACC_COUNTRY_RANK, 65)
+        self.table.setColumnWidth(COL_STANDARD_ACC_RANK, 65)
+        self.table.setColumnWidth(COL_STANDARD_ACC_COUNTRY_RANK, 65)
+        self.table.setColumnWidth(COL_TECH_ACC_RANK, 65)
+        self.table.setColumnWidth(COL_TECH_ACC_COUNTRY_RANK, 65)
+
+        # SS/BL の Plays 列は非表示
         self.table.setColumnHidden(COL_SS_PLAYS, True)
         self.table.setColumnHidden(COL_BL_PLAYS, True)
 
@@ -331,13 +338,18 @@ class MainWindow(QMainWindow):
 
         # 論理インデックス定数に基づいてサービス別のカラムを定義
         acc_cols = [
-            # Overall/指標系のみ Acc アイコンを付与。Rank 系の小分けカラム(True/Std/Tech Rank)は
-            # 視認性のためアイコンを省略する。
+            # AccSaber 全列にアイコンを付与する
             COL_ACC_RANK,
             COL_ACC_COUNTRY_RANK,
             COL_AP,
+            COL_TRUE_ACC_RANK,
+            COL_TRUE_ACC_COUNTRY_RANK,
             COL_TRUE_AP,
+            COL_STANDARD_ACC_RANK,
+            COL_STANDARD_ACC_COUNTRY_RANK,
             COL_STANDARD_AP,
+            COL_TECH_ACC_RANK,
+            COL_TECH_ACC_COUNTRY_RANK,
             COL_TECH_AP,
             COL_AVG_ACC,
             COL_PLAYS,
@@ -908,12 +920,23 @@ class MainWindow(QMainWindow):
                 ss_index_by_name[p.name.lower()] = p
 
         # players_index.json を使って、ScoreSaber ID ごとの国コードを集約する
-        # （main.py / player_main.py の両方で同じ定義になるよう、ss_players 由来の国情報は使わない）
+        # players_index に無いプレイヤーは ss_players / bl_players から補完する。
         ss_country_by_id: dict[str, str] = {}
         for entry in self.player_index.values():
             ss_pi = entry.get("scoresaber")
             if isinstance(ss_pi, ScoreSaberPlayer) and ss_pi.id and ss_pi.country:
                 ss_country_by_id[ss_pi.id] = ss_pi.country.upper()
+
+        # players_index に無い ScoreSaber プレイヤーをランキングデータで補完
+        # （BL-only として登録されているが実際は SS にも存在するプレイヤー対応）
+        for ss_p in ss_players:
+            if ss_p.id and ss_p.country and ss_p.id not in ss_country_by_id:
+                ss_country_by_id[ss_p.id] = ss_p.country.upper()
+
+        # BeatLeader プレイヤーの国コードも補完（players_index に無い BL 専用プレイヤー対応）
+        for bl_p in self.bl_players.values():
+            if bl_p.id and bl_p.country and bl_p.id not in ss_country_by_id:
+                ss_country_by_id[bl_p.id] = bl_p.country.upper()
 
         # AccSaber 側の各種 Rank / Country Rank を事前計算しておく
         acc_country_rank: dict[str, int] = {}
@@ -1257,18 +1280,45 @@ class MainWindow(QMainWindow):
             row = self.table.rowCount()
             self.table.insertRow(row)
 
-            # AccSaber 情報は不明なので空欄
-            for col in [
-                COL_ACC_RANK,
-                COL_TRUE_ACC_RANK,
-                COL_STANDARD_ACC_RANK,
-                COL_TECH_ACC_RANK,
-                COL_ACC_COUNTRY_RANK,
-                COL_TRUE_ACC_COUNTRY_RANK,
-                COL_STANDARD_ACC_COUNTRY_RANK,
-                COL_TECH_ACC_COUNTRY_RANK,
-            ]:
-                self.table.setItem(row, col, NumericTableWidgetItem("", None))
+            # AccSaber 情報を scoresaber_id（= BL の sid と同じ）で引く
+            acc_bl: Optional[AccSaberPlayer] = acc_by_sid.get(sid)
+
+            if acc_bl is not None:
+                self.table.setItem(row, COL_ACC_RANK, NumericTableWidgetItem(str(acc_bl.rank), acc_bl.rank))
+
+                t_rank = true_rank_by_sid.get(sid)
+                self.table.setItem(row, COL_TRUE_ACC_RANK, NumericTableWidgetItem("" if t_rank is None else str(t_rank), t_rank))
+
+                s_rank = standard_rank_by_sid.get(sid)
+                self.table.setItem(row, COL_STANDARD_ACC_RANK, NumericTableWidgetItem("" if s_rank is None else str(s_rank), s_rank))
+
+                te_rank = tech_rank_by_sid.get(sid)
+                self.table.setItem(row, COL_TECH_ACC_RANK, NumericTableWidgetItem("" if te_rank is None else str(te_rank), te_rank))
+
+                acc_cr_val = acc_country_rank.get(sid)
+                self.table.setItem(row, COL_ACC_COUNTRY_RANK, NumericTableWidgetItem("" if acc_cr_val is None else str(acc_cr_val), acc_cr_val))
+
+                t_cr = true_country_rank_by_sid.get(sid)
+                self.table.setItem(row, COL_TRUE_ACC_COUNTRY_RANK, NumericTableWidgetItem("" if t_cr is None else str(t_cr), t_cr))
+
+                s_cr = standard_country_rank_by_sid.get(sid)
+                self.table.setItem(row, COL_STANDARD_ACC_COUNTRY_RANK, NumericTableWidgetItem("" if s_cr is None else str(s_cr), s_cr))
+
+                te_cr = tech_country_rank_by_sid.get(sid)
+                self.table.setItem(row, COL_TECH_ACC_COUNTRY_RANK, NumericTableWidgetItem("" if te_cr is None else str(te_cr), te_cr))
+            else:
+                # AccSaber 情報は不明なので空欄
+                for col in [
+                    COL_ACC_RANK,
+                    COL_TRUE_ACC_RANK,
+                    COL_STANDARD_ACC_RANK,
+                    COL_TECH_ACC_RANK,
+                    COL_ACC_COUNTRY_RANK,
+                    COL_TRUE_ACC_COUNTRY_RANK,
+                    COL_STANDARD_ACC_COUNTRY_RANK,
+                    COL_TECH_ACC_COUNTRY_RANK,
+                ]:
+                    self.table.setItem(row, col, NumericTableWidgetItem("", None))
 
             # Player / Country
             player_item = TextTableWidgetItem(bl.name)
@@ -1278,16 +1328,36 @@ class MainWindow(QMainWindow):
             country_text = bl.country.upper() if bl.country else (country.upper() if country else "")
             self.table.setItem(row, COL_COUNTRY, TextTableWidgetItem(country_text))
 
-            # AP 等も不明なので空欄
-            for col in [
-                COL_AP,
-                COL_TRUE_AP,
-                COL_STANDARD_AP,
-                COL_TECH_AP,
-                COL_AVG_ACC,
-                COL_PLAYS,
-            ]:
-                self.table.setItem(row, col, NumericTableWidgetItem("", None))
+            # AP 等も ACC と同様に引けた場合は表示
+            if acc_bl is not None:
+                total_ap_val = _parse_float(acc_bl.total_ap)
+                self.table.setItem(row, COL_AP, NumericTableWidgetItem(acc_bl.total_ap, total_ap_val))
+
+                true_ap_text = getattr(acc_bl, "true_ap", "")
+                self.table.setItem(row, COL_TRUE_AP, NumericTableWidgetItem(true_ap_text, _parse_float(true_ap_text)))
+
+                standard_ap_text = getattr(acc_bl, "standard_ap", "")
+                self.table.setItem(row, COL_STANDARD_AP, NumericTableWidgetItem(standard_ap_text, _parse_float(standard_ap_text)))
+
+                tech_ap_text = getattr(acc_bl, "tech_ap", "")
+                self.table.setItem(row, COL_TECH_AP, NumericTableWidgetItem(tech_ap_text, _parse_float(tech_ap_text)))
+
+                avg_acc_val = _parse_float(acc_bl.average_acc)
+                self.table.setItem(row, COL_AVG_ACC, NumericTableWidgetItem(acc_bl.average_acc, avg_acc_val))
+
+                plays_val = _parse_int(acc_bl.plays)
+                self.table.setItem(row, COL_PLAYS, NumericTableWidgetItem(acc_bl.plays, plays_val))
+            else:
+                # AP 等も不明なので空欄
+                for col in [
+                    COL_AP,
+                    COL_TRUE_AP,
+                    COL_STANDARD_AP,
+                    COL_TECH_AP,
+                    COL_AVG_ACC,
+                    COL_PLAYS,
+                ]:
+                    self.table.setItem(row, col, NumericTableWidgetItem("", None))
 
             # ScoreSaber 列は空
             for col in [COL_SS_PP, COL_SS_PLAYS, COL_SS_GLOBAL_RANK, COL_SS_COUNTRY_RANK]:

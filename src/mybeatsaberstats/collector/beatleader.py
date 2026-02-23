@@ -124,13 +124,23 @@ def _extract_leaderboard_timeset_from_score_item(item: dict) -> Optional[int]:
 def _get_beatleader_leaderboards_ranked(
     session: requests.Session,
     progress: Optional[Callable[[int, Optional[int]], None]] = None,
+    fetch_until: Optional[datetime] = None,
 ) -> list[dict]:
     """
     BeatLeaderのRanked譜面リストをAPIから全件取得し、キャッシュも利用する。
     進捗コールバック(progress)対応。
+
+    fetch_until が指定された場合、その日時より古い timeset の譜面が現れた時点で取得を終了する。
+    sortBy は fetch_until 指定時は timestamp (新しい順) を使用する。
     """
     print("Entering _get_beatleader_leaderboards_ranked")
     cache_path = CACHE_DIR / "beatleader_ranked_maps.json"
+
+    # fetch_until を Unix タイムスタンプに変換
+    fetch_until_ts: Optional[int] = None
+    if fetch_until is not None:
+        fetch_until_ts = int(fetch_until.timestamp())
+        print(f"BeatLeader Ranked Maps fetch_until 指定: {fetch_until.isoformat()} (Unix: {fetch_until_ts})")
 
     page = 1
 
@@ -171,11 +181,13 @@ def _get_beatleader_leaderboards_ranked(
                 cached_total = len(leaderboards)
 
         try:
+            # fetch_until が指定されている場合は timestamp 降順で取得するため sortBy を切り替える
+            sort_by = "timestamp" if fetch_until_ts is not None else "stars"
             params_first = {
                 "page": "1",
                 "count": str(page_size),
                 "type": "Ranked",
-                "sortBy": "stars",
+                "sortBy": sort_by,
                 "order": "desc",
             }
             resp = session.get(BEATLEADER_LEADERBOARDS_URL, params=params_first, timeout=10)
@@ -188,21 +200,26 @@ def _get_beatleader_leaderboards_ranked(
                 except (TypeError, ValueError):
                     new_total = cached_total
 
-                if new_total <= cached_total:
+                # fetch_until が指定されていない場合のみ、増分なしでキャッシュ返却する
+                if new_total <= cached_total and fetch_until_ts is None:
                     if progress is not None:
                         progress(1, 1)
                     return leaderboards
 
+                # leaderboard id → アイテム の辞書を既存キャッシュから構築（重複排除用）
+                lb_by_id: dict[str, dict] = {str(lb.get("id")): lb for lb in leaderboards if isinstance(lb, dict)}
                 pages = []
-                leaderboards = []
+                reached_fetch_until = False
 
                 page = 1
                 while True:
+                    if progress is not None:
+                        progress(page, None)
                     params = {
                         "page": str(page),
                         "count": str(page_size),
                         "type": "Ranked",
-                        "sortBy": "stars",
+                        "sortBy": sort_by,
                         "order": "desc",
                     }
                     if page == 1:
@@ -222,13 +239,34 @@ def _get_beatleader_leaderboards_ranked(
                     if not isinstance(items, list) or not items:
                         break
 
-                    leaderboards.extend(lb for lb in items if isinstance(lb, dict))
+                    for lb in items:
+                        if not isinstance(lb, dict):
+                            continue
+                        # fetch_until_ts が指定されている場合は timeset で停止判定
+                        if fetch_until_ts is not None:
+                            diff = lb.get("difficulty") or {}
+                            ts_raw = (diff.get("timeset") if isinstance(diff, dict) else None) or lb.get("timeset")
+                            try:
+                                ts_val = int(ts_raw) if ts_raw is not None else None
+                            except (TypeError, ValueError):
+                                ts_val = None
+                            if ts_val is not None and ts_val < fetch_until_ts:
+                                print(f"BL Ranked Maps: fetch_until {fetch_until_ts} に到達 (timeset={ts_val})")
+                                reached_fetch_until = True
+                                break
+                        lb_id = str(lb.get("id"))
+                        lb_by_id[lb_id] = lb
+
+                    if reached_fetch_until:
+                        print(f"BL Ranked Maps: fetch_until 境界に達したため取得終了。総件数: {len(lb_by_id)}")
+                        break
 
                     if len(items) < page_size:
                         break
 
                     page += 1
 
+                leaderboards = list(lb_by_id.values())
                 if pages:
                     try:
                         _save_cached_pages(cache_path, pages)
@@ -247,13 +285,19 @@ def _get_beatleader_leaderboards_ranked(
     else:
         pages = []
         leaderboards = []
+        lb_by_id_fresh: dict[str, dict] = {}
+        # fetch_until が指定されている場合は timestamp 降順で取得
+        sort_by = "timestamp" if fetch_until_ts is not None else "stars"
+        reached_fetch_until_fresh = False
         page = 1
         while True:
+            if progress is not None:
+                progress(page, None)
             params = {
                 "page": str(page),
                 "count": str(page_size),
                 "type": "Ranked",
-                "sortBy": "stars",
+                "sortBy": sort_by,
                 "order": "desc",
             }
             resp = session.get(BEATLEADER_LEADERBOARDS_URL, params=params, timeout=10)
@@ -270,12 +314,34 @@ def _get_beatleader_leaderboards_ranked(
             if not isinstance(items, list) or not items:
                 break
 
-            leaderboards.extend(lb for lb in items if isinstance(lb, dict))
+            for lb in items:
+                if not isinstance(lb, dict):
+                    continue
+                if fetch_until_ts is not None:
+                    ts_raw = lb.get("timeset")
+                    try:
+                        ts_val = int(ts_raw) if ts_raw is not None else None
+                    except (TypeError, ValueError):
+                        ts_val = None
+                    if ts_val is not None and ts_val < fetch_until_ts:
+                        print(f"BL Ranked Maps (新規): fetch_until {fetch_until_ts} に到達 (timeset={ts_val})")
+                        reached_fetch_until_fresh = True
+                        break
+                lb_id_f = str(lb.get("id"))
+                lb_by_id_fresh[lb_id_f] = lb
+
+            if reached_fetch_until_fresh:
+                break
+
+            leaderboards = list(lb_by_id_fresh.values())
 
             if len(items) < page_size:
                 break
 
             page += 1
+
+        # ループ終了後に leaderboards を確定（fetch_until 到達時も含む）
+        leaderboards = list(lb_by_id_fresh.values())
 
     if pages:
         try:
@@ -289,16 +355,37 @@ def _get_beatleader_leaderboards_ranked(
     return leaderboards
 
 
+def _extract_player_timeset_from_bl_score_item(item: dict) -> Optional[int]:
+    """BeatLeaderのスコアオブジェクトからプレイヤーがプレイした時刻(Unixタイムスタンプ)を取得する。
+
+    APIの sortBy=date&order=desc で並んでいる基準の timeset を返す。
+    取得できない場合は None を返す。
+    """
+    if not isinstance(item, dict):
+        return None
+    ts = item.get("timeset")
+    if ts is None:
+        return None
+    try:
+        return int(ts)
+    except (TypeError, ValueError):
+        return None
+
+
 def _get_beatleader_player_scores(
     player_id: str,
     session: requests.Session,
     progress: Optional[Callable[[int, Optional[int]], None]] = None,
+    fetch_until: Optional[datetime] = None,
 ) -> list[dict]:
     """BeatLeader のプレイヤースコア一覧を API から全件取得し、キャッシュも利用する。
 
     以前 collector.py 側で使用していた動作確認済みのエンドポイント
     `/player/{id}/scores` + `page/count/sortBy/order` を利用しつつ、
     ページごとの進捗を progress(page, max_pages) で通知する。
+
+    fetch_until が指定された場合、それより古いスコアまで遡って取得する（ギャップ補完用）。
+    None の場合は差分のない最初のページで停止する（通常動作）。
     """
 
     print("Entering _get_beatleader_player_scores")
@@ -332,6 +419,13 @@ def _get_beatleader_player_scores(
     page = 1
     page_size = 100
     max_pages_bl: Optional[int] = None
+
+    # fetch_until が指定されている場合、Unix タイムスタンプに変換して比較に使用する
+    fetch_until_ts: Optional[int] = None
+    if fetch_until is not None:
+        fetch_until_ts = int(fetch_until.timestamp())
+        print(f"BeatLeader fetch_until 指定: {fetch_until.isoformat()} (Unix: {fetch_until_ts})")
+    reached_fetch_until = False  # fetch_until の境界に到達したかのフラグ
 
     while True:
         url = f"{BL_BASE_URL}/player/{player_id}/scores"
@@ -380,6 +474,14 @@ def _get_beatleader_player_scores(
                 print("Skipping invalid score item (not a dict)")
                 continue
 
+            # fetch_until が指定されている場合、プレイヤーのプレイ時刻をチェック
+            if fetch_until_ts is not None:
+                player_ts = _extract_player_timeset_from_bl_score_item(item)
+                if player_ts is not None and player_ts < fetch_until_ts:
+                    print(f"BeatLeader fetch_until 境界に到達: timeset={player_ts} < fetch_until_ts={fetch_until_ts} ページ: {page}")
+                    reached_fetch_until = True
+                    break
+
             leaderboard = item.get("leaderboard") if isinstance(item, dict) else None
             if leaderboard is None:
                 leaderboard = item
@@ -418,10 +520,15 @@ def _get_beatleader_player_scores(
         # ページごとの進捗をコールバックで通知
         if progress is not None:
             progress(page, max_pages_bl)
-        
+
+        # fetch_until 境界に達したら取得を終了
+        if reached_fetch_until:
+            print(f"BeatLeader fetch_until 境界に到達したため取得を終了します。ページ: {page} 総件数: {len(scores_by_lb_id)}")
+            break
+
         print(f"Completed fetching page {page} of BeatLeader scores. ranked_play_count_target: {total_play_count_target}, page_has_diff: {page_has_diff}")
-        # 差分更新の結果、プレイカウントと件数が一致し、かつこのページで変更がなければ終了
-        if total_play_count_target is not None:
+        # fetch_until が指定されていない場合のみ、差分なしで停止する通常ロジックを適用
+        if fetch_until_ts is None and total_play_count_target is not None:
             current_count = len(scores_by_lb_id)
             print(f"Current cached score count: {current_count}, Target ranked play count: {total_play_count_target} page_has_diff: {page_has_diff}")
             if current_count >= total_play_count_target and not page_has_diff:
@@ -485,7 +592,7 @@ def _extract_beatleader_accuracy(score_info: dict) -> Optional[float]:
     BeatLeaderスコアオブジェクトから精度(%)を推定して返す。
     形式の違いも吸収。
     """
-    print("Entering _extract_beatleader_accuracy")
+    # print("Entering _extract_beatleader_accuracy")
     if not isinstance(score_info, dict):
         return None
 
