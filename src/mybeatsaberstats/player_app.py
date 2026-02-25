@@ -86,37 +86,99 @@ class TakeSnapshotDialog(QDialog):
 
         layout.addWidget(group)
 
-        # スコア取得をどこまで遡るか（ギャップ補完用）
-        until_group = QGroupBox("Fetch Until (for backfilling gaps)", self)
-        until_layout = QFormLayout(until_group)
+        # スコア取得モード（Fetch ALL / Fetch Until は排他）
+        fetch_mode_group = QGroupBox("Score Fetch Mode", self)
+        fetch_mode_layout = QFormLayout(fetch_mode_group)
 
-        # ScoreSaber fetch_until
-        ss_row = QHBoxLayout()
-        self._cb_ss_until = QCheckBox(self)
+        # --- ScoreSaber ---
+        ss_mode_row = QHBoxLayout()
+        self._cb_ss_fetch_all = QCheckBox("Fetch ALL (full history)", self)
+        self._cb_ss_fetch_all.setChecked(False)
+        self._cb_ss_fetch_all.setEnabled(self._cb_scoresaber.isChecked())
+        ss_mode_row.addWidget(self._cb_ss_fetch_all)
+        ss_mode_row.addSpacing(16)
+        self._cb_ss_until = QCheckBox("Until:", self)
         self._cb_ss_until.setChecked(False)
+        self._cb_ss_until.setEnabled(self._cb_scoresaber.isChecked())
         self._dt_ss_until = QDateTimeEdit(QDateTime.currentDateTime(), self)
         self._dt_ss_until.setDisplayFormat("yyyy-MM-dd HH:mm:ss")
         self._dt_ss_until.setCalendarPopup(True)
         self._dt_ss_until.setEnabled(False)
         self._cb_ss_until.toggled.connect(self._dt_ss_until.setEnabled)
-        ss_row.addWidget(self._cb_ss_until)
-        ss_row.addWidget(self._dt_ss_until, 1)
-        until_layout.addRow("ScoreSaber fetch until:", ss_row)
+        ss_mode_row.addWidget(self._cb_ss_until)
+        ss_mode_row.addWidget(self._dt_ss_until, 1)
+        fetch_mode_layout.addRow("ScoreSaber:", ss_mode_row)
 
-        # BeatLeader fetch_until
-        bl_row = QHBoxLayout()
-        self._cb_bl_until = QCheckBox(self)
+        # --- BeatLeader ---
+        bl_mode_row = QHBoxLayout()
+        self._cb_bl_fetch_all = QCheckBox("Fetch ALL (full history)", self)
+        self._cb_bl_fetch_all.setChecked(False)
+        self._cb_bl_fetch_all.setEnabled(self._cb_beatleader.isChecked())
+        bl_mode_row.addWidget(self._cb_bl_fetch_all)
+        bl_mode_row.addSpacing(16)
+        self._cb_bl_until = QCheckBox("Until:", self)
         self._cb_bl_until.setChecked(False)
+        self._cb_bl_until.setEnabled(self._cb_beatleader.isChecked())
         self._dt_bl_until = QDateTimeEdit(QDateTime.currentDateTime(), self)
         self._dt_bl_until.setDisplayFormat("yyyy-MM-dd HH:mm:ss")
         self._dt_bl_until.setCalendarPopup(True)
         self._dt_bl_until.setEnabled(False)
         self._cb_bl_until.toggled.connect(self._dt_bl_until.setEnabled)
-        bl_row.addWidget(self._cb_bl_until)
-        bl_row.addWidget(self._dt_bl_until, 1)
-        until_layout.addRow("BeatLeader fetch until:", bl_row)
+        bl_mode_row.addWidget(self._cb_bl_until)
+        bl_mode_row.addWidget(self._dt_bl_until, 1)
+        fetch_mode_layout.addRow("BeatLeader:", bl_mode_row)
 
-        layout.addWidget(until_group)
+        layout.addWidget(fetch_mode_group)
+
+        # 親チェックの ON/OFF に応じてモード行全体を有効/無効化
+        def _ss_enabled_toggled(checked: bool) -> None:
+            self._cb_ss_fetch_all.setEnabled(checked and not self._cb_ss_until.isChecked())
+            self._cb_ss_until.setEnabled(checked and not self._cb_ss_fetch_all.isChecked())
+            self._dt_ss_until.setEnabled(checked and self._cb_ss_until.isChecked())
+
+        def _bl_enabled_toggled(checked: bool) -> None:
+            self._cb_bl_fetch_all.setEnabled(checked and not self._cb_bl_until.isChecked())
+            self._cb_bl_until.setEnabled(checked and not self._cb_bl_fetch_all.isChecked())
+            self._dt_bl_until.setEnabled(checked and self._cb_bl_until.isChecked())
+
+        self._cb_scoresaber.toggled.connect(_ss_enabled_toggled)
+        self._cb_beatleader.toggled.connect(_bl_enabled_toggled)
+
+        # Fetch ALL と Fetch Until は相互排他
+        def _ss_all_toggled(checked: bool) -> None:
+            if checked:
+                self._cb_ss_until.setChecked(False)
+                self._cb_ss_until.setEnabled(False)
+                self._dt_ss_until.setEnabled(False)
+            else:
+                self._cb_ss_until.setEnabled(self._cb_scoresaber.isChecked())
+
+        def _ss_until_toggled(checked: bool) -> None:
+            if checked:
+                self._cb_ss_fetch_all.setChecked(False)
+                self._cb_ss_fetch_all.setEnabled(False)
+            else:
+                self._cb_ss_fetch_all.setEnabled(self._cb_scoresaber.isChecked())
+
+        def _bl_all_toggled(checked: bool) -> None:
+            if checked:
+                self._cb_bl_until.setChecked(False)
+                self._cb_bl_until.setEnabled(False)
+                self._dt_bl_until.setEnabled(False)
+            else:
+                self._cb_bl_until.setEnabled(self._cb_beatleader.isChecked())
+
+        def _bl_until_toggled(checked: bool) -> None:
+            if checked:
+                self._cb_bl_fetch_all.setChecked(False)
+                self._cb_bl_fetch_all.setEnabled(False)
+            else:
+                self._cb_bl_fetch_all.setEnabled(self._cb_beatleader.isChecked())
+
+        self._cb_ss_fetch_all.toggled.connect(_ss_all_toggled)
+        self._cb_ss_until.toggled.connect(_ss_until_toggled)
+        self._cb_bl_fetch_all.toggled.connect(_bl_all_toggled)
+        self._cb_bl_until.toggled.connect(_bl_until_toggled)
 
         # OK / Cancel
         buttons = QDialogButtonBox(
@@ -159,6 +221,8 @@ class TakeSnapshotDialog(QDialog):
             bl_fetch_until=bl_until,
             ss_ranked_until=ss_until,
             bl_ranked_until=bl_until,
+            ss_fetch_all=self._cb_ss_fetch_all.isChecked(),
+            bl_fetch_all=self._cb_bl_fetch_all.isChecked(),
         )
 
 
@@ -640,6 +704,26 @@ class PlayerWindow(QMainWindow):
             try:
                 ss_data = json.loads(ss_path.read_text(encoding="utf-8"))
                 for item in ss_data:
+                    if not isinstance(item, dict):
+                        continue
+                    sid = str(item.get("id") or "")
+                    country = str(item.get("country") or "").upper()
+                    if sid and country and sid not in self._ss_country_by_id:
+                        self._ss_country_by_id[sid] = country
+            except Exception:  # noqa: BLE001
+                continue
+
+        # BeatLeader キャッシュからも補完する。
+        # BL にしか存在しない（SS キャッシュに未登録の）プレイヤーでも
+        # AccSaber に登録されている場合、国コードを特定するために必要。
+        # app.py の _populate_table と同じ方針。
+        for bl_cache in ["beatleader_ranking.json", "beatleader_JP.json"]:
+            bl_path = cache_dir / bl_cache
+            if not bl_path.exists():
+                continue
+            try:
+                bl_data = json.loads(bl_path.read_text(encoding="utf-8"))
+                for item in bl_data:
                     if not isinstance(item, dict):
                         continue
                     sid = str(item.get("id") or "")

@@ -41,7 +41,6 @@ from ..accsaber import (
     ACCSABER_MIN_AP_SKILL,
 )
 from .accsaber import (
-    _accsaber_profile_exists,
     _load_list_cache,
     _find_accsaber_for_scoresaber_id,
     _find_accsaber_skill_for_scoresaber_id,
@@ -72,6 +71,8 @@ class SnapshotOptions:
     bl_fetch_until: Optional[datetime] = None  # BeatLeader スコア取得の遡り期限 (None=自動)
     ss_ranked_until: Optional[datetime] = None  # ScoreSaber Ranked Maps 取得の遡り期限 (None=自動)
     bl_ranked_until: Optional[datetime] = None  # BeatLeader Ranked Maps 取得の遡り期限 (None=自動)
+    ss_fetch_all: bool = False  # ScoreSaber: 全スコアを最初から再取得 (キャッシュ差分を無視)
+    bl_fetch_all: bool = False  # BeatLeader: 全スコアを最初から再取得 (キャッシュ差分を無視)
 
 
 SCORESABER_MIN_PP_GLOBAL = 4000.0
@@ -264,122 +265,102 @@ def ensure_global_rank_caches(
     bl_rank_path = CACHE_DIR / "beatleader_ranking.json"
     acc_rank_path = CACHE_DIR / "accsaber_ranking.json"
 
-    # steam_id が指定されていない場合のみ、「既に 3 種のキャッシュが揃っていれば何もしない」従来挙動を維持する
-    if steam_id is None and ss_rank_path.exists() and bl_rank_path.exists() and acc_rank_path.exists():
-        return
-
-    # この呼び出し対象のプレイヤーが AccSaber に参加していない場合は、
-    # AccSaber のリーダーボード取得自体をスキップする（Scoresaber/BeatLeader は通常どおり更新）。
-    skip_accsaber = False
-    if steam_id and _is_steam_id(steam_id):
-        try:
-            if not _accsaber_profile_exists(steam_id, session):
-                skip_accsaber = True
-        except Exception:  # noqa: BLE001
-            skip_accsaber = False
-
     # まずは AccSaber overall (10000AP 以上) を最新化する
-    if not skip_accsaber:
-        try:
-            acc_players: list[AccSaberPlayer] = []
-            max_pages = 200
+    # AccSaber REST API は全プレイヤーを一括返却するため、対象プレイヤーが参加していなくても
+    # 他プレイヤー分のキャッシュを更新するために常にフェッチする。
+    try:
+        acc_players: list[AccSaberPlayer] = []
+        max_pages = 200
 
-            def _parse_ap(text: str | None) -> float:
-                if not text:
-                    return 0.0
-                t = text.replace(",", "")
-                import re as _re
+        def _parse_ap(text: str | None) -> float:
+            if not text:
+                return 0.0
+            t = text.replace(",", "")
+            import re as _re
 
-                m = _re.search(r"[-+]?\d*\.?\d+", t)
-                if not m:
-                    return 0.0
-                try:
-                    return float(m.group(0))
-                except ValueError:
-                    return 0.0
-
-            for page in range(1, max_pages + 1):
-                # 0.00〜0.30 を AccSaber フェーズとして使う
-                phase_frac = min(1.0, page / max_pages)
-                _step(0.0 + 0.30 * phase_frac, f"Fetching AccSaber overall ranking... (page {page})")
-
-                page_players = fetch_overall(country=None, page=page, session=session)
-                if not page_players:
-                    break
-                for p in page_players:
-                    ap_value = _parse_ap(getattr(p, "total_ap", ""))
-                    if ap_value >= ACCSABER_MIN_AP_GLOBAL:
-                        acc_players.append(p)
-
-                # 最後のプレイヤーの AP がしきい値を下回ったら、それ以降のページも対象外とみなして打ち切る
-                last_ap = _parse_ap(getattr(page_players[-1], "total_ap", ""))
-                if last_ap < ACCSABER_MIN_AP_GLOBAL:
-                    break
-
-            # Overall 10000AP 以上のプレイヤー集合に対して、True / Standard / Tech の AP だけを埋める
-            by_id: dict[str, AccSaberPlayer] = {}
-            for p in acc_players:
-                sid = getattr(p, "scoresaber_id", None)
-                if not sid:
-                    continue
-                by_id[str(sid)] = p
-
-            def _enrich_skill(leaderboard_fetch, attr_name: str, label: str) -> None:
-                if not by_id:
-                    return
-
-                remaining_ids: set[str] = set(by_id.keys())
-                max_pages_skill = 200
-                for page in range(1, max_pages_skill + 1):
-                    if not remaining_ids:
-                        break
-
-                    # 0.00〜0.30 の中で簡易的に進捗を動かす（詳細な割合は気にしない）
-                    _step(0.15, f"Fetching AccSaber {label} AP... (page {page})")
-
-                    try:
-                        skill_players = leaderboard_fetch(country=None, page=page, session=session)
-                    except Exception:  # noqa: BLE001
-                        break
-                    if not skill_players:
-                        break
-
-                    for sp in skill_players:
-                        sid = getattr(sp, "scoresaber_id", None)
-                        if not sid:
-                            continue
-                        # AP が 3000 未満のプレイヤーはスキルランキング対象外とする
-                        ap_value = _parse_ap(getattr(sp, "total_ap", ""))
-                        if ap_value < ACCSABER_MIN_AP_SKILL:
-                            continue
-
-                        sid_str = str(sid)
-                        if sid_str not in remaining_ids:
-                            continue
-                        target = by_id.get(sid_str)
-                        if target is None:
-                            continue
-                        # skill 側の total_ap を対応するフィールドにコピーする
-                        setattr(target, attr_name, getattr(sp, "total_ap", ""))
-                        remaining_ids.discard(sid_str)
-
-                    # 最後のプレイヤーの AP がしきい値を下回ったら、それ以降のページも対象外とみなして打ち切る
-                    last_ap_skill = _parse_ap(getattr(skill_players[-1], "total_ap", ""))
-                    if last_ap_skill < ACCSABER_MIN_AP_SKILL:
-                        break
-
+            m = _re.search(r"[-+]?\d*\.?\d+", t)
+            if not m:
+                return 0.0
             try:
-                _enrich_skill(fetch_true, "true_ap", "True")
-                _enrich_skill(fetch_standard, "standard_ap", "Standard")
-                _enrich_skill(fetch_tech, "tech_ap", "Tech")
-            except Exception:  # noqa: BLE001
-                # Skill AP 詳細取得に失敗しても Overall 自体は使えるようにする
-                pass
-            map_store_instance = MapStore()
-            map_store_instance.acc_players = {p.scoresaber_id: p for p in acc_players if p.scoresaber_id}   
-            _save_list_cache(acc_rank_path, acc_players)
+                return float(m.group(0))
+            except ValueError:
+                return 0.0
+
+        for page in range(1, max_pages + 1):
+            # 0.00〜0.30 を AccSaber フェーズとして使う
+            phase_frac = min(1.0, page / max_pages)
+            _step(0.0 + 0.30 * phase_frac, f"Fetching AccSaber overall ranking... (page {page})")
+
+            page_players = fetch_overall(country=None, page=page, session=session)
+            if not page_players:
+                break
+            for p in page_players:
+                ap_value = _parse_ap(getattr(p, "total_ap", ""))
+                if ap_value >= ACCSABER_MIN_AP_GLOBAL:
+                    acc_players.append(p)
+
+            # 最後のプレイヤーの AP がしきい値を下回ったら、それ以降のページも対象外とみなして打ち切る
+            last_ap = _parse_ap(getattr(page_players[-1], "total_ap", ""))
+            if last_ap < ACCSABER_MIN_AP_GLOBAL:
+                break
+
+        # Overall 10000AP 以上のプレイヤー集合に対して、True / Standard / Tech の AP だけを埋める
+        by_id: dict[str, AccSaberPlayer] = {}
+        for p in acc_players:
+            sid = getattr(p, "scoresaber_id", None)
+            if not sid:
+                continue
+            by_id[str(sid)] = p
+
+        def _enrich_skill(leaderboard_fetch, attr_name: str, label: str) -> None:
+            max_pages_skill = 200
+            for page in range(1, max_pages_skill + 1):
+                # 0.00〜0.30 の中で簡易的に進捗を動かす（詳細な割合は気にしない）
+                _step(0.15, f"Fetching AccSaber {label} AP... (page {page})")
+
+                try:
+                    skill_players = leaderboard_fetch(country=None, page=page, session=session)
+                except Exception:  # noqa: BLE001
+                    break
+                if not skill_players:
+                    break
+
+                for sp in skill_players:
+                    sid = getattr(sp, "scoresaber_id", None)
+                    if not sid:
+                        continue
+                    sid_str = str(sid)
+                    if sid_str in by_id:
+                        # Overall にも存在するプレイヤー → スキル AP を埋め込む
+                        setattr(by_id[sid_str], attr_name, getattr(sp, "total_ap", ""))
+                    else:
+                        # Overall に存在しないカテゴリ専用プレイヤー → 新規エントリとして追加
+                        # Country Rank の母集団に含めるために必要
+                        new_p = AccSaberPlayer(
+                            rank=getattr(sp, "rank", 0),
+                            name=getattr(sp, "name", ""),
+                            total_ap="0",
+                            average_acc=getattr(sp, "average_acc", ""),
+                            plays=getattr(sp, "plays", ""),
+                            top_play_pp=getattr(sp, "top_play_pp", ""),
+                            scoresaber_id=sid_str,
+                        )
+                        setattr(new_p, attr_name, getattr(sp, "total_ap", ""))
+                        acc_players.append(new_p)
+                        by_id[sid_str] = new_p
+
+        try:
+            _enrich_skill(fetch_true, "true_ap", "True")
+            _enrich_skill(fetch_standard, "standard_ap", "Standard")
+            _enrich_skill(fetch_tech, "tech_ap", "Tech")
         except Exception:  # noqa: BLE001
-            _step(0.30, "Failed to fetch AccSaber ranking (continuing)...")
+            # Skill AP 詳細取得に失敗しても Overall 自体は使えるようにする
+            pass
+        map_store_instance = MapStore()
+        map_store_instance.acc_players = {p.scoresaber_id: p for p in acc_players if p.scoresaber_id}
+        _save_list_cache(acc_rank_path, acc_players)
+    except Exception:  # noqa: BLE001
+        _step(0.30, "Failed to fetch AccSaber ranking (continuing)...")
 
     # steam_id から国籍を特定する (あれば大文字 2 文字コード)
     target_country: Optional[str] = None
@@ -1076,7 +1057,10 @@ def create_snapshot_for_steam_id(
                     _step(0.15 + 0.05 * frac, msg)
 
                 print("5. ScoreSaber プレイヤースコアキャッシュ更新...")
-                _get_scoresaber_player_scores(scoresaber_id, session, progress=_ss_scores_progress, fetch_until=options.ss_fetch_until)
+                _ss_effective_until = datetime(2000, 1, 1) if options.ss_fetch_all else options.ss_fetch_until
+                if options.ss_fetch_all:
+                    print("ScoreSaber: 全スコア再取得モード (fetch_all=True)")
+                _get_scoresaber_player_scores(scoresaber_id, session, progress=_ss_scores_progress, fetch_until=_ss_effective_until)
             except Exception as exc:  # noqa: BLE001
                 _rethrow_if_cancelled(exc)
                 pass
@@ -1159,7 +1143,10 @@ def create_snapshot_for_steam_id(
                         msg = f"Fetching BeatLeader player scores (page {page}/?)..."
                     _step(0.30 + 0.05 * frac, msg)
                 print("7. BeatLeader プレイヤースコアキャッシュ更新...")
-                _get_beatleader_player_scores(beatleader_id, session, progress=_bl_scores_progress, fetch_until=options.bl_fetch_until)
+                _bl_effective_until = datetime(2000, 1, 1) if options.bl_fetch_all else options.bl_fetch_until
+                if options.bl_fetch_all:
+                    print("BeatLeader: 全スコア再取得モード (fetch_all=True)")
+                _get_beatleader_player_scores(beatleader_id, session, progress=_bl_scores_progress, fetch_until=_bl_effective_until)
             except Exception as exc:  # noqa: BLE001
                 _rethrow_if_cancelled(exc)
                 pass

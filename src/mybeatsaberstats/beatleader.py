@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import List, Optional, Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import math
 
 import requests
 import time
@@ -77,29 +79,19 @@ def fetch_players_ranking(
     max_pages: int = 200,
     progress: Optional[Callable[[int, int], None]] = None,
     country: Optional[str] = None,
+    max_workers: int = 5,
 ) -> List[BeatLeaderPlayer]:
     """BeatLeader のランキングからプレイヤー一覧を取得する。
 
-    /players エンドポイントを使用し、pp 降順でページングしながら取得する。
+    /players エンドポイントをページングしながら取得する。
+    max_workers 並列でページを同時取得するため、逐次取得に比べて大幅に高速化される。
     min_pp を指定すると、その PP 以上のプレイヤーだけを対象にする。
 
-    country に 2 文字の国コード ("JP" など) を指定すると、その国のランキングに
-    サーバ側でもフィルタを掛ける。これにより、グローバルではなく「表示している
-    国籍の BeatLeader ランキング」だけを対象にし、ページ数を減らしてタイムアウトや
-    レートリミットのリスクを下げる。
-
-    注意:
-    - 以前はサーバ側の `pp_range` フィルタを使っていたが、BeatLeader API 側で
-      返却件数に上限があるため (上位 500 位程度で打ち切られる)、これを廃止した。
-    - 代わりに「ランキングを上から順にページングし、ページ末尾のプレイヤーの
-      PP が min_pp を下回ったら打ち切る」方式に変更している。
-      これにより、min_pp 以上のプレイヤーを可能な限りすべて取得できる。
+    country に 2 文字の国コード ("JP" など) を指定すると、サーバ側でフィルタを掛ける。
     """
 
     if session is None:
         session = requests.Session()
-
-    players: List[BeatLeaderPlayer] = []
 
     params_base: dict[str, str] = {
         "sortBy": "pp",
@@ -107,133 +99,128 @@ def fetch_players_ranking(
         "count": str(page_size),
     }
     if country:
-        # BeatLeader 側で国コードによるフィルタを掛ける
         params_base["countries"] = country.upper()
 
-    print(f"fBeatLeader: Starting fetch with min_pp={min_pp}, page_size={page_size}, max_pages={max_pages}")
-    for page in range(1, max_pages + 1):
-        if progress is not None:
-            try:
-                progress(page, max_pages)
-            except Exception:
-                # 進捗コールバック側のエラーでループが止まらないようにする
-                pass
+    def _fetch_single_page(page: int) -> tuple[int, list, dict]:
+        """1ページ分を取得して (page, items, metadata) を返す。エラー時は空リストを返す。"""
         params = dict(params_base)
         params["page"] = str(page)
-
-        # レートリミット対策: 1ページごとに少し待つ + 429 のときは Retry-After を見てリトライ
         retries = 0
         while True:
             try:
-                resp = session.get(f"{BASE_URL}/players", params=params, timeout=10)
-            except requests.exceptions.ReadTimeout as e:
-                # タイムアウトは何度かリトライしてみる
+                resp = session.get(f"{BASE_URL}/players", params=params, timeout=15)
+            except requests.exceptions.ReadTimeout:
                 retries += 1
-                wait_sec = 5.0
-                print(
-                    f"fBeatLeader: Read timeout on page {page}, retry {retries}. "
-                    f"Sleeping {wait_sec} seconds... ({e})"
-                )
                 if retries >= 3:
-                    print("fBeatLeader: Too many read timeouts, aborting this page.")
-                    resp = None
-                    break
-                time.sleep(wait_sec)
+                    return page, [], {}
+                time.sleep(5.0)
                 continue
-            except Exception as e:
-                # その他のネットワークレベルのエラー
-                print(f"fBeatLeader: Request error on page {page}: {e}")
-                resp = None
-
-            if resp is None:
-                break
+            except Exception:
+                return page, [], {}
 
             if resp.status_code == 429:
-                # API calls quota exceeded (10 per 10s) 対策
                 retries += 1
-                retry_after_header = resp.headers.get("Retry-After") if hasattr(resp, "headers") else None
+                retry_after_header = resp.headers.get("Retry-After")
                 try:
-                    retry_after_sec = float(retry_after_header) if retry_after_header is not None else 10.0
+                    wait = float(retry_after_header) if retry_after_header else 10.0
                 except (TypeError, ValueError):
-                    retry_after_sec = 10.0
-                print(
-                    f"fBeatLeader: HTTP 429 on page {page}, retry {retries}. "
-                    f"Sleeping {retry_after_sec} seconds..."
-                )
-                time.sleep(retry_after_sec)
-
+                    wait = 10.0
                 if retries >= 5:
-                    # あまりにも連続して 429 が出る場合は諦める
-                    print("fBeatLeader: Too many 429 responses, aborting.")
-                    break
-                # 同じページをリトライ
+                    return page, [], {}
+                time.sleep(wait)
                 continue
 
             if resp.status_code != 200:
-                # HTTP ステータスエラー。BeatLeader 側のレートリミットや一時エラーの可能性もある
-                text_snippet = resp.text[:200].replace("\n", " ") if hasattr(resp, "text") else ""
-                print(
-                    f"fBeatLeader: HTTP {resp.status_code} on page {page}. "
-                    f"params={params} body_snippet={text_snippet}"
-                )
-                break
+                return page, [], {}
 
-            # 正常に 200 が返ってきたのでループを抜けて処理を続行
-            break
+            try:
+                data = resp.json()
+            except Exception:
+                return page, [], {}
 
-        if resp is None or resp.status_code != 200:
-            # ネットワークエラー or ステータスエラーで中断
-            break
+            return page, data.get("data") or [], data.get("metadata") or {}
 
+    # ──────────────────────────────────────────────
+    # Phase 1: ページ 1 を取得してメタデータの total を得る
+    # ──────────────────────────────────────────────
+    _, page1_items, meta1 = _fetch_single_page(1)
+    total: int = int(meta1.get("total") or 0)
+
+    if not page1_items:
+        return []
+
+    # total から必要ページ数を推定（上限は max_pages）
+    if total > 0:
+        pages_needed = min(max_pages, math.ceil(total / page_size))
+    else:
+        pages_needed = max_pages
+
+    if progress is not None:
         try:
-            data = resp.json()
-        except Exception as e:
-            print(f"fBeatLeader: Failed to parse JSON response on page {page}: {e}")
-            break
+            progress(1, pages_needed)
+        except RuntimeError:
+            raise
+        except Exception:
+            pass
 
-        # /players のレスポンスは { "metadata": ..., "data": [PlayerResponseWithStats, ...] }
-        items = data.get("data") or []
+    # ──────────────────────────────────────────────
+    # Phase 2: 残りのページを並行取得
+    # ──────────────────────────────────────────────
+    all_page_items: dict[int, list] = {1: page1_items}
+    fetched_pages = 1  # すでにページ 1 は取得済み
+
+    if pages_needed > 1:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(_fetch_single_page, pg): pg
+                for pg in range(2, pages_needed + 1)
+            }
+            for future in as_completed(futures):
+                pg_result = future.result()
+                pg = pg_result[0]
+                items = pg_result[1]
+                all_page_items[pg] = items
+                fetched_pages += 1
+                if progress is not None:
+                    try:
+                        progress(fetched_pages, pages_needed)
+                    except RuntimeError:
+                        raise  # キャンセルなど RuntimeError は呼び出し元に伝播させる
+                    except Exception:
+                        pass
+
+    # ──────────────────────────────────────────────
+    # Phase 3: ページ順に並べて min_pp フィルタを掛けながら集約
+    # pp は降順なので、page N の末尾が min_pp 未満になった時点で残ページも不要
+    # ──────────────────────────────────────────────
+    players: List[BeatLeaderPlayer] = []
+    for pg in range(1, pages_needed + 1):
+        items = all_page_items.get(pg, [])
         if not items:
-            print("fBeatLeader: No more data")
             break
 
+        page_stop = False
         for p in items:
             try:
                 pp = float(p.get("pp", 0.0))
-                print(f"fBeatLeader pp: {pp}")
-                # ローカル側で min_pp フィルタを掛ける
-                if min_pp > 0 and pp < min_pp:
-                    print("fBeatLeader: Skipping player below min_pp")
-                    continue
-                players.append(
-                    BeatLeaderPlayer(
-                        id=str(p.get("id", "")),
-                        name=str(p.get("name", "")),
-                        country=(p.get("country") or None),
-                        pp=pp,
-                        global_rank=int(p.get("rank", 0)),
-                        country_rank=int(p.get("countryRank", 0)),
-                    )
-                )
             except (TypeError, ValueError):
-                print("fBeatLeader: Skipping invalid player data")
                 continue
-
-        # ページ末尾のプレイヤーの PP を見て、しきい値を下回ったら
-        # それ以降のページもすべて min_pp 未満になるので終了する。
-        try:
-            last_pp = float(items[-1].get("pp", 0.0) or 0.0)
-        except (TypeError, ValueError, IndexError):
-            last_pp = 0.0
-        print(f"fBeatLeader last_pp: {last_pp}")
-        if min_pp > 0 and last_pp < min_pp:
-            print("fBeatLeader: Last page reached due to min_pp threshold")
+            if min_pp > 0 and pp < min_pp:
+                page_stop = True
+                break
+            players.append(
+                BeatLeaderPlayer(
+                    id=str(p.get("id", "")),
+                    name=str(p.get("name", "")),
+                    country=(p.get("country") or None),
+                    pp=pp,
+                    global_rank=int(p.get("rank", 0)),
+                    country_rank=int(p.get("countryRank", 0)),
+                )
+            )
+        if page_stop:
             break
-
-        # ある程度ページを読み切っても件数が page_size 未満になった場合も
-        # 最終ページとみなして終了する。
         if len(items) < page_size:
-            print("fBeatLeader: Last page reached")
             break
 
     return players

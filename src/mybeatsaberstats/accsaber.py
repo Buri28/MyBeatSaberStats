@@ -3,12 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
-import re
 import requests
-from bs4 import BeautifulSoup
 
 
-BASE_URL = "https://accsaber.com/leaderboards/overall"
+BASE_URL = "https://api.accsaber.com/categories"
 
 _PLAYLIST_URLS: Dict[str, str] = {
     "true": "https://api.accsaber.com/playlists/true",
@@ -20,10 +18,12 @@ _PLAYLIST_MAP_COUNTS_CACHE: Optional[Dict[str, int]] = None
 
 
 # AccSaber グローバルランキングをキャッシュする際の下限 AP
-ACCSABER_MIN_AP_GLOBAL = 10000.0
+# AccSaber の総登録者数が少ない（~1700人程度）ため全件取得する
+ACCSABER_MIN_AP_GLOBAL = 0.0
 
 # True / Standard / Tech のランキングで扱う下限 AP
-ACCSABER_MIN_AP_SKILL = 3000.0
+# AccSaber の各カテゴリも総登録者数が少ない（~1500人程度）ため全件取得する
+ACCSABER_MIN_AP_SKILL = 0.0
 
 
 @dataclass
@@ -41,75 +41,115 @@ class AccSaberPlayer:
 
 
 def _fetch_leaderboard(
-    base_url: str,
+    category: str,
     country: Optional[str] = None,
     page: int = 1,
     session: Optional[requests.Session] = None,
 ) -> List[AccSaberPlayer]:
-    """指定されたリーダーボードURLから 1 ページ分のランキングを取得する共通処理。"""
+    """AccSaber 公式 REST API からカテゴリ別ランキングを取得する。
+
+    https://api.accsaber.com/categories/{category}/standings を使用する。
+    API は全プレイヤーを一括返却するため page=1 のみデータを返し、
+    page>1 は空リストを返す（ページング打ち切り対応）。
+    """
 
     if session is None:
         session = requests.Session()
 
-    # requests の params は文字列系を想定しているので str に揃える
-    params: dict[str, str] = {"page": str(page)}
-    if country:
-        params["country"] = country.lower()
+    # API は全件を一括返却するので page>1 は空
+    if page > 1:
+        return []
 
-    resp = session.get(base_url, params=params, timeout=10)
+    url = f"{BASE_URL}/{category}/standings"
+
+    resp = session.get(url, timeout=30)
     resp.raise_for_status()
 
-    soup = BeautifulSoup(resp.text, "html.parser")
-    table = soup.find("table")
-    if table is None:
+    try:
+        data = resp.json()
+    except ValueError:
+        return []
+
+    if not isinstance(data, list):
         return []
 
     players: List[AccSaberPlayer] = []
-    for tr in table.find_all("tr"):
-        tds = tr.find_all("td")
-        cells = [td.get_text(strip=True) for td in tds]
-        # 期待する列数: 8 (#, avatar, name, total, avg, plays, top, device)
-        if len(cells) < 7:
+    for entry in data:
+        if not isinstance(entry, dict):
+            continue
+
+        player_id = entry.get("playerId")
+        if not player_id:
             continue
 
         try:
-            rank_str = cells[0].lstrip("#")
-            rank = int(rank_str)
-        except ValueError:
+            rank = int(entry.get("rank", 0))
+        except (ValueError, TypeError):
             continue
-
-        # プレイヤー名とプロフィールリンクから ScoreSaber/Steam の ID を推定
-        name = cells[2]
-
-        scoresaber_id: Optional[str] = None
-        # プレイヤー名のセル内リンクから ID と思しき数値列を抽出する
-        if len(tds) >= 3:
-            name_link = tds[2].find("a", href=True)
-            if name_link is not None:
-                href_val = name_link.get("href")
-                href_str = str(href_val or "")
-                # href 中に含まれる数字列のうち、最も長いものを ID とみなす
-                nums = re.findall(r"(\d+)", href_str)
-                if nums:
-                    scoresaber_id = max(nums, key=len)
-        total_ap = cells[3]
-        average_acc = cells[4]
-        plays = cells[5]
-        top_play_pp = cells[6]
 
         players.append(
             AccSaberPlayer(
                 rank=rank,
-                name=name,
-                total_ap=total_ap,
-                average_acc=average_acc,
-                plays=plays,
-                top_play_pp=top_play_pp,
-                scoresaber_id=scoresaber_id,
+                name=str(entry.get("playerName", "")),
+                total_ap=str(entry.get("ap", "0")),
+                average_acc=str(entry.get("averageAcc", "")),
+                plays=str(entry.get("rankedPlays", "")),
+                top_play_pp=str(entry.get("averageApPerMap", "")),
+                scoresaber_id=str(player_id),
             )
         )
 
+    # country フィルタが指定された場合はクライアント側でフィルタ
+    if country:
+        players = _filter_by_country(players, country, category, session)
+
     return players
+
+
+def _filter_by_country(
+    players: List[AccSaberPlayer],
+    country: str,
+    category: str,
+    session: requests.Session,
+) -> List[AccSaberPlayer]:
+    """国別ランキングを取得する（api.accsaber.com/countries/{country}/categories/{category}/standings）。"""
+
+    url = f"https://api.accsaber.com/countries/{country.lower()}/categories/{category}/standings"
+
+    try:
+        resp = session.get(url, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception:
+        # 国別エンドポイントが使えない場合は全データ内から avatarUrl や playerName でのフィルタは不可なので空返却
+        return []
+
+    if not isinstance(data, list):
+        return []
+
+    result: List[AccSaberPlayer] = []
+    for entry in data:
+        if not isinstance(entry, dict):
+            continue
+        player_id = entry.get("playerId")
+        if not player_id:
+            continue
+        try:
+            rank = int(entry.get("rank", 0))
+        except (ValueError, TypeError):
+            continue
+        result.append(
+            AccSaberPlayer(
+                rank=rank,
+                name=str(entry.get("playerName", "")),
+                total_ap=str(entry.get("ap", "0")),
+                average_acc=str(entry.get("averageAcc", "")),
+                plays=str(entry.get("rankedPlays", "")),
+                top_play_pp=str(entry.get("averageApPerMap", "")),
+                scoresaber_id=str(player_id),
+            )
+        )
+    return result
 
 
 def fetch_overall(
@@ -119,7 +159,7 @@ def fetch_overall(
 ) -> List[AccSaberPlayer]:
     """AccSaber のオーバーオールランキングを 1 ページ分取得する。"""
 
-    return _fetch_leaderboard(BASE_URL, country=country, page=page, session=session)
+    return _fetch_leaderboard("overall", country=country, page=page, session=session)
 
 
 def fetch_true(
@@ -129,7 +169,7 @@ def fetch_true(
 ) -> List[AccSaberPlayer]:
     """True Acc リーダーボードを 1 ページ分取得する。"""
 
-    return _fetch_leaderboard("https://accsaber.com/leaderboards/true", country=country, page=page, session=session)
+    return _fetch_leaderboard("true", country=country, page=page, session=session)
 
 
 def fetch_standard(
@@ -139,7 +179,7 @@ def fetch_standard(
 ) -> List[AccSaberPlayer]:
     """Standard Acc リーダーボードを 1 ページ分取得する。"""
 
-    return _fetch_leaderboard("https://accsaber.com/leaderboards/standard", country=country, page=page, session=session)
+    return _fetch_leaderboard("standard", country=country, page=page, session=session)
 
 
 def fetch_tech(
@@ -149,7 +189,7 @@ def fetch_tech(
 ) -> List[AccSaberPlayer]:
     """Tech Acc リーダーボードを 1 ページ分取得する。"""
 
-    return _fetch_leaderboard("https://accsaber.com/leaderboards/tech", country=country, page=page, session=session)
+    return _fetch_leaderboard("tech", country=country, page=page, session=session)
 
 
 def fetch_overall_jp(page: int = 1, session: Optional[requests.Session] = None) -> List[AccSaberPlayer]:

@@ -14,44 +14,26 @@ CACHE_DIR = BASE_DIR / "cache"
 
 def _accsaber_profile_exists(steam_id: str, session: requests.Session) -> bool:
     """指定した SteamID の AccSaber プロフィールが存在するかを確認する。
-    Remix の data ルート
-    https://accsaber.com/profile/{steam_id}?page=1&_data=routes%2Fprofile%2F%24playerId%2F%28%24category%29%2F%28scores%29
-    にアクセスし、JSON の totalCount が 0 の場合は「未参加」とみなして False を返す。
-    ネットワークエラーや JSON でないレスポンスなど、不確実な場合は True（参加している前提）とする。
+    REST API https://api.accsaber.com/players/{steam_id} を使用する。
+    404 の場合は「未参加」とみなして False を返す。
+    ネットワークエラーや予期しないレスポンスなど、不確実な場合は True（参加している前提）とする。
     """
-    
-    print("Entering _accsaber_profile_exists")
-    
-    base_url = f"https://accsaber.com/profile/{steam_id}"
-    params = {
-        "page": "1",
-        "_data": "routes/profile/$playerId/($category)/(scores)",
-    }
+
+    url = f"https://api.accsaber.com/players/{steam_id}"
 
     try:
-        resp = session.get(base_url, params=params, timeout=10)
+        resp = session.get(url, timeout=10)
     except Exception:
         return True
 
     if resp.status_code == 404:
         return False
 
-    try:
-        data = resp.json()
-    except Exception:
-        return True
-
-    scores_obj = data.get("scores") or {}
-    total = scores_obj.get("totalCount")
-    if total is None:
-        return True
-    total_int = int(total)
-
-    return total_int > 0
+    # 200 以外でも、確認不能な場合は参加していると仮定する
+    return True
 
 
 def _load_list_cache(path: Path, cls):
-    print("Entering _load_list_cache")
     if not path.exists():
         return []
     try:
@@ -67,7 +49,6 @@ def _find_accsaber_for_scoresaber_id(
     scoresaber_id: str,
     session: Optional[requests.Session] = None,
 ) -> Optional[AccSaberPlayer]:
-    print("Entering _find_accsaber_for_scoresaber_id")
     if not scoresaber_id:
         return None
 
@@ -97,7 +78,6 @@ def _find_accsaber_skill_for_scoresaber_id(
     session: Optional[requests.Session] = None,
     max_pages: int = 200,
 ) -> Optional[AccSaberPlayer]:
-    print("Entering _find_accsaber_skill_for_scoresaber_id")
     if not scoresaber_id:
         return None
 
