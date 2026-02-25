@@ -32,7 +32,7 @@ from .accsaber import (
     ACCSABER_MIN_AP_SKILL,
 )
 from .scoresaber import ScoreSaberPlayer, fetch_players
-from .beatleader import BeatLeaderPlayer, fetch_player as fetch_bl_player, fetch_players_ranking
+from .beatleader import BeatLeaderPlayer, fetch_players_ranking
 from .collector import rebuild_player_index_from_global, ensure_global_rank_caches
 from .snapshot import BASE_DIR, resource_path
 
@@ -663,15 +663,8 @@ class MainWindow(QMainWindow):
             # 表示しているプレイヤー全員をできるだけ埋めるため、
             # 対象IDをすべて解決するか、ページが尽きるまでページングする。
             def _enrich_skill(leaderboard_fetch, attr_name: str) -> None:
-                if not by_id:
-                    return
-
-                remaining_ids: set[str] = set(by_id.keys())
                 max_pages_skill = 200  # 安全上限。データが尽きたら途中で抜ける。
                 for page in range(1, max_pages_skill + 1):
-                    if not remaining_ids:
-                        break
-
                     skill_players = leaderboard_fetch(country=None, page=page)
                     if not skill_players:
                         break
@@ -680,18 +673,25 @@ class MainWindow(QMainWindow):
                         sid = getattr(sp, "scoresaber_id", None)
                         if not sid:
                             continue
-                        # スキルAPが 3000 未満のプレイヤーは対象外
-                        ap_value = _parse_ap(getattr(sp, "total_ap", ""))
-                        if ap_value < ACCSABER_MIN_AP_SKILL:
-                            continue
                         sid_str = str(sid)
-                        if sid_str not in remaining_ids:
-                            continue
-                        target = by_id.get(sid_str)
-                        if target is None:
-                            continue
-                        setattr(target, attr_name, sp.total_ap)
-                        remaining_ids.discard(sid_str)
+                        if sid_str in by_id:
+                            # Overall にも存在するプレイヤー → スキル AP を埋め込む
+                            setattr(by_id[sid_str], attr_name, sp.total_ap)
+                        else:
+                            # Overall に存在しないカテゴリ専用プレイヤー → 新規エントリとして追加
+                            # Country Rank の母集団に含めるために必要
+                            new_p = AccSaberPlayer(
+                                rank=getattr(sp, "rank", 0),
+                                name=getattr(sp, "name", ""),
+                                total_ap="0",
+                                average_acc=getattr(sp, "average_acc", ""),
+                                plays=getattr(sp, "plays", ""),
+                                top_play_pp=getattr(sp, "top_play_pp", ""),
+                                scoresaber_id=sid_str,
+                            )
+                            setattr(new_p, attr_name, sp.total_ap)
+                            acc_players.append(new_p)
+                            by_id[sid_str] = new_p
 
             try:
                 _enrich_skill(fetch_true, "true_ap")
@@ -765,70 +765,49 @@ class MainWindow(QMainWindow):
         self._load_player_index()
 
     def reload_beatleader(self, update_table: bool = True) -> None:
-        """現在の国コード & AccSaber プレイヤーに対応する BeatLeader 情報だけを API から再取得し、キャッシュを更新する。"""
+        """BeatLeader ランキングを一括取得してキャッシュを更新する。
 
-        # 「現在テーブルに表示されている行」だけを対象に、対応する AccSaber プレイヤーの ID を集める
-        # （上位200人などの固定制限ではなく、画面上の対象を埋めるイメージ）
-        unique_ids: set[str] = set()
-        ordered_ids: list[str] = []
+        個別プレイヤー fetch ではなく /players エンドポイントのページング取得を使うため高速。
+        """
+        country = self._current_country_code()
 
-        for row in range(self.table.rowCount()):
-            # AccSaber Rank / Player 名から対象プレイヤーを特定する
-            item_rank = self.table.item(row, COL_ACC_RANK)
-            item_name = self.table.item(row, COL_PLAYER)
-            if item_rank is None or item_name is None:
-                continue
+        max_pages_bl = 200
+        progress = self._create_progress_dialog(
+            "BeatLeader",
+            "Loading BeatLeader rankings...",
+            max_pages_bl,
+        )
 
-            rank_text = item_rank.text().strip()
-            name_text = item_name.text().strip()
-            try:
-                rank_val = int(rank_text)
-            except ValueError:
-                continue
+        def _on_progress(page: int, total_pages: int) -> None:
+            if progress.wasCanceled():
+                raise RuntimeError("BL_RELOAD_CANCELLED")
+            progress.setMaximum(max(max_pages_bl, total_pages))
+            progress.setValue(min(page, progress.maximum()))
+            QApplication.processEvents()
 
-            acc_match: Optional[AccSaberPlayer] = None
-            for p in self.acc_players:
-                if p.rank == rank_val and p.name == name_text:
-                    acc_match = p
-                    break
-
-            if acc_match is None:
-                continue
-
-            pid = getattr(acc_match, "scoresaber_id", None)
-            if not pid or pid in unique_ids:
-                continue
-
-            unique_ids.add(pid)
-            ordered_ids.append(pid)
-
-        if not ordered_ids:
-            self.bl_players = {}
-            self._save_bl_cache(self._bl_cache_path(), self.bl_players)
-            if update_table:
-                country = self._current_country_code()
-                self._populate_table(self.acc_players, self.ss_players, country)
+        try:
+            all_bl_players = fetch_players_ranking(
+                min_pp=BEATLEADER_MIN_PP_GLOBAL if country is None else 0.0,
+                country=country,
+                progress=_on_progress,
+                max_pages=max_pages_bl,
+            )
+        except RuntimeError as exc:
+            progress.close()
+            if "BL_RELOAD_CANCELLED" not in str(exc):
+                QMessageBox.critical(self, "Error", f"Failed to load BeatLeader leaderboard:\n{exc}")
+            return
+        except Exception as exc:  # noqa: BLE001
+            progress.close()
+            QMessageBox.critical(self, "Error", f"Failed to load BeatLeader leaderboard:\n{exc}")
             return
 
-        new_bl: Dict[str, BeatLeaderPlayer] = {}
-        progress = self._create_progress_dialog("BeatLeader", "Loading BeatLeader players...", len(ordered_ids))
-        for idx, pid in enumerate(ordered_ids, start=1):
-            if progress.wasCanceled():
-                break
-            progress.setValue(idx - 1)
-            QApplication.processEvents()
-            bl = fetch_bl_player(pid)
-            if bl is not None:
-                new_bl[pid] = bl
-
-        progress.setValue(len(ordered_ids))
         progress.close()
 
-        self.bl_players = new_bl
+        self.bl_players = {p.id: p for p in all_bl_players if p.id}
         self._save_bl_cache(self._bl_cache_path(), self.bl_players)
 
         if update_table:
-            country = self._current_country_code()
             self._populate_table(self.acc_players, self.ss_players, country)
 
     def full_sync(self) -> None:
@@ -937,6 +916,27 @@ class MainWindow(QMainWindow):
         for bl_p in self.bl_players.values():
             if bl_p.id and bl_p.country and bl_p.id not in ss_country_by_id:
                 ss_country_by_id[bl_p.id] = bl_p.country.upper()
+
+        # グローバル SS キャッシュからも補完する。
+        # country フィルタ表示時は ss_players が指定国のみになるため、
+        # AccSaber の Country Rank 計算の母集団（同一国の全 AccSaber プレイヤー）が
+        # 正確になるようにグローバルキャッシュも参照する。
+        # player_app.py の _load_player_index_countries と同じ方針。
+        for _ss_global_name in ["scoresaber_ranking.json", "scoresaber_ALL.json"]:
+            _ss_global_path = CACHE_DIR / _ss_global_name
+            if not _ss_global_path.exists():
+                continue
+            try:
+                _ss_global_data = json.loads(_ss_global_path.read_text(encoding="utf-8"))
+                for _item in _ss_global_data:
+                    if not isinstance(_item, dict):
+                        continue
+                    _sid = str(_item.get("id") or "")
+                    _cc = str(_item.get("country") or "").upper()
+                    if _sid and _cc and _sid not in ss_country_by_id:
+                        ss_country_by_id[_sid] = _cc
+            except Exception:  # noqa: BLE001
+                continue
 
         # AccSaber 側の各種 Rank / Country Rank を事前計算しておく
         acc_country_rank: dict[str, int] = {}
