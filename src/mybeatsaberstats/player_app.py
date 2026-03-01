@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
 )
 
 from .snapshot import Snapshot, SNAPSHOT_DIR, BASE_DIR, RESOURCES_DIR, StarClearStat
+from .theme import table_stylesheet, toggle as _toggle_theme, is_dark, label_cell_color, label_cell_text_color, apply_light as _apply_light
 from .accsaber import AccSaberPlayer, get_accsaber_playlist_map_counts
 from .snapshot_view import SnapshotCompareDialog
 from .snapshot_graph import SnapshotGraphDialog
@@ -325,6 +326,8 @@ class PlayerWindow(QMainWindow):
 
         # --- 上部: SteamID 選択 & 操作ボタン ---
         top_row = QHBoxLayout()
+        top_row.setSpacing(2)  # ライトモードの初期間隔
+        self._top_row = top_row
 
         top_row.addWidget(QLabel("Player (from snapshots):"))
         self.player_combo = QComboBox(self)
@@ -358,6 +361,11 @@ class PlayerWindow(QMainWindow):
         self.refresh_button = QPushButton("Refresh")
         self.refresh_button.clicked.connect(self.reload_snapshots)
         top_row.addWidget(self.refresh_button)
+
+        self.dark_mode_button = QPushButton("🌙 Dark")
+        self.dark_mode_button.setCheckable(True)
+        self.dark_mode_button.clicked.connect(self._toggle_dark_mode)
+        top_row.addWidget(self.dark_mode_button)
 
         top_row.addStretch(1)
         layout.addLayout(top_row)
@@ -924,6 +932,22 @@ class PlayerWindow(QMainWindow):
 
         return (overall_rank, true_rank, standard_rank, tech_rank)
 
+    def _toggle_dark_mode(self) -> None:
+        """ダーク / ライトモードを切り替える。"""
+        dark = _toggle_theme()
+        self.dark_mode_button.setText("☀️ Light" if dark else "🌙 Dark")
+        # ダーク時はデフォルト間隔、ライト時は素のネイティブボタンりも間隔を狭める
+        self._top_row.setSpacing(2)
+        # ラベルセルの色はテーブル再描画時に反映されるのでビューを再構築する
+        self._update_view()
+        # ランキング画面が開いていれば、そちらのテーブルも更新する
+        rw = getattr(self, "_ranking_window", None)
+        if rw is not None:
+            rw.table.setStyleSheet(table_stylesheet())
+            rw._control_row.setSpacing(2)
+            rw.dark_mode_button.setChecked(dark)
+            rw.dark_mode_button.setText("☀️ Light" if dark else "🌙 Dark")
+
     def reload_snapshots(self) -> None:
         """snapshots フォルダを読み直して、プレイヤー一覧を更新する。"""
         
@@ -1170,7 +1194,8 @@ class PlayerWindow(QMainWindow):
         for row, (label, ss_value, bl_value) in enumerate(metrics):
             self.main_table.insertRow(row)
             metric_item = QTableWidgetItem(label)
-            metric_item.setBackground(QColor(248, 248, 248))
+            metric_item.setBackground(label_cell_color())
+            metric_item.setForeground(label_cell_text_color())
             self.main_table.setItem(row, 0, metric_item)
 
             ss_text = "" if ss_value is None else str(ss_value)
@@ -1290,7 +1315,8 @@ class PlayerWindow(QMainWindow):
         for row, (label, overall, true, standard, tech) in enumerate(acc_rows):
             self.acc_table.insertRow(row)
             metric_item = QTableWidgetItem(label)
-            metric_item.setBackground(QColor(248, 248, 248))
+            metric_item.setBackground(label_cell_color())
+            metric_item.setForeground(label_cell_text_color())
             self.acc_table.setItem(row, 0, metric_item)
 
             overall_text = "" if overall is None else str(overall)
@@ -1315,7 +1341,8 @@ class PlayerWindow(QMainWindow):
         for row, s in enumerate(stats):
             self.star_table.insertRow(row)
             star_item = QTableWidgetItem(str(s.star))
-            star_item.setBackground(QColor(248, 248, 248))
+            star_item.setBackground(label_cell_color())
+            star_item.setForeground(label_cell_text_color())
             # 右寄せ
             star_item.setTextAlignment(Qt.AlignmentFlag.AlignRight)
 
@@ -1353,7 +1380,8 @@ class PlayerWindow(QMainWindow):
             total_row = self.star_table.rowCount()
             self.star_table.insertRow(total_row)
             total_item = QTableWidgetItem("Total")
-            total_item.setBackground(QColor(248, 248, 248))
+            total_item.setBackground(label_cell_color())
+            total_item.setForeground(label_cell_text_color())
             self.star_table.setItem(total_row, 0, total_item)
             self.star_table.setItem(total_row, 1, QTableWidgetItem(str(total_maps)))
             self.star_table.setItem(total_row, 2, QTableWidgetItem(str(total_clears)))
@@ -1387,7 +1415,8 @@ class PlayerWindow(QMainWindow):
         for row, s in enumerate(bl_stats):
             self.bl_star_table.insertRow(row)
             star_item = QTableWidgetItem(str(s.star))
-            star_item.setBackground(QColor(248, 248, 248))
+            star_item.setBackground(label_cell_color())
+            star_item.setForeground(label_cell_text_color())
             # 右寄せ
             star_item.setTextAlignment(Qt.AlignmentFlag.AlignRight)
 
@@ -1427,7 +1456,8 @@ class PlayerWindow(QMainWindow):
             bl_total_row = self.bl_star_table.rowCount()
             self.bl_star_table.insertRow(bl_total_row)
             total_item = QTableWidgetItem("Total")
-            total_item.setBackground(QColor(248, 248, 248))
+            total_item.setBackground(label_cell_color())
+            total_item.setForeground(label_cell_text_color())
             self.bl_star_table.setItem(bl_total_row, 0, total_item)
             self.bl_star_table.setItem(bl_total_row, 1, QTableWidgetItem(str(bl_total_maps)))
             self.bl_star_table.setItem(bl_total_row, 2, QTableWidgetItem(str(bl_total_clears)))
@@ -1477,7 +1507,8 @@ class PlayerWindow(QMainWindow):
 
 
 def run() -> None:
-    app = QApplication.instance() or QApplication([])
+    app: QApplication = QApplication.instance() or QApplication([])  # type: ignore[assignment]
+    _apply_light(app)
     window = PlayerWindow()
     # ScoreSaber / BeatLeader / AccSaber と★0〜15が見やすいように、やや横長＋縦広めに取る
     window.resize(1100, 560)

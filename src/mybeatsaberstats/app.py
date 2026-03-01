@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QProgressDialog,
 )
 
+from .theme import table_stylesheet, toggle as _toggle_theme, is_dark, apply_light as _apply_light
 from .accsaber import (
     AccSaberPlayer,
     fetch_overall,
@@ -151,6 +152,8 @@ class MainWindow(QMainWindow):
 
         # --- フィルタ UI (国選択) ---
         control_row = QHBoxLayout()
+        control_row.setSpacing(2)  # ライトモードの初期間隔
+        self._control_row = control_row
         control_row.addWidget(QLabel("Country:"))
 
         self.country_combo = QComboBox()
@@ -195,6 +198,11 @@ class MainWindow(QMainWindow):
         self.full_sync_button.clicked.connect(self.full_sync)
         control_row.addWidget(self.full_sync_button)
 
+        self.dark_mode_button = QPushButton("🌙 Dark")
+        self.dark_mode_button.setCheckable(True)
+        self.dark_mode_button.clicked.connect(self._toggle_dark_mode)
+        control_row.addWidget(self.dark_mode_button)
+
         control_row.addStretch(1)
         layout.addLayout(control_row)
 
@@ -212,7 +220,7 @@ class MainWindow(QMainWindow):
         header.setSectionsMovable(True)
         # 行をストライプにする
         self.table.setAlternatingRowColors(True)
-        self.table.setStyleSheet("QTableWidget { background-color: #ffffff; alternate-background-color: #f6f7fb; }")
+        self.table.setStyleSheet(table_stylesheet())
         
         font = self.table.font()
         font.setPointSizeF(9.0)  # フォントサイズを少し小さくする
@@ -323,6 +331,14 @@ class MainWindow(QMainWindow):
 
             if self._initial_steam_id:
                 self.focus_on_steam_id(self._initial_steam_id)
+
+    def _toggle_dark_mode(self) -> None:
+        """ダーク / ライトモードを切り替える。"""
+        dark = _toggle_theme()
+        self.dark_mode_button.setText("☀️ Light" if dark else "🌙 Dark")
+        # ダーク時はデフォルト間隔、ライト時は素のネイティブボタンりも間隔を狭める
+        self._control_row.setSpacing(2)
+        self.table.setStyleSheet(table_stylesheet())
 
     def _apply_header_icons(self) -> None:
         """各カラムに対応するサービスのアイコンを設定する。"""
@@ -1410,6 +1426,7 @@ class MainWindow(QMainWindow):
 
 def run() -> None:
     app = QApplication(sys.argv)
+    _apply_light(app)
     window = MainWindow()
     window.resize(1880, 1024)
     window.show()
