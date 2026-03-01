@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
 
 from .snapshot import Snapshot, SNAPSHOT_DIR, BASE_DIR, RESOURCES_DIR, StarClearStat
 from .theme import table_stylesheet, toggle as _toggle_theme, is_dark, label_cell_color, label_cell_text_color, apply_light as _apply_light
+from .updater import StartupUpdateChecker
 from .accsaber import AccSaberPlayer, get_accsaber_playlist_map_counts
 from .snapshot_view import SnapshotCompareDialog
 from .snapshot_graph import SnapshotGraphDialog
@@ -367,6 +368,9 @@ class PlayerWindow(QMainWindow):
         self.dark_mode_button.clicked.connect(self._toggle_dark_mode)
         top_row.addWidget(self.dark_mode_button)
 
+        self.update_button = QPushButton("🔄 Update")
+        top_row.addWidget(self.update_button)
+
         top_row.addStretch(1)
         layout.addLayout(top_row)
 
@@ -528,6 +532,10 @@ class PlayerWindow(QMainWindow):
         self.player_combo.currentIndexChanged.connect(self._on_player_changed)
 
         self.reload_snapshots()
+
+        # 起動時にバックグラウンドで更新確認を開始する
+        self._update_checker = StartupUpdateChecker(self.update_button, self)
+        self._update_checker.start()
 
     # ---------------- internal helpers ----------------
 
@@ -837,6 +845,7 @@ class PlayerWindow(QMainWindow):
                 initial_steam_id=steam_id,
                 initial_country_code=country_code,
             )
+            self._ranking_window.resize(1650, 800)
         else:
             win = self._ranking_window
             try:
