@@ -8,6 +8,14 @@ import json
 import re
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QIcon
+from .theme import (
+    label_cell_color,
+    label_cell_text_color,
+    diff_positive_bg,
+    diff_negative_bg,
+    diff_neutral_bg,
+    diff_text_color,
+)
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -632,7 +640,8 @@ class SnapshotCompareDialog(QDialog):
             text = label[len("[AS] "):]
 
         item0 = QTableWidgetItem(text)
-        item0.setBackground(QColor(248, 248, 248))
+        item0.setBackground(label_cell_color())
+        item0.setForeground(label_cell_text_color())
         if icon is not None:
             item0.setIcon(icon)
             item0.setToolTip(original_label)
@@ -671,12 +680,13 @@ class SnapshotCompareDialog(QDialog):
                 diff_item.setText(f"{diff:+d}")
 
             if diff > 0:
-                color = QColor(180, 255, 180)
+                color = diff_positive_bg()
             elif diff < 0:
-                color = QColor(255, 200, 200)
+                color = diff_negative_bg()
             else:
-                color = QColor(230, 230, 230)
+                color = diff_neutral_bg()
             diff_item.setBackground(color)
+            diff_item.setForeground(diff_text_color())
 
         table.setItem(row, 3, diff_item)
 
@@ -1133,7 +1143,8 @@ class SnapshotCompareDialog(QDialog):
                 table.insertRow(table.rowCount())
 
             star_item = QTableWidgetItem(label)
-            star_item.setBackground(QColor(248, 248, 248))
+            star_item.setBackground(label_cell_color())
+            star_item.setForeground(label_cell_text_color())
             # 右寄せ
             star_item.setTextAlignment(Qt.AlignmentFlag.AlignRight)
             table.setItem(row, 0, star_item)
@@ -1157,12 +1168,13 @@ class SnapshotCompareDialog(QDialog):
                     diff_clear_item.setText(f"{diff:+d}")
 
                 if diff > 0:
-                    color = QColor(180, 255, 180)
+                    color = diff_positive_bg()
                 elif diff < 0:
-                    color = QColor(255, 200, 200)
+                    color = diff_negative_bg()
                 else:
-                    color = QColor(230, 230, 230)
+                    color = diff_neutral_bg()
                 diff_clear_item.setBackground(color)
+                diff_clear_item.setForeground(diff_text_color())
 
             table.setItem(row, 3, diff_clear_item)
 
@@ -1181,12 +1193,13 @@ class SnapshotCompareDialog(QDialog):
                 diff_acc_item.setText(f"{diff:+.2f}%")
 
                 if diff > 0:
-                    color = QColor(180, 255, 180)
+                    color = diff_positive_bg()
                 elif diff < 0:
-                    color = QColor(255, 200, 200)
+                    color = diff_negative_bg()
                 else:
-                    color = QColor(230, 230, 230)
+                    color = diff_neutral_bg()
                 diff_acc_item.setBackground(color)
+                diff_acc_item.setForeground(diff_text_color())
 
             table.setItem(row, 6, diff_acc_item)
 
