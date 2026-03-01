@@ -1292,6 +1292,26 @@ def create_snapshot_for_steam_id(
                     if isinstance(ss_player, ScoreSaberPlayer) and ss_player.id and ss_player.country:
                         ss_country_by_id[str(ss_player.id)] = str(ss_player.country).upper()
 
+                # BeatLeader キャッシュを先に処理する（app.py と同じ優先順位）。
+                # BL の id は Steam ID (= ScoreSaber ID) と共通。
+                # scoresaber_ranking.json に古い国コードが残っている場合でも
+                # BL の最新データが優先されるよう、SS ファイルループより前に処理する。
+                for bl_cache_name in ["beatleader_JP.json", "beatleader_ranking.json"]:
+                    bl_cache_path = CACHE_DIR / bl_cache_name
+                    if not bl_cache_path.exists():
+                        continue
+                    try:
+                        bl_cache_data = json.loads(bl_cache_path.read_text(encoding="utf-8"))
+                        for bl_item in bl_cache_data:
+                            if not isinstance(bl_item, dict):
+                                continue
+                            bl_id = str(bl_item.get("id") or "")
+                            bl_cc = str(bl_item.get("country") or "").upper()
+                            if bl_id and bl_cc and bl_id not in ss_country_by_id:
+                                ss_country_by_id[bl_id] = bl_cc
+                    except Exception:  # noqa: BLE001
+                        continue
+
                 # players_index に無い SS プレイヤーを scoresaber_ranking.json から補完
                 # （BL-only として登録されているが実際は SS にも存在するプレイヤー対応）
                 for ss_cache_name in ["scoresaber_ranking.json", "scoresaber_JP.json", "scoresaber_ALL.json"]:
@@ -1323,31 +1343,35 @@ def create_snapshot_for_steam_id(
                     same_country_players.append(p)
 
                 if same_country_players:
-                    def _rank_for(get_ap) -> Optional[int]:
-                        filtered = [
-                            p
-                            for p in same_country_players
-                            if _parse_ap(get_ap(p)) >= ACCSABER_MIN_AP_SKILL
+                    def _rank_for(get_ap, skip_zero: bool = False) -> Optional[int]:
+                        # Overall は全員を母集団にする。
+                        # True / Standard / Tech は AP > 0 のプレイヤーのみを母集団にする。
+                        # ランキング画面 (app.py の _build_skill_country_ranks) と同じ方針。
+                        pool = [
+                            p for p in same_country_players
+                            if not skip_zero or _parse_ap(get_ap(p)) > 0.0
                         ]
-                        if not filtered:
+                        if not pool:
                             return None
                         players_sorted = sorted(
-                            filtered,
+                            pool,
                             key=lambda p: _parse_ap(get_ap(p)),
                             reverse=True,
                         )
                         rank_val = 1
                         for p in players_sorted:
                             sid = getattr(p, "scoresaber_id", None)
+                            if not sid:
+                                continue  # sid なしは順位にカウントしない (app.py と同じ挙動)
                             if str(sid) == scoresaber_id:
                                 return rank_val
                             rank_val += 1
                         return None
 
-                    acc_overall_rank_country = _rank_for(lambda p: getattr(p, "total_ap", ""))
-                    acc_true_rank_country = _rank_for(lambda p: getattr(p, "true_ap", ""))
-                    acc_standard_rank_country = _rank_for(lambda p: getattr(p, "standard_ap", ""))
-                    acc_tech_rank_country = _rank_for(lambda p: getattr(p, "tech_ap", ""))
+                    acc_overall_rank_country  = _rank_for(lambda p: getattr(p, "total_ap",   ""), skip_zero=False)
+                    acc_true_rank_country     = _rank_for(lambda p: getattr(p, "true_ap",     ""), skip_zero=True)
+                    acc_standard_rank_country = _rank_for(lambda p: getattr(p, "standard_ap", ""), skip_zero=True)
+                    acc_tech_rank_country     = _rank_for(lambda p: getattr(p, "tech_ap",     ""), skip_zero=True)
     else:
         print("9. AccSaber 取得スキップ（オプションが無効）")
         _step(0.60, "Skipping AccSaber data...")

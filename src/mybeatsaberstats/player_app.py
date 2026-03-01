@@ -920,9 +920,14 @@ class PlayerWindow(QMainWindow):
         if not same_country_players:
             return (None, None, None, None)
 
-        def _rank_for(get_ap) -> Optional[int]:
+        def _rank_for(get_ap, skip_zero: bool = False) -> Optional[int]:
+            pool = same_country_players
+            if skip_zero:
+                # AP が 0 / 空のプレイヤーは母集団から除外する
+                # (ランキング画面の app.py と同じ方針)
+                pool = [p for p in pool if _parse_ap(get_ap(p)) > 0.0]
             players_sorted = sorted(
-                same_country_players,
+                pool,
                 key=lambda p: _parse_ap(get_ap(p)),
                 reverse=True,
             )
@@ -934,10 +939,10 @@ class PlayerWindow(QMainWindow):
                 rank_val += 1
             return None
 
-        overall_rank = _rank_for(lambda p: getattr(p, "total_ap", ""))
-        true_rank = _rank_for(lambda p: getattr(p, "true_ap", ""))
-        standard_rank = _rank_for(lambda p: getattr(p, "standard_ap", ""))
-        tech_rank = _rank_for(lambda p: getattr(p, "tech_ap", ""))
+        overall_rank  = _rank_for(lambda p: getattr(p, "total_ap",   ""), skip_zero=False)
+        true_rank     = _rank_for(lambda p: getattr(p, "true_ap",     ""), skip_zero=True)
+        standard_rank = _rank_for(lambda p: getattr(p, "standard_ap", ""), skip_zero=True)
+        tech_rank     = _rank_for(lambda p: getattr(p, "tech_ap",     ""), skip_zero=True)
 
         return (overall_rank, true_rank, standard_rank, tech_rank)
 
@@ -1217,11 +1222,12 @@ class PlayerWindow(QMainWindow):
 
         # AccSaber テーブル（Overall / True / Standard / Tech の Global Rank / Country Rank / PlayCount）
         # Country Rank はスナップショット撮影時点の保存値を使う。
-        # 新規スナップショット撮影時にコレクターが正しく計算して保存する。
-        overall_country_rank = snap.accsaber_overall_rank_country
-        true_country_rank = snap.accsaber_true_rank_country
+        # コレクター (collector.py) がランキング画面 (app.py) と同一アルゴリズムで計算・保存するため、
+        # スナップショット比較も正しく機能する。
+        overall_country_rank  = snap.accsaber_overall_rank_country
+        true_country_rank     = snap.accsaber_true_rank_country
         standard_country_rank = snap.accsaber_standard_rank_country
-        tech_country_rank = snap.accsaber_tech_rank_country
+        tech_country_rank     = snap.accsaber_tech_rank_country
 
         # AccSaber の Country Rank はプレイヤーの国コードに基づいて表示する。
         # Rank 表示は「GlobalRank (🇨🇦 CountryRank)」のような形式にまとめる。

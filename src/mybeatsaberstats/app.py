@@ -946,7 +946,7 @@ class MainWindow(QMainWindow):
         # AccSaber の Country Rank 計算の母集団（同一国の全 AccSaber プレイヤー）が
         # 正確になるようにグローバルキャッシュも参照する。
         # player_app.py の _load_player_index_countries と同じ方針。
-        for _ss_global_name in ["scoresaber_ranking.json", "scoresaber_ALL.json"]:
+        for _ss_global_name in ["scoresaber_ranking.json", "scoresaber_JP.json", "scoresaber_ALL.json"]:
             _ss_global_path = CACHE_DIR / _ss_global_name
             if not _ss_global_path.exists():
                 continue
@@ -1071,21 +1071,6 @@ class MainWindow(QMainWindow):
                 continue
             acc_by_sid[str(sid)] = acc
 
-        # BeatLeader Country Rank を bl_players キャッシュから再計算する。
-        # player_index に古いデータが残っている場合でも正確な順位が表示されるよう、
-        # 現在の bl_players リストを PP 降順でソートして国別に連番を振る。
-        bl_country_rank_by_id: dict[str, int] = {}
-        bl_by_country: dict[str, list[BeatLeaderPlayer]] = {}
-        for bl_p in self.bl_players.values():
-            if not bl_p.id:
-                continue
-            cc = (bl_p.country or "").upper()
-            if cc:
-                bl_by_country.setdefault(cc, []).append(bl_p)
-        for cc, plist in bl_by_country.items():
-            plist_sorted = sorted(plist, key=lambda p: p.pp, reverse=True)
-            for rank_val, bl_p in enumerate(plist_sorted, start=1):
-                bl_country_rank_by_id[bl_p.id] = rank_val
 
         # いったんテーブルをクリアしてから、条件に合う行だけ追加する
         self.table.setRowCount(0)
@@ -1282,9 +1267,7 @@ class MainWindow(QMainWindow):
                 )
 
                 if country is None or bl_ok:
-                    _bl_cr = bl_country_rank_by_id.get(bl.id) if bl.id else None
-                    if _bl_cr is None:
-                        _bl_cr = bl.country_rank or None
+                    _bl_cr = (bl.country_rank or None) if bl.country_rank else None
                     _bl_cr_text = str(_bl_cr) if _bl_cr is not None else ""
                     self.table.setItem(
                         row,
@@ -1415,9 +1398,7 @@ class MainWindow(QMainWindow):
 
             # 国フィルタと一致する場合だけ Country Rank を表示（グローバル時はそのまま）
             if country is None or (bl.country and bl.country.upper() == country.upper()):
-                _bl_cr2 = bl_country_rank_by_id.get(bl.id) if bl.id else None
-                if _bl_cr2 is None:
-                    _bl_cr2 = bl.country_rank or None
+                _bl_cr2 = (bl.country_rank or None) if bl.country_rank else None
                 _bl_cr2_text = str(_bl_cr2) if _bl_cr2 is not None else ""
                 self.table.setItem(
                     row,
