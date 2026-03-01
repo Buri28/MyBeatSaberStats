@@ -4,7 +4,7 @@
 #
 
 a = Analysis(
-    ['player_main.py'],
+    ['main.py'],
     # 分析時に src 配下を解決できるようにする
     pathex=['src'],
     binaries=[],
@@ -32,7 +32,7 @@ exe = EXE(
     pyz,
     a.scripts,
     [],
-    name='MyBeatSaberStats',
+    name='MyBeatSaberRanking',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -53,5 +53,5 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name='MyBeatSaberStats',
+    name='MyBeatSaberRanking',
 )

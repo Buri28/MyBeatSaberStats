@@ -16,3 +16,6 @@ build/
 
 # ignore GitHub configuration/workflow folder
 .github/
+
+# Build release output
+release/

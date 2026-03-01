@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
 )
 
 from .theme import table_stylesheet, toggle as _toggle_theme, is_dark, apply_light as _apply_light
+from .updater import StartupUpdateChecker
 from .accsaber import (
     AccSaberPlayer,
     fetch_overall,
@@ -203,6 +204,9 @@ class MainWindow(QMainWindow):
         self.dark_mode_button.clicked.connect(self._toggle_dark_mode)
         control_row.addWidget(self.dark_mode_button)
 
+        self.update_button = QPushButton("🔄 Update")
+        control_row.addWidget(self.update_button)
+
         control_row.addStretch(1)
         layout.addLayout(control_row)
 
@@ -331,6 +335,10 @@ class MainWindow(QMainWindow):
 
             if self._initial_steam_id:
                 self.focus_on_steam_id(self._initial_steam_id)
+
+        # 起動時にバックグラウンドで更新確認を開始する
+        self._update_checker = StartupUpdateChecker(self.update_button, self)
+        self._update_checker.start()
 
     def _toggle_dark_mode(self) -> None:
         """ダーク / ライトモードを切り替える。"""
@@ -1063,8 +1071,21 @@ class MainWindow(QMainWindow):
                 continue
             acc_by_sid[str(sid)] = acc
 
-        # いったんテーブルをクリアしてから、条件に合う行だけ追加する
-        self.table.setRowCount(0)
+        # BeatLeader Country Rank を bl_players キャッシュから再計算する。
+        # player_index に古いデータが残っている場合でも正確な順位が表示されるよう、
+        # 現在の bl_players リストを PP 降順でソートして国別に連番を振る。
+        bl_country_rank_by_id: dict[str, int] = {}
+        bl_by_country: dict[str, list[BeatLeaderPlayer]] = {}
+        for bl_p in self.bl_players.values():
+            if not bl_p.id:
+                continue
+            cc = (bl_p.country or "").upper()
+            if cc:
+                bl_by_country.setdefault(cc, []).append(bl_p)
+        for cc, plist in bl_by_country.items():
+            plist_sorted = sorted(plist, key=lambda p: p.pp, reverse=True)
+            for rank_val, bl_p in enumerate(plist_sorted, start=1):
+                bl_country_rank_by_id[bl_p.id] = rank_val
 
         # いったんテーブルをクリアしてから、条件に合う行だけ追加する
         self.table.setRowCount(0)
@@ -1261,10 +1282,14 @@ class MainWindow(QMainWindow):
                 )
 
                 if country is None or bl_ok:
+                    _bl_cr = bl_country_rank_by_id.get(bl.id) if bl.id else None
+                    if _bl_cr is None:
+                        _bl_cr = bl.country_rank or None
+                    _bl_cr_text = str(_bl_cr) if _bl_cr is not None else ""
                     self.table.setItem(
                         row,
                         COL_BL_COUNTRY_RANK,
-                        NumericTableWidgetItem(str(bl.country_rank), bl.country_rank),
+                        NumericTableWidgetItem(_bl_cr_text, _bl_cr),
                     )
                 else:
                     # 他国の Country Rank は混乱を招くので空欄にする
@@ -1390,10 +1415,14 @@ class MainWindow(QMainWindow):
 
             # 国フィルタと一致する場合だけ Country Rank を表示（グローバル時はそのまま）
             if country is None or (bl.country and bl.country.upper() == country.upper()):
+                _bl_cr2 = bl_country_rank_by_id.get(bl.id) if bl.id else None
+                if _bl_cr2 is None:
+                    _bl_cr2 = bl.country_rank or None
+                _bl_cr2_text = str(_bl_cr2) if _bl_cr2 is not None else ""
                 self.table.setItem(
                     row,
                     COL_BL_COUNTRY_RANK,
-                    NumericTableWidgetItem(str(bl.country_rank), bl.country_rank),
+                    NumericTableWidgetItem(_bl_cr2_text, _bl_cr2),
                 )
             else:
                 self.table.setItem(row, COL_BL_COUNTRY_RANK, NumericTableWidgetItem("", None))
@@ -1428,6 +1457,6 @@ def run() -> None:
     app = QApplication(sys.argv)
     _apply_light(app)
     window = MainWindow()
-    window.resize(1880, 1024)
+    window.resize(1650, 800)
     window.show()
     sys.exit(app.exec())
