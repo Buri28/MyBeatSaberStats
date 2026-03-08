@@ -2,12 +2,12 @@ import sys
 import json
 import re
 from dataclasses import asdict
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Dict
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QIcon, QColor, QBrush
+from PySide6.QtGui import QIcon, QColor, QBrush, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -43,6 +43,30 @@ from .snapshot import BASE_DIR, resource_path
 
 # キャッシュは常に「プロジェクトルート / exe のあるディレクトリ」配下の cache を使う
 CACHE_DIR = BASE_DIR / "cache"
+
+
+def _read_cache_fetched_at_app(path: Path) -> Optional[datetime]:
+    """キャッシュ JSON の fetched_at フィールドを UTC datetime として返す。"""
+    if not path.exists():
+        return None
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(raw, dict):
+            fa = raw.get("fetched_at")
+            if isinstance(fa, str) and fa:
+                return datetime.fromisoformat(fa.rstrip("Z"))
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
+def _fmt_fetched_at(path: Path) -> str:
+    """fetched_at をローカル時刻の文字列で返す。未取得なら 'Never'。"""
+    dt = _read_cache_fetched_at_app(path)
+    if dt is None:
+        return "Never"
+    dt_local = dt.replace(tzinfo=timezone.utc).astimezone()
+    return dt_local.strftime("%Y-%m-%d %H:%M")
 
 
 SCORESABER_MIN_PP_GLOBAL = 4000.0
@@ -184,10 +208,6 @@ class MainWindow(QMainWindow):
         control_row.addWidget(self.country_combo)
 
         # API ごとに個別にリロードできるボタン
-        self.reload_acc_button = QPushButton("Reload AccSaber")
-        self.reload_acc_button.clicked.connect(self.reload_accsaber)
-        control_row.addWidget(self.reload_acc_button)
-
         self.reload_ss_button = QPushButton("Reload ScoreSaber")
         self.reload_ss_button.clicked.connect(self.reload_scoresaber)
         control_row.addWidget(self.reload_ss_button)
@@ -195,6 +215,10 @@ class MainWindow(QMainWindow):
         self.reload_bl_button = QPushButton("Reload BeatLeader")
         self.reload_bl_button.clicked.connect(self.reload_beatleader)
         control_row.addWidget(self.reload_bl_button)
+
+        self.reload_acc_button = QPushButton("Reload AccSaber")
+        self.reload_acc_button.clicked.connect(self.reload_accsaber)
+        control_row.addWidget(self.reload_acc_button)
 
         # 一度だけ深く同期してプレイヤーインデックスを構築するためのボタン
         self.full_sync_button = QPushButton("Full Sync (Index)")
@@ -210,6 +234,48 @@ class MainWindow(QMainWindow):
         control_row.addWidget(self.update_button)
 
         control_row.addStretch(1)
+
+        # 各サービスの最終取得日時 (アイコン + 時刻)
+        _lbl_color = "#e0e0e0" if is_dark() else "black"
+        _lbl_style = f"color: {_lbl_color}; font-size: 12px;"
+        self._fetched_text_labels: list[QLabel] = []
+        self._fetched_acc_label: QLabel
+        self._fetched_ss_label: QLabel
+        self._fetched_bl_label: QLabel
+
+        _fetched_widget = QWidget(self)
+        _fetched_layout = QHBoxLayout(_fetched_widget)
+        _fetched_layout.setContentsMargins(0, 0, 0, 0)
+        _fetched_layout.setSpacing(4)
+
+        _fetched_prefix = QLabel("Fetched", self)
+        _fetched_prefix.setStyleSheet(_lbl_style)
+        _fetched_layout.addWidget(_fetched_prefix)
+        self._fetched_text_labels.append(_fetched_prefix)
+
+        for _icon_file, _attr in [
+            ("scoresaber_logo.svg", "_fetched_ss_label"),
+            ("beatleader_logo.jpg", "_fetched_bl_label"),
+            ("asssaber_logo.webp", "_fetched_acc_label"),
+        ]:
+            _icon_path = resource_path(_icon_file)
+            _icon_lbl = QLabel(self)
+            if _icon_path.exists():
+                _px = QPixmap(str(_icon_path)).scaled(
+                    14, 14,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+                _icon_lbl.setPixmap(_px)
+            _time_lbl = QLabel("", self)
+            _time_lbl.setStyleSheet(_lbl_style)
+            _fetched_layout.addWidget(_icon_lbl)
+            _fetched_layout.addWidget(_time_lbl)
+            setattr(self, _attr, _time_lbl)
+            self._fetched_text_labels.append(_time_lbl)
+
+        control_row.addWidget(_fetched_widget)
+
         layout.addLayout(control_row)
 
         # --- ランキングテーブル ---
@@ -342,6 +408,15 @@ class MainWindow(QMainWindow):
         self._update_checker = StartupUpdateChecker(self.update_button, self)
         self._update_checker.start()
 
+        # 最終取得日時ラベルを初期表示
+        self._update_fetched_label()
+
+    def _update_fetched_label(self) -> None:
+        """AccSaber / ScoreSaber / BeatLeader の最終取得日時ラベルを更新する。"""
+        self._fetched_acc_label.setText(_fmt_fetched_at(CACHE_DIR / "accsaber_ranking.json"))
+        self._fetched_ss_label.setText(_fmt_fetched_at(self._ss_cache_path()))
+        self._fetched_bl_label.setText(_fmt_fetched_at(CACHE_DIR / "beatleader_ranking.json"))
+
     def _toggle_dark_mode(self) -> None:
         """ダーク / ライトモードを切り替える。"""
         dark = _toggle_theme()
@@ -349,6 +424,9 @@ class MainWindow(QMainWindow):
         # ダーク時はデフォルト間隔、ライト時は素のネイティブボタンりも間隔を狭める
         self._control_row.setSpacing(2)
         self.table.setStyleSheet(table_stylesheet())
+        _color = "#e0e0e0" if dark else "black"
+        for _lbl in self._fetched_text_labels:
+            _lbl.setStyleSheet(f"color: {_color}; font-size: 12px;")
 
     def _apply_header_icons(self) -> None:
         """各カラムに対応するサービスのアイコンを設定する。"""
@@ -751,6 +829,7 @@ class MainWindow(QMainWindow):
 
         self.acc_players = acc_players
         self._save_list_cache(self._acc_cache_path(), self.acc_players)
+        self._update_fetched_label()
 
         if update_table:
             country = self._current_country_code()
@@ -794,6 +873,7 @@ class MainWindow(QMainWindow):
 
         self.ss_players = ss_players
         self._save_list_cache(self._ss_cache_path(), self.ss_players)
+        self._update_fetched_label()
 
         if update_table:
             self._populate_table(self.acc_players, self.ss_players, country)
@@ -851,6 +931,7 @@ class MainWindow(QMainWindow):
 
         self.bl_players = {p.id: p for p in all_bl_players if p.id}
         self._save_bl_cache(self._bl_cache_path(), self.bl_players)
+        self._update_fetched_label()
 
         if update_table:
             self._populate_table(self.acc_players, self.ss_players, country)
@@ -889,11 +970,7 @@ class MainWindow(QMainWindow):
         self._load_all_caches_for_current_country()
         country = self._current_country_code()
         self._populate_table(self.acc_players, self.ss_players, country)
-        self.statusBar().clearMessage()
-
-        # 現在の国設定でテーブルを再描画（AccSaber は最新キャッシュが使われる）
-        country = self._current_country_code()
-        self._populate_table(self.acc_players, self.ss_players, country)
+        self._update_fetched_label()
         self.statusBar().clearMessage()
         QMessageBox.information(self, "Full Sync", "Player index has been rebuilt.")
 
@@ -1236,26 +1313,27 @@ class MainWindow(QMainWindow):
             # AP 系列・平均ACC・Plays は数値ソート (AccSaber 未参加の場合は空欄)
             if acc is not None:
                 total_ap_val = _parse_float(acc.total_ap)
-                self.table.setItem(row, COL_AP, NumericTableWidgetItem(acc.total_ap, total_ap_val))
+                self.table.setItem(row, COL_AP, NumericTableWidgetItem(f"{total_ap_val:.2f}", total_ap_val))
 
                 true_ap_text = getattr(acc, "true_ap", "")
                 true_ap_val = _parse_float(true_ap_text)
-                self.table.setItem(row, COL_TRUE_AP, NumericTableWidgetItem(true_ap_text, true_ap_val))
+                self.table.setItem(row, COL_TRUE_AP, NumericTableWidgetItem(f"{true_ap_val:.2f}" if true_ap_val else "", true_ap_val))
 
                 standard_ap_text = getattr(acc, "standard_ap", "")
                 standard_ap_val = _parse_float(standard_ap_text)
                 self.table.setItem(
                     row,
                     COL_STANDARD_AP,
-                    NumericTableWidgetItem(standard_ap_text, standard_ap_val),
+                    NumericTableWidgetItem(f"{standard_ap_val:.2f}" if standard_ap_val else "", standard_ap_val),
                 )
 
                 tech_ap_text = getattr(acc, "tech_ap", "")
                 tech_ap_val = _parse_float(tech_ap_text)
-                self.table.setItem(row, COL_TECH_AP, NumericTableWidgetItem(tech_ap_text, tech_ap_val))
+                self.table.setItem(row, COL_TECH_AP, NumericTableWidgetItem(f"{tech_ap_val:.2f}" if tech_ap_val else "", tech_ap_val))
 
                 avg_acc_val = _parse_float(acc.average_acc)
-                self.table.setItem(row, COL_AVG_ACC, NumericTableWidgetItem(acc.average_acc, avg_acc_val))
+                avg_acc_text = f"{avg_acc_val * 100:.2f}%" if avg_acc_val else ""
+                self.table.setItem(row, COL_AVG_ACC, NumericTableWidgetItem(avg_acc_text, avg_acc_val))
 
                 plays_val = _parse_int(acc.plays)
                 self.table.setItem(row, COL_PLAYS, NumericTableWidgetItem(_plays_text(acc.plays), plays_val))
@@ -1394,19 +1472,23 @@ class MainWindow(QMainWindow):
             # AP 等も ACC と同様に引けた場合は表示
             if acc_bl is not None:
                 total_ap_val = _parse_float(acc_bl.total_ap)
-                self.table.setItem(row, COL_AP, NumericTableWidgetItem(acc_bl.total_ap, total_ap_val))
+                self.table.setItem(row, COL_AP, NumericTableWidgetItem(f"{total_ap_val:.2f}", total_ap_val))
 
                 true_ap_text = getattr(acc_bl, "true_ap", "")
-                self.table.setItem(row, COL_TRUE_AP, NumericTableWidgetItem(true_ap_text, _parse_float(true_ap_text)))
+                _true_ap_val = _parse_float(true_ap_text)
+                self.table.setItem(row, COL_TRUE_AP, NumericTableWidgetItem(f"{_true_ap_val:.2f}" if _true_ap_val else "", _true_ap_val))
 
                 standard_ap_text = getattr(acc_bl, "standard_ap", "")
-                self.table.setItem(row, COL_STANDARD_AP, NumericTableWidgetItem(standard_ap_text, _parse_float(standard_ap_text)))
+                _std_ap_val = _parse_float(standard_ap_text)
+                self.table.setItem(row, COL_STANDARD_AP, NumericTableWidgetItem(f"{_std_ap_val:.2f}" if _std_ap_val else "", _std_ap_val))
 
                 tech_ap_text = getattr(acc_bl, "tech_ap", "")
-                self.table.setItem(row, COL_TECH_AP, NumericTableWidgetItem(tech_ap_text, _parse_float(tech_ap_text)))
+                _tech_ap_val = _parse_float(tech_ap_text)
+                self.table.setItem(row, COL_TECH_AP, NumericTableWidgetItem(f"{_tech_ap_val:.2f}" if _tech_ap_val else "", _tech_ap_val))
 
                 avg_acc_val = _parse_float(acc_bl.average_acc)
-                self.table.setItem(row, COL_AVG_ACC, NumericTableWidgetItem(acc_bl.average_acc, avg_acc_val))
+                avg_acc_text = f"{avg_acc_val * 100:.2f}%" if avg_acc_val else ""
+                self.table.setItem(row, COL_AVG_ACC, NumericTableWidgetItem(avg_acc_text, avg_acc_val))
 
                 plays_val = _parse_int(acc_bl.plays)
                 self.table.setItem(row, COL_PLAYS, NumericTableWidgetItem(_plays_text(acc_bl.plays), plays_val))
