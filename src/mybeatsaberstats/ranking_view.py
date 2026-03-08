@@ -44,7 +44,12 @@ def _load_list_cache(path: Path, cls):
     if not path.exists():
         return []
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        # 新形式: {"fetched_at": ..., "data": [...]}
+        if isinstance(raw, dict):
+            data = raw.get("data") or []
+        else:
+            data = raw  # 旧形式: plain list
         if isinstance(data, list):
             return [cls(**item) for item in data if isinstance(item, dict)]
     except Exception:  # noqa: BLE001

@@ -109,8 +109,16 @@ def _read_cache_fetched_at(path: Path) -> Optional[datetime]:
     return None
 
 
-def _save_player_index(index: Dict[str, Dict[str, object]]) -> None:
-    """players_index.json を app.MainWindow と同一フォーマットで保存する。"""
+def _save_player_index(
+    index: Dict[str, Dict[str, object]],
+    update_fetched_at: bool = True,
+) -> None:
+    """players_index.json を app.MainWindow と同一フォーマットで保存する。
+
+    update_fetched_at=False の場合は既存ファイルの fetched_at を維持する。
+    全件再構築（ensure_global_rank_caches など）では True を、
+    スナップショット時の個別プレイヤー情報更新では False を渡す。
+    """
 
     path = CACHE_DIR / "players_index.json"
     try:
@@ -126,8 +134,15 @@ def _save_player_index(index: Dict[str, Dict[str, object]]) -> None:
                 row["beatleader"] = asdict(bl)
             rows.append(row)
 
+        # 既存の fetched_at を維持する場合はファイルから読み取る
+        if not update_fetched_at:
+            existing_fa = _read_cache_fetched_at(path)
+            fetched_at_str = (existing_fa.isoformat() + "Z") if existing_fa is not None else (datetime.utcnow().isoformat() + "Z")
+        else:
+            fetched_at_str = datetime.utcnow().isoformat() + "Z"
+
         payload = {
-            "fetched_at": datetime.utcnow().isoformat() + "Z",
+            "fetched_at": fetched_at_str,
             "rows": rows,
         }
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -174,22 +189,51 @@ def rebuild_player_index_from_global() -> None:
     bl_global: list[BeatLeaderPlayer] = []
     if bl_global_path.exists():
         try:
-            data = json.loads(bl_global_path.read_text(encoding="utf-8"))
-            if isinstance(data, list):
-                bl_global = [BeatLeaderPlayer(**item) for item in data if isinstance(item, dict)]
+            bl_global = _load_list_cache(bl_global_path, BeatLeaderPlayer)
         except Exception:  # noqa: BLE001
             bl_global = []
 
     index: Dict[str, Dict[str, object]] = {}
 
-    # 名前+国コードごとのマップも作成しておき、ID が一致しないプレイヤー同士を
-    # 後段で安全な範囲で紐付ける（Marsh_era / A-tach などのケースを想定）
+    # ScoreSaber プレイヤーを steam_id でインデックス化
+    for p in ss_global:
+        if not p.id:
+            continue
+        index[str(p.id)] = {"scoresaber": p}
+
+    # BeatLeader プレイヤーを id (SteamID) で突き合わせ
+    # BL の id == SS の id == SteamID なので直接マッチング可能
+    bl_by_id: Dict[str, BeatLeaderPlayer] = {}
+    for p in bl_global:
+        if p.id:
+            bl_by_id[str(p.id)] = p
+
+    # 名前+国コードでフォールバックマッチング用マップ
     ss_by_name_country: Dict[tuple[str, str], list[ScoreSaberPlayer]] = {}
     for p in ss_global:
         if not p.name or not p.country:
             continue
         key = (_norm_name(p.name), p.country.upper())
         ss_by_name_country.setdefault(key, []).append(p)
+
+    for bl_id, bl_p in bl_by_id.items():
+        if bl_id in index:
+            # SS と直接 ID 一致 → BL 情報を追加
+            index[bl_id]["beatleader"] = bl_p
+        else:
+            # SS に対応する ID がない場合、名前+国でフォールバック
+            if bl_p.name and bl_p.country:
+                key = (_norm_name(bl_p.name), bl_p.country.upper())
+                ss_candidates = ss_by_name_country.get(key, [])
+                if len(ss_candidates) == 1:
+                    ss_id = str(ss_candidates[0].id)
+                    index.setdefault(ss_id, {"scoresaber": ss_candidates[0]})
+                    index[ss_id]["beatleader"] = bl_p
+                else:
+                    # SS に存在しない BL プレイヤーもインデックスに追加（BL-only）
+                    index[bl_id] = {"beatleader": bl_p}
+
+    _save_player_index(index)
 
 
 
@@ -1103,7 +1147,7 @@ def create_snapshot_for_steam_id(
             entry["beatleader"] = bl
         player_index[steam_id] = entry
         try:
-            _save_player_index(player_index)
+            _save_player_index(player_index, update_fetched_at=False)
         except Exception as exc:  # noqa: BLE001
             _rethrow_if_cancelled(exc)
             # インデックス保存に失敗してもスナップショット作成自体は続行する
@@ -1144,7 +1188,7 @@ def create_snapshot_for_steam_id(
 
                 try:
                     entry["scoresaber"] = ss_latest
-                    _save_player_index(player_index)
+                    _save_player_index(player_index, update_fetched_at=False)
                 except Exception as exc:  # noqa: BLE001
                     _rethrow_if_cancelled(exc)
                     pass
@@ -1224,7 +1268,7 @@ def create_snapshot_for_steam_id(
             # 可能であれば players_index.json 側の BeatLeader 情報も更新しておく
             try:
                 entry["beatleader"] = bl_latest
-                _save_player_index(player_index)
+                _save_player_index(player_index, update_fetched_at=False)
             except Exception as exc:  # noqa: BLE001
                 _rethrow_if_cancelled(exc)
                 pass
