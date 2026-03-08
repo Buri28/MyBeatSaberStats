@@ -7,7 +7,7 @@ from typing import Dict, List, Optional
 import json
 from datetime import datetime, timezone
 
-from PySide6.QtCore import Qt, QDateTime
+from PySide6.QtCore import Qt, QDateTime, QTimer
 from PySide6.QtGui import QColor, QIcon
 from PySide6.QtWidgets import (
     QApplication,
@@ -35,9 +35,9 @@ from PySide6.QtWidgets import (
     QStyledItemDelegate,
 )
 
-from .snapshot import Snapshot, SNAPSHOT_DIR, BASE_DIR, RESOURCES_DIR, StarClearStat
+from .snapshot import Snapshot, SNAPSHOT_DIR, BASE_DIR, RESOURCES_DIR, StarClearStat, resource_path
 from .theme import table_stylesheet, toggle as _toggle_theme, is_dark, label_cell_color, label_cell_text_color, apply_light as _apply_light
-from .updater import StartupUpdateChecker
+from .updater import StartupUpdateChecker, get_current_version
 from .accsaber import AccSaberPlayer, get_accsaber_playlist_map_counts_with_meta, get_accsaber_playlist_map_counts_from_cache
 from .snapshot_view import SnapshotCompareDialog
 from .snapshot_graph import SnapshotGraphDialog
@@ -393,7 +393,7 @@ class PlayerWindow(QMainWindow):
 
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("My Beat Saber Stats")
+        self.setWindowTitle("My Beat Saber Stats β")
 
         central = QWidget(self)
         layout = QVBoxLayout(central)
@@ -421,6 +421,8 @@ class PlayerWindow(QMainWindow):
         self.graph_button.clicked.connect(self.open_graph)
         top_row.addWidget(self.graph_button)
 
+        top_row.addStretch(1)
+
         # ランキング表示ボタン（キャッシュされたランキングJSONから統合ランキングを表示）
         self.ranking_button = QPushButton("Ranking")
         self.ranking_button.clicked.connect(self.open_ranking)
@@ -439,7 +441,6 @@ class PlayerWindow(QMainWindow):
         self.update_button = QPushButton("🔄 Update")
         top_row.addWidget(self.update_button)
 
-        top_row.addStretch(1)
         layout.addLayout(top_row)
 
         # --- キャッシュ情報行: SS/BL player_scores の最終読み込み日時と総スコア数 ---
@@ -450,6 +451,10 @@ class PlayerWindow(QMainWindow):
         cache_info_row.addSpacing(24)
         cache_info_row.addWidget(self._bl_cache_label)
         cache_info_row.addStretch(1)
+        _ver = get_current_version()
+        self._ver_label = QLabel(f"version：v{_ver}" if _ver else "", self)
+        self._ver_label.setStyleSheet("font-size: 12px; color: black; padding-right: 4px;")
+        cache_info_row.addWidget(self._ver_label)
         layout.addLayout(cache_info_row)
 
         # --- 中央〜下部: 3 列レイアウト ---
@@ -614,8 +619,10 @@ class PlayerWindow(QMainWindow):
         self.reload_snapshots()
 
         # 起動時にバックグラウンドで更新確認を開始する
+        # ウィンドウ表示が落ち着いてから開始することで、ボタン幅変化による
+        # レイアウトのちらつきを防ぐ。
         self._update_checker = StartupUpdateChecker(self.update_button, self)
-        self._update_checker.start()
+        QTimer.singleShot(100, self._update_checker.start)
 
     # ---------------- internal helpers ----------------
 
@@ -1035,6 +1042,8 @@ class PlayerWindow(QMainWindow):
         """ダーク / ライトモードを切り替える。"""
         dark = _toggle_theme()
         self.dark_mode_button.setText("☀️ Light" if dark else "🌙 Dark")
+        _ver_color = "#cccccc" if dark else "black"
+        self._ver_label.setStyleSheet(f"font-size: 12px; color: {_ver_color}; padding-right: 4px;")
         # ダーク時はデフォルト間隔、ライト時は素のネイティブボタンりも間隔を狭める
         self._top_row.setSpacing(2)
         # ラベルセルの色はテーブル再描画時に反映されるのでビューを再構築する
@@ -1687,6 +1696,10 @@ class PlayerWindow(QMainWindow):
 def run() -> None:
     app: QApplication = QApplication.instance() or QApplication([])  # type: ignore[assignment]
     _apply_light(app)
+    # アプリ共通アイコンを設定（全ウィンドウのタイトルバー・タスクバーに反映）
+    _icon_path = resource_path("app_icon.ico")
+    if _icon_path.exists():
+        app.setWindowIcon(QIcon(str(_icon_path)))
     window = PlayerWindow()
     # ScoreSaber / BeatLeader / AccSaber と★0〜15が見やすいように、やや横長＋縦広めに取る
     window.resize(1100, 560)
