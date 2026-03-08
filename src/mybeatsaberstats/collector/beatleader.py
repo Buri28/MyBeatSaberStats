@@ -36,8 +36,21 @@ def _load_cached_pages(path: Path) -> Optional[list[dict]]:
     return None
 
 
+def _touch_cache_fetched_at(path: Path) -> None:
+    """既存キャッシュの fetched_at フィールドを現在時刻に更新する。データは変更しない。"""
+    if not path.exists():
+        return
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(raw, dict):
+            raw["fetched_at"] = datetime.utcnow().isoformat() + "Z"
+            path.write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _save_cached_pages(path: Path, pages: list[dict]) -> None:
-    """ページリストをキャッシュファイル(JSON)として保存する (leaderboards 用)。"""
+    """ページリストをキャッシュファイル(JSON)として保存する (leaderboards 用)."""
     print("Entering _save_cached_pages")
     payload = {
         "fetched_at": datetime.utcnow().isoformat() + "Z",
@@ -204,6 +217,8 @@ def _get_beatleader_leaderboards_ranked(
                 if new_total <= cached_total and fetch_until_ts is None:
                     if progress is not None:
                         progress(1, 1)
+                    # 取得済みを記録するため fetched_at だけ更新する
+                    _touch_cache_fetched_at(cache_path)
                     return leaderboards
 
                 # leaderboard id → アイテム の辞書を既存キャッシュから構築（重複排除用）
@@ -242,16 +257,16 @@ def _get_beatleader_leaderboards_ranked(
                     for lb in items:
                         if not isinstance(lb, dict):
                             continue
-                        # fetch_until_ts が指定されている場合は timeset で停止判定
+                        # fetch_until_ts が指定されている場合は rankedTime で停止判定
                         if fetch_until_ts is not None:
                             diff = lb.get("difficulty") or {}
-                            ts_raw = (diff.get("timeset") if isinstance(diff, dict) else None) or lb.get("timeset")
+                            ts_raw = diff.get("rankedTime") if isinstance(diff, dict) else None
                             try:
                                 ts_val = int(ts_raw) if ts_raw is not None else None
                             except (TypeError, ValueError):
                                 ts_val = None
-                            if ts_val is not None and ts_val < fetch_until_ts:
-                                print(f"BL Ranked Maps: fetch_until {fetch_until_ts} に到達 (timeset={ts_val})")
+                            if ts_val is not None and ts_val > 0 and ts_val < fetch_until_ts:
+                                print(f"BL Ranked Maps: fetch_until {fetch_until_ts} に到達 (rankedTime={ts_val})")
                                 reached_fetch_until = True
                                 break
                         lb_id = str(lb.get("id"))
@@ -267,11 +282,33 @@ def _get_beatleader_leaderboards_ranked(
                     page += 1
 
                 leaderboards = list(lb_by_id.values())
-                if pages:
-                    try:
-                        _save_cached_pages(cache_path, pages)
-                    except Exception:
-                        pass
+                # 増分更新後は全マップを含む統合単一ページとして保存する。
+                # 増分ページだけを保存すると次回起動時に古いマップが失われ、
+                # キャッシュが徐々に劣化するため、必ず全データをまとめて上書きする。
+                consolidated = [
+                    {
+                        "page": 1,
+                        "params": {
+                            "page": "1",
+                            "count": str(len(leaderboards)),
+                            "type": "Ranked",
+                            "sortBy": "timestamp",
+                            "order": "desc",
+                        },
+                        "data": {
+                            "metadata": {
+                                "total": new_total,
+                                "page": 1,
+                                "itemsPerPage": len(leaderboards),
+                            },
+                            "data": leaderboards,
+                        },
+                    }
+                ]
+                try:
+                    _save_cached_pages(cache_path, consolidated)
+                except Exception:
+                    pass
 
                 if progress is not None:
                     progress(page, None)
@@ -318,13 +355,14 @@ def _get_beatleader_leaderboards_ranked(
                 if not isinstance(lb, dict):
                     continue
                 if fetch_until_ts is not None:
-                    ts_raw = lb.get("timeset")
+                    diff = lb.get("difficulty") or {}
+                    ts_raw = diff.get("rankedTime") if isinstance(diff, dict) else None
                     try:
                         ts_val = int(ts_raw) if ts_raw is not None else None
                     except (TypeError, ValueError):
                         ts_val = None
-                    if ts_val is not None and ts_val < fetch_until_ts:
-                        print(f"BL Ranked Maps (新規): fetch_until {fetch_until_ts} に到達 (timeset={ts_val})")
+                    if ts_val is not None and ts_val > 0 and ts_val < fetch_until_ts:
+                        print(f"BL Ranked Maps (新規): fetch_until {fetch_until_ts} に到達 (rankedTime={ts_val})")
                         reached_fetch_until_fresh = True
                         break
                 lb_id_f = str(lb.get("id"))

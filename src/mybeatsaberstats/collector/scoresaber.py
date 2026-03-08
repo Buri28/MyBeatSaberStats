@@ -36,6 +36,19 @@ def _load_cached_rank_maps(path: Path) -> Optional[dict]:
         return None
     return None
 
+def _touch_cache_fetched_at(path: Path) -> None:
+    """既存キャッシュの fetched_at フィールドを現在時刻に更新する。データは変更しない。"""
+    if not path.exists():
+        return
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(raw, dict):
+            raw["fetched_at"] = datetime.utcnow().isoformat() + "Z"
+            path.write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _save_cached_ranked_maps(path: Path, ranked_maps: dict, max_pages: int, total_maps: int) -> None:
     """
     ページリストをキャッシュファイル(JSON)として保存する。
@@ -220,6 +233,8 @@ def _get_scoresaber_leaderboards_ranked(
                     # ページ数情報が無いので 1/1 として通知
                     progress(1, 1)
                 print("ScoreSaberリーダーボードのキャッシュは最新です。①")
+                # 取得済みを記録するため fetched_at だけ更新する
+                _touch_cache_fetched_at(cache_path)
                 return leaderboards
             
             # total が増えている場合は、キャッシュ済みの最後のページ以降だけを追加取得する

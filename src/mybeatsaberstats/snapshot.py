@@ -135,6 +135,27 @@ class Snapshot:
     beatleader_total_play_count: int | None = None
     beatleader_ranked_play_count: int | None = None
 
+    # AccSaber カテゴリ API が失敗してキャッシュ値を使用したかどうか（保存する）
+    accsaber_cache_used: bool = False
+
+    # AccSaber カテゴリ別 API 取得成功フラグ（False = 過去スナップショットから転記 or 未取得）
+    accsaber_true_fetched: bool = False
+    accsaber_standard_fetched: bool = False
+    accsaber_tech_fetched: bool = False
+
+    # API 呼び出し自体がエラーだったフラグ（保存する）
+    accsaber_true_fetch_failed: bool = False
+    accsaber_standard_fetch_failed: bool = False
+    accsaber_tech_fetch_failed: bool = False
+
+    # 転記元スナップショットの taken_at（fetched=False かつ過去データあり時のみ設定）
+    accsaber_true_data_as_of: str | None = None
+    accsaber_standard_data_as_of: str | None = None
+    accsaber_tech_data_as_of: str | None = None
+
+    # 実行時の警告メッセージ（保存しない）
+    warnings: list = field(default_factory=list)
+
     # ★ごとのクリア統計（ScoreSaber 側）
     star_stats: List[StarClearStat] = field(default_factory=list)
 
@@ -156,6 +177,7 @@ class Snapshot:
         data = asdict(self)
         data["star_stats"] = [asdict(s) for s in self.star_stats]
         data["beatleader_star_stats"] = [asdict(s) for s in self.beatleader_star_stats]
+        data.pop("warnings", None)  # 実行時フラグは保存しない
 
         import json
 
@@ -224,4 +246,5 @@ class Snapshot:
 
         data["beatleader_star_stats"] = bl_converted
 
+        data.pop("warnings", None)  # 古いファイルにないフィールドは無視
         return Snapshot(**data)

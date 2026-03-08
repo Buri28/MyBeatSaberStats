@@ -151,6 +151,31 @@ function Copy-CommonFiles {
         Copy-Item "$ScriptDir\version.json" "$internalDir\version.json" -Force
         Write-Host "  version.json → $internalDir"
     }
+
+    # ユーザーに紐づかないキャッシュファイルを release/<ExeName>/cache/ にコピーする
+    # （ランキングデータや譜面数など。プレイヤースコアや設定ファイルは除外）
+    $CacheSharedFiles = @(
+        "accsaber_playlist_counts.json",
+        "accsaber_ranking.json",
+        "beatleader_ranked_maps.json",
+        "beatleader_ranking.json",
+        "players_index.json",
+        "scoresaber_ranked_maps.json",
+        "scoresaber_ranking.json"
+    )
+    $srcCacheDir  = Join-Path $ScriptDir "cache"
+    $destCacheDir = Join-Path $ReleaseDir "$ExeName\cache"
+
+    if (Test-Path $srcCacheDir) {
+        New-Item $destCacheDir -ItemType Directory -Force | Out-Null
+        foreach ($file in $CacheSharedFiles) {
+            $src = Join-Path $srcCacheDir $file
+            if (Test-Path $src) {
+                Copy-Item $src $destCacheDir -Force
+                Write-Host "  cache\$file → $destCacheDir"
+            }
+        }
+    }
 }
 
 if ($Target -eq "stats" -or $Target -eq "all") {

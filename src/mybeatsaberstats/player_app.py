@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFormLayout,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -37,7 +38,7 @@ from PySide6.QtWidgets import (
 from .snapshot import Snapshot, SNAPSHOT_DIR, BASE_DIR, RESOURCES_DIR, StarClearStat
 from .theme import table_stylesheet, toggle as _toggle_theme, is_dark, label_cell_color, label_cell_text_color, apply_light as _apply_light
 from .updater import StartupUpdateChecker
-from .accsaber import AccSaberPlayer, get_accsaber_playlist_map_counts
+from .accsaber import AccSaberPlayer, get_accsaber_playlist_map_counts_with_meta, get_accsaber_playlist_map_counts_from_cache
 from .snapshot_view import SnapshotCompareDialog
 from .snapshot_graph import SnapshotGraphDialog
 from .app import MainWindow as RankingWindow
@@ -46,8 +47,30 @@ from .collector.collector import (
     create_snapshot_for_steam_id,
     ensure_global_rank_caches,
     SnapshotOptions,
+    _read_cache_fetched_at,
 )
 from mybeatsaberstats.collector.map_store import MapStore
+
+
+def _get_player_ids_from_index(steam_id: str):
+    """players_index.json から (scoresaber_id, beatleader_id) を返す。見つからない場合は steam_id を返す。"""
+    if not steam_id:
+        return None, None
+    index_path = BASE_DIR / "cache" / "players_index.json"
+    if not index_path.exists():
+        return steam_id, steam_id
+    try:
+        data = json.loads(index_path.read_text(encoding="utf-8"))
+        for entry in data:
+            if entry.get("steam_id") == steam_id:
+                ss = entry.get("scoresaber") or {}
+                bl = entry.get("beatleader") or {}
+                ss_id = str(ss.get("id") or steam_id)
+                bl_id = str(bl.get("id") or steam_id)
+                return ss_id, bl_id
+    except Exception:  # noqa: BLE001
+        pass
+    return steam_id, steam_id
 
 
 class TakeSnapshotDialog(QDialog):
@@ -68,7 +91,9 @@ class TakeSnapshotDialog(QDialog):
 
         # データ取得オプション
         group = QGroupBox("Fetch Options", self)
-        group_layout = QVBoxLayout(group)
+        group_layout = QGridLayout(group)
+        group_layout.setColumnStretch(0, 0)
+        group_layout.setColumnStretch(1, 1)
 
         self._cb_ss_ranked_maps = QCheckBox("ScoreSaber Ranked Maps", self)
         self._cb_bl_ranked_maps = QCheckBox("BeatLeader Ranked Maps", self)
@@ -76,15 +101,63 @@ class TakeSnapshotDialog(QDialog):
         self._cb_beatleader     = QCheckBox("BeatLeader (Player Info / Scores / Stats)", self)
         self._cb_accsaber       = QCheckBox("AccSaber (Rank)", self)
 
-        for cb in (
-            self._cb_ss_ranked_maps,
-            self._cb_bl_ranked_maps,
-            self._cb_scoresaber,
-            self._cb_beatleader,
-            self._cb_accsaber,
-        ):
+        _cache_dir = BASE_DIR / "cache"
+
+        def _fmt_fetched(path: Path) -> str:
+            dt = _read_cache_fetched_at(path)
+            if dt is None:
+                return "Never fetched"
+            dt_local = dt.replace(tzinfo=timezone.utc).astimezone()
+            return dt_local.strftime("%Y-%m-%d %H:%M")
+
+        def _fmt_fetched_with_name(path: Path) -> str:
+            return f"{_fmt_fetched(path)} <{path.name}>"
+
+        def _fmt_playlist_fetched_with_name(category: str) -> str:
+            try:
+                data = json.loads((_cache_dir / "accsaber_playlist_counts.json").read_text(encoding="utf-8"))
+                entry = data.get(category, {}) if isinstance(data, dict) else {}
+                fat = entry.get("fetched_at") if isinstance(entry, dict) else None
+                if fat and isinstance(fat, str):
+                    dt = datetime.fromisoformat(fat.rstrip("Z"))
+                    dt_local = dt.replace(tzinfo=timezone.utc).astimezone()
+                    date_str = dt_local.strftime("%Y-%m-%d %H:%M")
+                    return f"{date_str} <accsaber_playlist_counts.json>"
+            except Exception:  # noqa: BLE001
+                pass
+            return "Never fetched"
+
+        _ss_id, _bl_id = _get_player_ids_from_index(default_steam_id)
+
+        _fetch_rows = [
+            (self._cb_ss_ranked_maps, _fmt_fetched_with_name(_cache_dir / "scoresaber_ranked_maps.json")),
+            (self._cb_bl_ranked_maps, _fmt_fetched_with_name(_cache_dir / "beatleader_ranked_maps.json")),
+            (self._cb_scoresaber,     _fmt_fetched_with_name(_cache_dir / f"scoresaber_player_scores_{_ss_id}.json") if _ss_id else "N/A"),
+            (self._cb_beatleader,     _fmt_fetched_with_name(_cache_dir / f"beatleader_player_scores_{_bl_id}.json") if _bl_id else "N/A"),
+            (self._cb_accsaber,       _fmt_fetched_with_name(_cache_dir / "accsaber_ranking.json")),
+        ]
+
+        for _row_idx, (cb, _label_text) in enumerate(_fetch_rows):
             cb.setChecked(True)
-            group_layout.addWidget(cb)
+            group_layout.addWidget(cb, _row_idx, 0)
+            _lbl = QLabel(_label_text, self)
+            _lbl.setStyleSheet("color: gray; font-size: 11px;")
+            group_layout.addWidget(_lbl, _row_idx, 1)
+
+        # AccSaber が参照する players_index.json / プレイリスト取得日時を追加表示
+        _extra_info_rows = [
+            ("　　Ranking Data(players index):", _fmt_fetched_with_name(_cache_dir / "players_index.json")),
+            ("　　True Playlist:",     _fmt_playlist_fetched_with_name("true")),
+            ("　　Standard Playlist:", _fmt_playlist_fetched_with_name("standard")),
+            ("　　Tech Playlist:",     _fmt_playlist_fetched_with_name("tech")),
+        ]
+        for _ei, (_ek_text, _ev_text) in enumerate(_extra_info_rows, start=len(_fetch_rows)):
+            _ek = QLabel(_ek_text, self)
+            _ek.setStyleSheet("color: gray; font-size: 11px;")
+            _ev = QLabel(_ev_text, self)
+            _ev.setStyleSheet("color: gray; font-size: 11px;")
+            group_layout.addWidget(_ek, _ei, 0)
+            group_layout.addWidget(_ev, _ei, 1)
 
         layout.addWidget(group)
 
@@ -99,7 +172,7 @@ class TakeSnapshotDialog(QDialog):
         self._cb_ss_fetch_all.setEnabled(self._cb_scoresaber.isChecked())
         ss_mode_row.addWidget(self._cb_ss_fetch_all)
         ss_mode_row.addSpacing(16)
-        self._cb_ss_until = QCheckBox("Until:", self)
+        self._cb_ss_until = QCheckBox("Fetch from:", self)
         self._cb_ss_until.setChecked(False)
         self._cb_ss_until.setEnabled(self._cb_scoresaber.isChecked())
         self._dt_ss_until = QDateTimeEdit(QDateTime.currentDateTime(), self)
@@ -118,7 +191,7 @@ class TakeSnapshotDialog(QDialog):
         self._cb_bl_fetch_all.setEnabled(self._cb_beatleader.isChecked())
         bl_mode_row.addWidget(self._cb_bl_fetch_all)
         bl_mode_row.addSpacing(16)
-        self._cb_bl_until = QCheckBox("Until:", self)
+        self._cb_bl_until = QCheckBox("Fetch from:", self)
         self._cb_bl_until.setChecked(False)
         self._cb_bl_until.setEnabled(self._cb_beatleader.isChecked())
         self._dt_bl_until = QDateTimeEdit(QDateTime.currentDateTime(), self)
@@ -334,11 +407,6 @@ class PlayerWindow(QMainWindow):
         self.player_combo = QComboBox(self)
         top_row.addWidget(self.player_combo, 1)
 
-        # ランク情報キャッシュを取得/更新するボタン
-        self.fetch_ranking_button = QPushButton("Fetch Ranking Data")
-        self.fetch_ranking_button.clicked.connect(self._fetch_ranking_data)
-        top_row.addWidget(self.fetch_ranking_button)
-
         # スナップショット取得ボタン
         self.snapshot_button = QPushButton("Take Snapshot")
         self.snapshot_button.clicked.connect(self._take_snapshot_for_current_player)
@@ -358,10 +426,10 @@ class PlayerWindow(QMainWindow):
         self.ranking_button.clicked.connect(self.open_ranking)
         top_row.addWidget(self.ranking_button)
 
-        # snapshots/ フォルダの再読み込み
-        self.refresh_button = QPushButton("Refresh")
-        self.refresh_button.clicked.connect(self.reload_snapshots)
-        top_row.addWidget(self.refresh_button)
+        # ランク情報キャッシュを取得/更新するボタン
+        self.fetch_ranking_button = QPushButton("Fetch Ranking Data")
+        self.fetch_ranking_button.clicked.connect(self._fetch_ranking_data)
+        top_row.addWidget(self.fetch_ranking_button)
 
         self.dark_mode_button = QPushButton("🌙 Dark")
         self.dark_mode_button.setCheckable(True)
@@ -497,9 +565,21 @@ class PlayerWindow(QMainWindow):
         self.bl_star_table.setItemDelegateForColumn(4, perc_acc)
 
         # 1 列目は main_table(上) と acc_table(下) を縦に並べる
+        # acc_table はキャッシュ使用時の警告ラベルと合わせてコンテナに格納する
         left_splitter = QSplitter(Qt.Orientation.Vertical, self)
         left_splitter.addWidget(self.main_table)
-        left_splitter.addWidget(self.acc_table)
+
+        acc_container = QWidget(self)
+        acc_container_layout = QVBoxLayout(acc_container)
+        acc_container_layout.setContentsMargins(0, 0, 0, 0)
+        acc_container_layout.setSpacing(2)
+        self._acc_warning_label = QLabel("", self)
+        self._acc_warning_label.setStyleSheet("color: orange; font-size: 11px;")
+        self._acc_warning_label.setVisible(False)
+        acc_container_layout.addWidget(self._acc_warning_label)
+        acc_container_layout.addWidget(self.acc_table)
+        left_splitter.addWidget(acc_container)
+
         # 上段をやや広めに、下段を少し狭めに取る
         left_splitter.setStretchFactor(0, 35)
         left_splitter.setStretchFactor(1, 30)
@@ -667,7 +747,12 @@ class PlayerWindow(QMainWindow):
                 self.player_combo.setCurrentIndex(idx)
                 break
 
-        QMessageBox.information(self, "Take Snapshot", f"Snapshot taken at {snapshot.taken_at} for {steam_id}.")
+        QMessageBox.information(
+            self,
+            "Take Snapshot",
+            f"Snapshot taken at {snapshot.taken_at} for {steam_id}."
+            + ("\n\n⚠ " + "\n⚠ ".join(snapshot.warnings) if snapshot.warnings else ""),
+        )
         return True
 
     def _collect_star_stats_from_beatleader(self, beatleader_id: Optional[str]) -> List[StarClearStat]:
@@ -1248,12 +1333,14 @@ class PlayerWindow(QMainWindow):
                     parts.append(f"({country_code} {country_rank})")
             return " ".join(parts) if parts else None
 
-        # AccSaber True / Standard / Tech の対象譜面総数を playlist API から取得し、
-        # Play Count を「自分のプレイ数 / 総譜面数」の形式で表示する。
+        # AccSaber True / Standard / Tech の対象譜面総数をファイルキャッシュから取得する。
+        # 表示目的のみ。API 更新は TakeSnapshot / Fetch Ranking Data のタイミングで行う。
         try:
-            playlist_counts = get_accsaber_playlist_map_counts()
+            playlist_counts, playlist_fetched_ats, playlist_from_cache = get_accsaber_playlist_map_counts_from_cache()
         except Exception:  # noqa: BLE001
             playlist_counts = {}
+            playlist_fetched_ats = {}
+            playlist_from_cache = {}
 
         true_total_maps = playlist_counts.get("true")
         standard_total_maps = playlist_counts.get("standard")
@@ -1327,6 +1414,35 @@ class PlayerWindow(QMainWindow):
             ),
         ]
 
+        # --- キャッシュ使用フラグ（保存済みフィールドから取得） ---
+        _true_fetched  = getattr(snap, "accsaber_true_fetched",      False)
+        _std_fetched   = getattr(snap, "accsaber_standard_fetched",   False)
+        _tech_fetched  = getattr(snap, "accsaber_tech_fetched",       False)
+        _true_as_of    = getattr(snap, "accsaber_true_data_as_of",    None)
+        _std_as_of     = getattr(snap, "accsaber_standard_data_as_of", None)
+        _tech_as_of    = getattr(snap, "accsaber_tech_data_as_of",    None)
+        _true_failed   = getattr(snap, "accsaber_true_fetch_failed",   False)
+        _std_failed    = getattr(snap, "accsaber_standard_fetch_failed", False)
+        _tech_failed   = getattr(snap, "accsaber_tech_fetch_failed",   False)
+
+        # stale = API 取得失敗またはキャッシュから転記（旧スナップ後方互換は除く）
+        def _is_stale(fetched: bool, as_of: Optional[str], failed: bool) -> bool:
+            return (not fetched) and (as_of is not None or failed)
+
+        _stale_true  = _is_stale(_true_fetched,  _true_as_of,  _true_failed)
+        _stale_std   = _is_stale(_std_fetched,   _std_as_of,   _std_failed)
+        _stale_tech  = _is_stale(_tech_fetched,  _tech_as_of,  _tech_failed)
+        # Play Count の分母（プレイリスト）がキャッシュ使用かどうか
+        _pl_stale_true  = playlist_from_cache.get("true",     False)
+        _pl_stale_std   = playlist_from_cache.get("standard", False)
+        _pl_stale_tech  = playlist_from_cache.get("tech",     False)
+
+        _ORANGE = QColor("orange")
+        # col index 2=True, 3=Standard, 4=Tech
+        _stale_by_col = {2: _stale_true, 3: _stale_std, 4: _stale_tech}
+        # Play Count 行(row index 2)では分母キャッシュも考慮
+        _pl_stale_by_col = {2: _pl_stale_true, 3: _pl_stale_std, 4: _pl_stale_tech}
+
         for row, (label, overall, true, standard, tech) in enumerate(acc_rows):
             self.acc_table.insertRow(row)
             metric_item = QTableWidgetItem(label)
@@ -1335,16 +1451,63 @@ class PlayerWindow(QMainWindow):
             self.acc_table.setItem(row, 0, metric_item)
 
             overall_text = "" if overall is None else str(overall)
-            true_text = "" if true is None else str(true)
+            true_text    = "" if true     is None else str(true)
             standard_text = "" if standard is None else str(standard)
-            tech_text = "" if tech is None else str(tech)
+            tech_text    = "" if tech     is None else str(tech)
 
             self.acc_table.setItem(row, 1, QTableWidgetItem(overall_text))
-            self.acc_table.setItem(row, 2, QTableWidgetItem(true_text))
-            self.acc_table.setItem(row, 3, QTableWidgetItem(standard_text))
-            self.acc_table.setItem(row, 4, QTableWidgetItem(tech_text))
+            for _col, _txt in [(2, true_text), (3, standard_text), (4, tech_text)]:
+                _item = QTableWidgetItem(_txt)
+                # Play Count 行はデータ stale OR プレイリスト stale でオレンジ
+                _data_stale = _stale_by_col[_col]
+                _pl_s = _pl_stale_by_col[_col] if row == 2 else False
+                if _data_stale or _pl_s:
+                    _item.setForeground(_ORANGE)
+                self.acc_table.setItem(row, _col, _item)
 
         self.acc_table.resizeColumnsToContents()
+
+        # --- 警告メッセージをスナップショット保存済みフィールドから構築して表示 ---
+        _warn_lines: list[str] = []
+
+        def _fmt_date(iso: str | None) -> str:
+            if not iso:
+                return ""
+            try:
+                return datetime.fromisoformat(iso.rstrip("Z")).replace(tzinfo=timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M")
+            except Exception:  # noqa: BLE001
+                return iso
+
+        for _cat_label, _stale, _failed, _as_of in [
+            ("True",     _stale_true, _true_failed, _true_as_of),
+            ("Standard", _stale_std,  _std_failed,  _std_as_of),
+            ("Tech",     _stale_tech, _tech_failed, _tech_as_of),
+        ]:
+            if not _stale:
+                continue
+            if _failed and _as_of is None:
+                _warn_lines.append(f"AccSaber {_cat_label}: API fetch failed — no previous data available")
+            elif _as_of is not None:
+                _warn_lines.append(f"AccSaber {_cat_label}: using cached data from {_fmt_date(_as_of)}")
+            else:
+                _warn_lines.append(f"AccSaber {_cat_label}: using cached data")
+
+        for _cat_key, _cat_label, _pl_stale in [
+            ("true",     "True",     _pl_stale_true),
+            ("standard", "Standard", _pl_stale_std),
+            ("tech",     "Tech",     _pl_stale_tech),
+        ]:
+            if not _pl_stale:
+                continue
+            _pl_fat = playlist_fetched_ats.get(_cat_key)
+            _warn_lines.append(f"Playlist ({_cat_label}): using cached count as of {_fmt_date(_pl_fat)}")
+
+        if _warn_lines:
+            self._acc_warning_label.setText("⚠ " + "\n⚠ ".join(_warn_lines))
+            self._acc_warning_label.setVisible(True)
+        else:
+            self._acc_warning_label.setVisible(False)
+
 
         # ★別統計（ScoreSaber ベース）と Total 行
         total_maps = 0

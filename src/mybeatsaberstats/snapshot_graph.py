@@ -152,6 +152,7 @@ class LineChartWidget(QWidget):
         self._t_min_explicit: Optional[datetime] = None
         self._t_max_explicit: Optional[datetime] = None
         self._y_as_int: bool = False
+        self._y_inverted: bool = False
         self.setMinimumHeight(180)
         self.setMinimumWidth(260)
 
@@ -168,6 +169,10 @@ class LineChartWidget(QWidget):
         self._t_min_explicit = t_min
         self._t_max_explicit = t_max
         self._y_as_int = y_as_int
+        self.update()
+
+    def set_y_inverted(self, inverted: bool) -> None:
+        self._y_inverted = inverted
         self.update()
 
     def paintEvent(self, event) -> None:  # type: ignore[override]
@@ -219,6 +224,8 @@ class LineChartWidget(QWidget):
             return area.left() + int((t - t_min) / (t_max - t_min) * area.width())
 
         def map_y(v: float) -> int:
+            if self._y_inverted:
+                return area.top() + int((v - v_min) / (v_max - v_min) * area.height())
             return area.bottom() - int((v - v_min) / (v_max - v_min) * area.height())
 
         # 軸
@@ -236,7 +243,12 @@ class LineChartWidget(QWidget):
 
         for i in range(5):
             frac = i / 4.0
-            y = area.bottom() - int(frac * area.height())
+            # 反転時は frac の対応する画面 Y 位置を反転させる
+            if self._y_inverted:
+                frac_screen = 1.0 - frac
+            else:
+                frac_screen = frac
+            y = area.bottom() - int(frac_screen * area.height())
             v = v_min + frac * (v_max - v_min)
             painter.drawLine(area.left() - 4, y, area.left(), y)
             if self._y_as_int:
@@ -314,7 +326,7 @@ class SnapshotGraphDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Snapshot Graph")
         # 全体は大きめに取り、グラフ自体はコンパクトにする
-        self.resize(1200, 700)
+        self.resize(1240, 700)
 
         self._snapshots = list(snapshots)
         self._snapshots.sort(key=lambda s: s.taken_at)
@@ -460,7 +472,8 @@ class SnapshotGraphDialog(QDialog):
             key = g.get("metric_key")
             if not isinstance(key, str) or key not in metric_keys:
                 continue
-            self._add_graph_internal(metric_key=key)
+            inverted = bool(g.get("inverted", False))
+            self._add_graph_internal(metric_key=key, inverted=inverted)
             added = True
 
         return added
@@ -599,9 +612,9 @@ class SnapshotGraphDialog(QDialog):
     def _add_graph(self) -> None:
         self._add_graph_internal(metric_key=None)
 
-    def _add_graph_internal(self, metric_key: Optional[str] = None) -> None:
+    def _add_graph_internal(self, metric_key: Optional[str] = None, inverted: bool = False) -> None:
         item = QListWidgetItem(self.list_widget)
-        widget = _GraphItemWidget(self, self._snapshots, self._metric_defs, initial_metric_key=metric_key)
+        widget = _GraphItemWidget(self, self._snapshots, self._metric_defs, initial_metric_key=metric_key, initial_inverted=inverted)
         item.setSizeHint(widget.sizeHint())
         self.list_widget.addItem(item)
         self.list_widget.setItemWidget(item, widget)
@@ -625,12 +638,12 @@ class SnapshotGraphDialog(QDialog):
             import json
 
             d_from, d_to = self._date_range_py()
-            graphs_cfg: list[dict[str, str]] = []
+            graphs_cfg: list[dict[str, object]] = []
             for w in self._graph_widgets():
                 key = w._current_metric_key()
                 if not key:
                     continue
-                graphs_cfg.append({"metric_key": key})
+                graphs_cfg.append({"metric_key": key, "inverted": w._invert_btn.isChecked()})
 
             payload = {
                 "from": d_from.isoformat(),
@@ -659,6 +672,7 @@ class _GraphItemWidget(QWidget):
         snapshots: List[Snapshot],
         metric_defs: List[_MetricDef],
         initial_metric_key: Optional[str] = None,
+        initial_inverted: bool = False,
     ) -> None:
         super().__init__(dialog)
         self._dialog = dialog
@@ -670,13 +684,20 @@ class _GraphItemWidget(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
 
-        # 上: Metric 選択と削除ボタン
+        # 上: Metric 選択と反転ボタン、削除ボタン
         top_row = QHBoxLayout()
         top_row.addWidget(QLabel("Metric:"))
         self.metric_combo = QComboBox(self)
         for m in self._metric_defs:
             self.metric_combo.addItem(m.label, userData=m.key)
         top_row.addWidget(self.metric_combo, 1)
+
+        self._invert_btn = QPushButton("↕", self)
+        self._invert_btn.setToolTip("Flip Y axis")
+        self._invert_btn.setCheckable(True)
+        self._invert_btn.setFixedWidth(30)
+        self._invert_btn.toggled.connect(self._on_invert_toggled)
+        top_row.addWidget(self._invert_btn)
 
         remove_btn = QPushButton("Remove")
         remove_btn.clicked.connect(self._on_remove_clicked)
@@ -697,6 +718,11 @@ class _GraphItemWidget(QWidget):
                 if isinstance(data, str) and data == initial_metric_key:
                     self.metric_combo.setCurrentIndex(idx)
                     break
+
+        # 反転状態を復元する（シグナルを切らずにセットすると _on_invert_toggled が呼ばれるが
+        # この時点では chart が存在するので問題ない）
+        if initial_inverted:
+            self._invert_btn.setChecked(True)
 
     def sizeHint(self) -> QSize:  # type: ignore[override]
         # 固定に近い幅・高さを返して、リスト側で横並び・折り返ししやすくする
@@ -724,6 +750,9 @@ class _GraphItemWidget(QWidget):
 
     def _on_remove_clicked(self) -> None:
         self._dialog._remove_graph_widget(self)
+
+    def _on_invert_toggled(self, checked: bool) -> None:
+        self.chart.set_y_inverted(checked)
 
     def _update_chart(self) -> None:
         key = self._current_metric_key()
