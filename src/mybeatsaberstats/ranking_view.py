@@ -60,6 +60,9 @@ def _load_player_index() -> Dict[str, Dict[str, object]]:
         return {}
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
+        # 新形式: {"fetched_at": ..., "rows": [...]}
+        if isinstance(raw, dict):
+            raw = raw.get("rows") or []
         index: Dict[str, Dict[str, object]] = {}
         if isinstance(raw, list):
             for row in raw:

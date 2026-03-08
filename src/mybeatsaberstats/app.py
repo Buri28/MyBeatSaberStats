@@ -2,6 +2,7 @@ import sys
 import json
 import re
 from dataclasses import asdict
+from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict
 
@@ -32,6 +33,7 @@ from .accsaber import (
     fetch_tech,
     ACCSABER_MIN_AP_GLOBAL,
     ACCSABER_MIN_AP_SKILL,
+    get_accsaber_playlist_map_counts,
 )
 from .scoresaber import ScoreSaberPlayer, fetch_players
 from .beatleader import BeatLeaderPlayer, fetch_players_ranking
@@ -141,7 +143,7 @@ class TextTableWidgetItem(QTableWidgetItem):
 class MainWindow(QMainWindow):
     def __init__(self, initial_steam_id: Optional[str] = None, initial_country_code: Optional[str] = None) -> None:
         super().__init__()
-        self.setWindowTitle("My Beat Saber Rank")
+        self.setWindowTitle("Ranking")
 
         # Stats 画面から渡された「最初にフォーカスしたいプレイヤー」の SteamID
         self._initial_steam_id: Optional[str] = initial_steam_id
@@ -451,8 +453,13 @@ class MainWindow(QMainWindow):
             return []
         try:
             with path.open("r", encoding="utf-8") as f:
-                data = json.load(f)
-            return [cls(**item) for item in data]
+                raw = json.load(f)
+            # 新形式: {"fetched_at": ..., "data": [...]}
+            if isinstance(raw, dict):
+                data = raw.get("data") or []
+            else:
+                data = raw  # 旧形式: plain list
+            return [cls(**item) for item in data if isinstance(item, dict)]
         except Exception:  # noqa: BLE001
             return []
 
@@ -460,8 +467,12 @@ class MainWindow(QMainWindow):
         try:
             CACHE_DIR.mkdir(parents=True, exist_ok=True)
             serializable = [asdict(x) for x in items]
+            payload = {
+                "fetched_at": datetime.utcnow().isoformat() + "Z",
+                "data": serializable,
+            }
             with path.open("w", encoding="utf-8") as f:
-                json.dump(serializable, f, ensure_ascii=False, indent=2)
+                json.dump(payload, f, ensure_ascii=False, indent=2)
         except Exception:  # noqa: BLE001
             # キャッシュ保存失敗時は黙って無視（表示は継続する）
             return
@@ -500,10 +511,16 @@ class MainWindow(QMainWindow):
 
         try:
             with path.open("r", encoding="utf-8") as f:
-                data = json.load(f)
+                raw = json.load(f)
         except Exception:  # noqa: BLE001
             self.player_index = {}
             return
+
+        # 新形式: {"fetched_at": ..., "rows": [...]}
+        if isinstance(raw, dict):
+            data = raw.get("rows") or []
+        else:
+            data = raw  # 旧形式: plain list
 
         index: Dict[str, Dict[str, object]] = {}
         for row in data:
@@ -550,8 +567,12 @@ class MainWindow(QMainWindow):
                     row["beatleader"] = asdict(bl)
                 rows.append(row)
 
+            payload = {
+                "fetched_at": datetime.utcnow().isoformat() + "Z",
+                "rows": rows,
+            }
             with path.open("w", encoding="utf-8") as f:
-                json.dump(rows, f, ensure_ascii=False, indent=2)
+                json.dump(payload, f, ensure_ascii=False, indent=2)
         except Exception:  # noqa: BLE001
             return
 
@@ -912,6 +933,24 @@ class MainWindow(QMainWindow):
             except ValueError:
                 return 0
 
+        # AccSaber プレイリスト総譜面数（Plays 列を xxx/yyy 形式で表示するために取得）
+        try:
+            _playlist_counts = get_accsaber_playlist_map_counts()
+        except Exception:  # noqa: BLE001
+            _playlist_counts = {}
+        _pl_true = _playlist_counts.get("true")
+        _pl_standard = _playlist_counts.get("standard")
+        _pl_tech = _playlist_counts.get("tech")
+        _pl_parts = [c for c in (_pl_true, _pl_standard, _pl_tech) if c is not None]
+        _pl_overall_total: Optional[int] = sum(_pl_parts) if _pl_parts else None
+
+        def _plays_text(plays_raw: str) -> str:
+            """acc.plays を xxx/yyy 形式に変換する。総数が不明なら数値のみ。"""
+            val = _parse_int(plays_raw)
+            if _pl_overall_total is None:
+                return plays_raw
+            return f"{val}/{_pl_overall_total}"
+
         # ScoreSaber 側を ID / 名前で引けるようにインデックス化
         ss_index_by_id: dict[str, ScoreSaberPlayer] = {}
         ss_index_by_name: dict[str, ScoreSaberPlayer] = {}
@@ -1219,7 +1258,7 @@ class MainWindow(QMainWindow):
                 self.table.setItem(row, COL_AVG_ACC, NumericTableWidgetItem(acc.average_acc, avg_acc_val))
 
                 plays_val = _parse_int(acc.plays)
-                self.table.setItem(row, COL_PLAYS, NumericTableWidgetItem(acc.plays, plays_val))
+                self.table.setItem(row, COL_PLAYS, NumericTableWidgetItem(_plays_text(acc.plays), plays_val))
             else:
                 for col in [
                     COL_AP,
@@ -1370,7 +1409,7 @@ class MainWindow(QMainWindow):
                 self.table.setItem(row, COL_AVG_ACC, NumericTableWidgetItem(acc_bl.average_acc, avg_acc_val))
 
                 plays_val = _parse_int(acc_bl.plays)
-                self.table.setItem(row, COL_PLAYS, NumericTableWidgetItem(acc_bl.plays, plays_val))
+                self.table.setItem(row, COL_PLAYS, NumericTableWidgetItem(_plays_text(acc_bl.plays), plays_val))
             else:
                 # AP 等も不明なので空欄
                 for col in [

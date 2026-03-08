@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
 )
 
 from .snapshot import Snapshot, SNAPSHOT_DIR, BASE_DIR, RESOURCES_DIR
+from .accsaber import get_accsaber_playlist_map_counts
 
 
 class PercentageBarDelegate(QStyledItemDelegate):
@@ -1032,12 +1033,31 @@ class SnapshotCompareDialog(QDialog):
                 return (true_pc or 0) + (standard_pc or 0) + (tech_pc or 0)
             return snap.accsaber_overall_play_count
 
+        # AccSaber プレイリスト総譜面数（xxx/yyy 表示用）
+        try:
+            _acc_playlist = get_accsaber_playlist_map_counts()
+        except Exception:  # noqa: BLE001
+            _acc_playlist = {}
+        _cmp_true_total: Optional[int] = _acc_playlist.get("true")
+        _cmp_standard_total: Optional[int] = _acc_playlist.get("standard")
+        _cmp_tech_total: Optional[int] = _acc_playlist.get("tech")
+        _cmp_parts = [c for c in (_cmp_true_total, _cmp_standard_total, _cmp_tech_total) if c is not None]
+        _cmp_overall_total: Optional[int] = sum(_cmp_parts) if _cmp_parts else None
+
+        def _play_fmt(plays: int | None, total: Optional[int]):
+            """プレイ数を (数値, 'xxx/yyy') タプルに変換する。total が不明なら数値のみ。"""
+            if plays is None:
+                return None
+            if total is None:
+                return plays
+            return (plays, f"{plays}/{total}")
+
         self._set_row(
             self.table,
             row_main,
             "[AS] Overall Play Count",
-            _overall_play_from_snapshot(snap_a),
-            _overall_play_from_snapshot(snap_b),
+            _play_fmt(_overall_play_from_snapshot(snap_a), _cmp_overall_total),
+            _play_fmt(_overall_play_from_snapshot(snap_b), _cmp_overall_total),
         )
         row_main += 1
 
@@ -1045,8 +1065,8 @@ class SnapshotCompareDialog(QDialog):
             self.table,
             row_main,
             "[AS] True Play Count",
-            snap_a.accsaber_true_play_count,
-            snap_b.accsaber_true_play_count,
+            _play_fmt(snap_a.accsaber_true_play_count, _cmp_true_total),
+            _play_fmt(snap_b.accsaber_true_play_count, _cmp_true_total),
         )
         row_main += 1
 
@@ -1054,8 +1074,8 @@ class SnapshotCompareDialog(QDialog):
             self.table,
             row_main,
             "[AS] Standard Play Count",
-            snap_a.accsaber_standard_play_count,
-            snap_b.accsaber_standard_play_count,
+            _play_fmt(snap_a.accsaber_standard_play_count, _cmp_standard_total),
+            _play_fmt(snap_b.accsaber_standard_play_count, _cmp_standard_total),
         )
         row_main += 1
 
@@ -1063,8 +1083,8 @@ class SnapshotCompareDialog(QDialog):
             self.table,
             row_main,
             "[AS] Tech Play Count",
-            snap_a.accsaber_tech_play_count,
-            snap_b.accsaber_tech_play_count,
+            _play_fmt(snap_a.accsaber_tech_play_count, _cmp_tech_total),
+            _play_fmt(snap_b.accsaber_tech_play_count, _cmp_tech_total),
         )
         row_main += 1
 

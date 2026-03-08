@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
 
 import requests
 
+from .snapshot import BASE_DIR
 
 BASE_URL = "https://api.accsaber.com/categories"
 
@@ -14,7 +18,42 @@ _PLAYLIST_URLS: Dict[str, str] = {
     "tech": "https://api.accsaber.com/playlists/tech",
 }
 
-_PLAYLIST_MAP_COUNTS_CACHE: Optional[Dict[str, int]] = None
+# in-memory cache: Optional[Tuple[counts, fetched_ats, from_cache_flags]]
+_PLAYLIST_MAP_COUNTS_CACHE: Optional[Tuple[Dict[str, int], Dict[str, Optional[str]], Dict[str, bool]]] = None
+_PLAYLIST_COUNTS_CACHE_FILE: Path = BASE_DIR / "cache" / "accsaber_playlist_counts.json"
+
+
+def _load_playlist_file_cache() -> Dict[str, Dict]:
+    """ファイルキャッシュから前回の総譜面数を読み込む。
+
+    Returns: {"true": {"count": 74, "fetched_at": "..."}, ...}
+    """
+    try:
+        data = json.loads(_PLAYLIST_COUNTS_CACHE_FILE.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            result: Dict[str, Dict] = {}
+            for k in ("true", "standard", "tech"):
+                entry = data.get(k)
+                if isinstance(entry, dict):
+                    count = entry.get("count")
+                    fat = entry.get("fetched_at")
+                    if isinstance(count, (int, float)) and count > 0:
+                        result[k] = {"count": int(count), "fetched_at": fat}
+            return result
+    except Exception:  # noqa: BLE001
+        pass
+    return {}
+
+
+def _save_playlist_file_cache(per_cat: Dict[str, Dict]) -> None:
+    """総譜面数をファイルキャッシュに保存する。"""
+    try:
+        _PLAYLIST_COUNTS_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _PLAYLIST_COUNTS_CACHE_FILE.write_text(
+            json.dumps(per_cat, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    except Exception:  # noqa: BLE001
+        pass
 
 
 # AccSaber グローバルランキングをキャッシュする際の下限 AP
@@ -227,7 +266,7 @@ def _fetch_playlist_map_count(url: str, session: Optional[requests.Session] = No
     if session is None:
         session = requests.Session()
 
-    resp = session.get(url, timeout=10)
+    resp = session.get(url, timeout=30)
     resp.raise_for_status()
 
     try:
@@ -247,12 +286,36 @@ def _fetch_playlist_map_count(url: str, session: Optional[requests.Session] = No
     return 0
 
 
-def get_accsaber_playlist_map_counts(session: Optional[requests.Session] = None) -> Dict[str, int]:
-    """AccSaber True / Standard / Tech のプレイリストから譜面総数を取得する。
+def get_accsaber_playlist_map_counts_from_cache(
+) -> Tuple[Dict[str, int], Dict[str, Optional[str]], Dict[str, bool]]:
+    """ファイルキャッシュだけを読んで AccSaber の総譜面数とメタ情報を返す。API は叩かない。
 
-    結果はプロセス内でキャッシュされるため、複数回呼び出しても
-    実際の HTTP アクセスは最初の1回のみとなる。
-    取得に失敗したカテゴリは結果に含めない。
+    表示目的専用。API 更新は TakeSnapshot / Fetch Ranking Data のタイミングでのみ行う。
+    """
+    file_cache = _load_playlist_file_cache()
+    counts: Dict[str, int] = {}
+    fetched_ats: Dict[str, Optional[str]] = {}
+    from_cache_flags: Dict[str, bool] = {}
+    for key in ("true", "standard", "tech"):
+        if key in file_cache:
+            counts[key] = file_cache[key]["count"]
+            fetched_ats[key] = file_cache[key].get("fetched_at")
+            from_cache_flags[key] = False  # 表示目的の読み取りは通常動作。警告を出さない。
+    return counts, fetched_ats, from_cache_flags
+
+
+def get_accsaber_playlist_map_counts_with_meta(
+    session: Optional[requests.Session] = None,
+) -> Tuple[Dict[str, int], Dict[str, Optional[str]], Dict[str, bool]]:
+    """AccSaber True/Standard/Tech の譜面総数とメタ情報を返す。API を叩いて更新する。
+
+    Returns:
+        counts       : {"true": 74, "standard": 200, "tech": 156}
+        fetched_ats  : {"true": "2026-03-01T12:00:00Z", ...}  取得成功日時
+        from_cache   : {"true": True, ...}  True = ファイルキャッシュから取得
+
+    API 取得に失敗したカテゴリはファイルキャッシュの前回値を使用する。
+    全カテゴリが空の場合はメモリキャッシュしない（次回再取得を試みる）。
     """
 
     global _PLAYLIST_MAP_COUNTS_CACHE
@@ -263,14 +326,49 @@ def get_accsaber_playlist_map_counts(session: Optional[requests.Session] = None)
     if session is None:
         session = requests.Session()
 
+    file_cache = _load_playlist_file_cache()
     counts: Dict[str, int] = {}
-    for key, url in _PLAYLIST_URLS.items():
-        try:
-            count = _fetch_playlist_map_count(url, session=session)
-        except Exception:  # noqa: BLE001
-            continue
-        if count > 0:
-            counts[key] = count
+    fetched_ats: Dict[str, Optional[str]] = {}
+    from_cache_flags: Dict[str, bool] = {}
+    now_str = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    per_cat_for_file: Dict[str, Dict] = dict(file_cache)  # 既存ファイル値を保持しつつ更新
+    updated = False
 
-    _PLAYLIST_MAP_COUNTS_CACHE = counts
+    for key, url in _PLAYLIST_URLS.items():
+        fresh_count = 0
+        try:
+            fresh_count = _fetch_playlist_map_count(url, session=session)
+        except Exception:  # noqa: BLE001
+            pass
+
+        if fresh_count > 0:
+            counts[key] = fresh_count
+            fetched_ats[key] = now_str
+            from_cache_flags[key] = False
+            per_cat_for_file[key] = {"count": fresh_count, "fetched_at": now_str}
+            updated = True
+        elif key in file_cache:
+            # API 失敗 → ファイルキャッシュの前回値を使用
+            counts[key] = file_cache[key]["count"]
+            fetched_ats[key] = file_cache[key].get("fetched_at")
+            from_cache_flags[key] = True
+        # else: ファイルキャッシュにも無い → このカテゴリはスキップ
+
+    if updated:
+        _save_playlist_file_cache(per_cat_for_file)
+
+    result: Tuple[Dict[str, int], Dict[str, Optional[str]], Dict[str, bool]] = (
+        counts,
+        fetched_ats,
+        from_cache_flags,
+    )
+    # 空の場合はメモリキャッシュしない（次回再取得を試みる）
+    if counts:
+        _PLAYLIST_MAP_COUNTS_CACHE = result
+    return result
+
+
+def get_accsaber_playlist_map_counts(session: Optional[requests.Session] = None) -> Dict[str, int]:
+    """互換 API: 総譜面数のみを返す。"""
+    counts, _, _ = get_accsaber_playlist_map_counts_with_meta(session)
     return counts
