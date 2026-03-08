@@ -168,6 +168,10 @@ class MainWindow(QMainWindow):
     def __init__(self, initial_steam_id: Optional[str] = None, initial_country_code: Optional[str] = None) -> None:
         super().__init__()
         self.setWindowTitle("Ranking")
+        # ウィンドウアイコン
+        _icon_path = resource_path("app_icon.ico")
+        if _icon_path.exists():
+            self.setWindowIcon(QIcon(str(_icon_path)))
 
         # Stats 画面から渡された「最初にフォーカスしたいプレイヤー」の SteamID
         self._initial_steam_id: Optional[str] = initial_steam_id
@@ -414,8 +418,17 @@ class MainWindow(QMainWindow):
     def _update_fetched_label(self) -> None:
         """AccSaber / ScoreSaber / BeatLeader の最終取得日時ラベルを更新する。"""
         self._fetched_acc_label.setText(_fmt_fetched_at(CACHE_DIR / "accsaber_ranking.json"))
-        self._fetched_ss_label.setText(_fmt_fetched_at(self._ss_cache_path()))
-        self._fetched_bl_label.setText(_fmt_fetched_at(CACHE_DIR / "beatleader_ranking.json"))
+
+        # 国別キャッシュが無ければグローバルキャッシュの fetched_at にフォールバック
+        ss_path = self._ss_cache_path()
+        if _read_cache_fetched_at_app(ss_path) is None:
+            ss_path = CACHE_DIR / "scoresaber_ranking.json"
+        self._fetched_ss_label.setText(_fmt_fetched_at(ss_path))
+
+        bl_path = self._bl_cache_path()
+        if _read_cache_fetched_at_app(bl_path) is None:
+            bl_path = CACHE_DIR / "beatleader_ranking.json"
+        self._fetched_bl_label.setText(_fmt_fetched_at(bl_path))
 
     def _toggle_dark_mode(self) -> None:
         """ダーク / ライトモードを切り替える。"""
@@ -560,8 +573,13 @@ class MainWindow(QMainWindow):
             return {}
         try:
             with path.open("r", encoding="utf-8") as f:
-                data = json.load(f)
-            players = [BeatLeaderPlayer(**item) for item in data]
+                raw = json.load(f)
+            # 新形式: {"fetched_at": ..., "data": [...]}
+            if isinstance(raw, dict):
+                data = raw.get("data") or []
+            else:
+                data = raw  # 旧形式: plain list
+            players = [BeatLeaderPlayer(**item) for item in data if isinstance(item, dict)]
             return {p.id: p for p in players if p.id}
         except Exception:  # noqa: BLE001
             return {}
@@ -570,8 +588,12 @@ class MainWindow(QMainWindow):
         try:
             CACHE_DIR.mkdir(parents=True, exist_ok=True)
             serializable = [asdict(p) for p in mapping.values()]
+            payload = {
+                "fetched_at": datetime.utcnow().isoformat() + "Z",
+                "data": serializable,
+            }
             with path.open("w", encoding="utf-8") as f:
-                json.dump(serializable, f, ensure_ascii=False, indent=2)
+                json.dump(payload, f, ensure_ascii=False, indent=2)
         except Exception:  # noqa: BLE001
             return
 

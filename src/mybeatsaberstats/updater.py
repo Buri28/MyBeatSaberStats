@@ -369,6 +369,8 @@ class StartupUpdateChecker:
     def start(self) -> None:
         self._button.setEnabled(False)
         self._button.setText("🔄 確認中…")
+        # テキスト変更後にボタン幅を固定し、以降の文字列変化でレイアウトがズレないようにする
+        self._button.setMinimumWidth(self._button.sizeHint().width())
         self._thread = _CheckThread()
         self._thread.finished.connect(self._on_checked)
         self._thread.error.connect(self._on_error)

@@ -19,3 +19,4 @@ build/
 
 # Build release output
 release/
+build_log.txt
