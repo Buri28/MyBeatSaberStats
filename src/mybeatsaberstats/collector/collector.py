@@ -1041,8 +1041,9 @@ def create_snapshot_for_steam_id(
             else:
                 ss_last_fetched = _read_cache_fetched_at(CACHE_DIR / "scoresaber_ranked_maps.json")
                 if ss_last_fetched is not None:
-                    ss_ranked_until = ss_last_fetched
-                    print(f"ScoreSaber Ranked Maps 前回取得日時: {ss_last_fetched.strftime('%Y-%m-%d %H:%M:%S')} UTC")
+                    # 月次更新でrankedDate遡及変更される可能性があるため、前回取得日時より60日前から再取得する
+                    ss_ranked_until = ss_last_fetched - timedelta(days=60)
+                    print(f"ScoreSaber Ranked Maps 前回取得日時: {ss_last_fetched.strftime('%Y-%m-%d %H:%M:%S')} UTC → 60日遡り: {ss_ranked_until.strftime('%Y-%m-%d %H:%M:%S')} UTC")
                 else:
                     ss_ranked_until = None
                     print("ScoreSaber Ranked Maps: 初回取得のため全件取得")
@@ -1077,8 +1078,9 @@ def create_snapshot_for_steam_id(
             else:
                 bl_last_fetched = _read_cache_fetched_at(CACHE_DIR / "beatleader_ranked_maps.json")
                 if bl_last_fetched is not None:
-                    bl_ranked_until = bl_last_fetched
-                    print(f"BeatLeader Ranked Maps 前回取得日時: {bl_last_fetched.strftime('%Y-%m-%d %H:%M:%S')} UTC")
+                    # 月次更新でrankedTime相当フィールドが変わる可能性があるため、前回取得日時より60日前から再取得する
+                    bl_ranked_until = bl_last_fetched - timedelta(days=60)
+                    print(f"BeatLeader Ranked Maps 前回取得日時: {bl_last_fetched.strftime('%Y-%m-%d %H:%M:%S')} UTC → 60日遡り: {bl_ranked_until.strftime('%Y-%m-%d %H:%M:%S')} UTC")
                 else:
                     bl_ranked_until = None
                     print("BeatLeader Ranked Maps: 初回取得のため全件取得")

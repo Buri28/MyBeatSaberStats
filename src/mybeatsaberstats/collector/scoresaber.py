@@ -176,9 +176,10 @@ def _get_scoresaber_leaderboards_ranked(
                             reached_fetch_until = True
                             break
                     lb_id = lb.get("id")
-                    if lb_id not in leaderboards:
+                    # 既存マップも上書き（stars等が月次更新で変わっている可能性があるため）
+                    if lb_id not in leaderboards or leaderboards[lb_id] != lb:
                         append_leaderboards[lb_id] = lb
-                        leaderboards[lb_id] = lb
+                    leaderboards[lb_id] = lb
                 if reached_fetch_until:
                     break
                 meta_dt = data_dt.get("metadata") or {}
@@ -199,6 +200,10 @@ def _get_scoresaber_leaderboards_ranked(
                                          total_maps=len(leaderboards))
             except Exception:  # noqa: BLE001
                 pass
+        else:
+            # データ変更なし（plays/votesも含めて完全一致）でも fetched_at を更新して
+            # 次回の60日窓が正しく前進するようにする
+            _touch_cache_fetched_at(cache_path)
         if progress is not None:
             progress(page_no, page_no)
         print(f"SS Ranked Maps fetch_until 完了: 追加={len(append_leaderboards)} 総計={len(leaderboards)}")
