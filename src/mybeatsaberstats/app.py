@@ -419,15 +419,31 @@ class MainWindow(QMainWindow):
         """AccSaber / ScoreSaber / BeatLeader の最終取得日時ラベルを更新する。"""
         self._fetched_acc_label.setText(_fmt_fetched_at(CACHE_DIR / "accsaber_ranking.json"))
 
-        # 国別キャッシュが無ければグローバルキャッシュの fetched_at にフォールバック
-        ss_path = self._ss_cache_path()
-        if _read_cache_fetched_at_app(ss_path) is None:
-            ss_path = CACHE_DIR / "scoresaber_ranking.json"
+        # 国別キャッシュとグローバルキャッシュのうち、より新しい fetched_at を持つ方を表示する
+        # full_sync は scoresaber_ranking.json を更新し、reload_scoresaber は scoresaber_JP.json を更新するため
+        # どちらを実行しても最新日時が反映されるよう両者を比較する
+        ss_country_path = self._ss_cache_path()
+        ss_global_path = CACHE_DIR / "scoresaber_ranking.json"
+        ss_country_dt = _read_cache_fetched_at_app(ss_country_path)
+        ss_global_dt = _read_cache_fetched_at_app(ss_global_path)
+        if ss_country_dt is None:
+            ss_path = ss_global_path
+        elif ss_global_dt is not None and ss_global_dt > ss_country_dt:
+            ss_path = ss_global_path
+        else:
+            ss_path = ss_country_path
         self._fetched_ss_label.setText(_fmt_fetched_at(ss_path))
 
-        bl_path = self._bl_cache_path()
-        if _read_cache_fetched_at_app(bl_path) is None:
-            bl_path = CACHE_DIR / "beatleader_ranking.json"
+        bl_country_path = self._bl_cache_path()
+        bl_global_path = CACHE_DIR / "beatleader_ranking.json"
+        bl_country_dt = _read_cache_fetched_at_app(bl_country_path)
+        bl_global_dt = _read_cache_fetched_at_app(bl_global_path)
+        if bl_country_dt is None:
+            bl_path = bl_global_path
+        elif bl_global_dt is not None and bl_global_dt > bl_country_dt:
+            bl_path = bl_global_path
+        else:
+            bl_path = bl_country_path
         self._fetched_bl_label.setText(_fmt_fetched_at(bl_path))
 
     def _toggle_dark_mode(self) -> None:
