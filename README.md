@@ -1,4 +1,4 @@
-# MyBeatSaberStats β
+# <img width="40" height="40" alt="Image" src="https://github.com/user-attachments/assets/84b569b4-aff1-4a67-8f48-b1d2859e9474" /> MyBeatSaberStats β
 
 Beat Saber の SteamIdに紐づく Statsをデスクトップから閲覧するための Python + PySide6 アプリです。  
 β版準備中…
