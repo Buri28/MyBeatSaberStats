@@ -1,4 +1,4 @@
-# MyBeatSaberStats
+# MyBeatSaberStats β
 
 Beat Saber の SteamIdに紐づく Statsをデスクトップから閲覧するための Python + PySide6 アプリです。  
 β版準備中…
