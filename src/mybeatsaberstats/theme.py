@@ -113,7 +113,7 @@ _TABLE_STYLE_LIGHT = (
 
 _TABLE_STYLE_DARK = (
     "QTableWidget { background-color: #121212; alternate-background-color: #191919; "
-    "color: #d4d4d4; gridline-color: #3b3b3b; }"
+    "color: #d4d4d4; gridline-color: #434343; }"
 )
 
 
@@ -208,8 +208,8 @@ QHeaderView::section {
     background-color: #333333;
     color: #e0e0e0;
     border: none;
-    border-right: 1px solid #4b4b4b;
-    border-bottom: 1px solid #4b4b4b;
+    border-right: 1px solid #434343;
+    border-bottom: 1px solid #434343;
 }
 QScrollBar:horizontal, QScrollBar:vertical {
     background: #2d2d2d;
