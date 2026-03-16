@@ -1,10 +1,10 @@
 """アプリ全体のテーマ（ダーク / ライト）管理モジュール。
 
 使い方:
-    from .theme import apply_dark, apply_light, is_dark, table_stylesheet
+    from .theme import apply_dark, apply_light, is_dark, table_stylesheet, init_theme
 
-    # ダークモードを適用
-    apply_dark(QApplication.instance())
+    # 起動時に保存済み設定 or Windows システム設定でテーマを初期化
+    init_theme(QApplication.instance())
 
     # テーブルの QSS を取得
     self.table.setStyleSheet(table_stylesheet())
@@ -12,18 +12,96 @@
 
 from __future__ import annotations
 
+import json
+
 from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import QApplication
+
+from .snapshot import BASE_DIR
+
+# 設定ファイルパス（cache/settings.json に dark_mode キーで保存）
+_PREF_PATH = BASE_DIR / "cache" / "settings.json"
 
 # ------------------------------------------------------------------ #
 #  内部状態
 # ------------------------------------------------------------------ #
-_dark_mode: bool = False
+_dark_mode: bool = False           # 実際の表示状態 (True=ダーク)
+_theme_mode: str = "default"       # 設定モード: "default" | "dark" | "light"
+
+
+def detect_system_dark() -> bool:
+    """Windows のシステムダークモード設定を返す。取得できない場合は False。"""
+    try:
+        import winreg  # Windows のみ利用可能
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
+        ) as key:
+            value, _ = winreg.QueryValueEx(key, "AppsUseLightTheme")
+            return value == 0  # 0 = ダーク, 1 = ライト
+    except Exception:
+        return False
+
+
+def _load_pref() -> str | None:
+    """保存済みのテーマモードを返す ("default"/"dark"/"light")。未保存の場合は None。"""
+    try:
+        if _PREF_PATH.exists():
+            data = json.loads(_PREF_PATH.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                # 新フォーマット
+                if "theme_mode" in data:
+                    v = data["theme_mode"]
+                    if v in ("default", "dark", "light"):
+                        return v
+                # 旧フォーマット (bool) との互換性
+                if "dark_mode" in data:
+                    return "dark" if data["dark_mode"] else "light"
+    except Exception:
+        pass
+    return None
+
+
+def _save_pref(mode: str) -> None:
+    """テーマモードを JSON ファイルに保存する。"""
+    try:
+        _PREF_PATH.parent.mkdir(parents=True, exist_ok=True)
+        existing: dict = {}
+        if _PREF_PATH.exists():
+            try:
+                existing = json.loads(_PREF_PATH.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+        existing["theme_mode"] = mode
+        existing.pop("dark_mode", None)  # 旧フォーマットキーを削除
+        _PREF_PATH.write_text(
+            json.dumps(existing, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    except Exception:
+        pass
 
 
 def is_dark() -> bool:
     """現在ダークモードが有効かどうかを返す。"""
     return _dark_mode
+
+
+def current_theme_mode() -> str:
+    """現在のテーマモードを返す ("default" | "dark" | "light")。"""
+    return _theme_mode
+
+
+def button_label() -> str:
+    """ダークモード切替ボタンに表示すべきラベルを返す。
+
+    - Default 状態: クリックで強制モードに切り替わることを示す
+      ダーク表示中 → "☀\ufe0f Light" (クリックで強制ライトへ)
+      ライト表示中 → "\U0001f319 Dark"  (クリックで強制ダークへ)
+    - 強制モード: クリックで Default に戻ることを示す "\u21a9 Default"
+    """
+    if _theme_mode == "default":
+        return "\u2600\ufe0f Light" if _dark_mode else "\U0001f319 Dark"
+    return "\u21a9 Default"
 
 
 # ------------------------------------------------------------------ #
@@ -32,9 +110,10 @@ def is_dark() -> bool:
 _TABLE_STYLE_LIGHT = (
     "QTableWidget { background-color: #ffffff; alternate-background-color: #f6f7fb; }"
 )
+
 _TABLE_STYLE_DARK = (
-    "QTableWidget { background-color: #1e1e1e; alternate-background-color: #2a2a2a; "
-    "color: #d4d4d4; gridline-color: #3c3c3c; }"
+    "QTableWidget { background-color: #121212; alternate-background-color: #191919; "
+    "color: #d4d4d4; gridline-color: #6b6b6b; }"
 )
 
 
@@ -53,7 +132,7 @@ def label_cell_color() -> QColor:
 
 def label_cell_text_color() -> QColor:
     """ラベル列のテキスト色。"""
-    return QColor("#cccccc") if _dark_mode else QColor("#111111")
+    return QColor("#e0e0e0") if _dark_mode else QColor("#111111")
 
 
 def diff_positive_bg() -> QColor:
@@ -82,8 +161,8 @@ def diff_text_color() -> QColor:
 def _dark_palette() -> QPalette:
     p = QPalette()
 
-    base        = QColor("#1e1e1e")
-    alt_base    = QColor("#2a2a2a")
+    base        = QColor("#121212")
+    alt_base    = QColor("#191919")
     window      = QColor("#252526")
     window_text = QColor("#d4d4d4")
     button      = QColor("#3c3c3c")
@@ -126,11 +205,11 @@ QToolTip {
     border: 1px solid #3c3c3c;
 }
 QHeaderView::section {
-    background-color: #2d2d2d;
-    color: #cccccc;
+    background-color: #333333;
+    color: #e0e0e0;
     border: none;
-    border-right: 1px solid #3c3c3c;
-    border-bottom: 1px solid #3c3c3c;
+    border-right: 1px solid #6b6b6b;
+    border-bottom: 1px solid #6b6b6b;
 }
 QScrollBar:horizontal, QScrollBar:vertical {
     background: #2d2d2d;
@@ -183,7 +262,7 @@ QGroupBox {
     border: 1px solid #555555;
 }
 QCheckBox {
-    color: #d4d4d4;
+    color: #84d4FF;
 }
 QProgressDialog QLabel {
     color: #d4d4d4;
@@ -195,11 +274,126 @@ QProgressDialog QLabel {
 #  公開 API
 # ------------------------------------------------------------------ #
 
-_LIGHT_GLOBAL_QSS = """
+# Windows がライトモードのとき: ネイティブ描画を壊さないよう最小限のみ指定する。
+# QCheckBox などを明示すると Qt がネイティブスタイルから独自描画に切り替えてしまう。
+_LIGHT_NATIVE_QSS = """
 QPushButton {
-    padding: 2px 6px;
+    padding: 2px 8px;
 }
 """
+
+# Windows がダークモードで強制ライトのとき: ネイティブダークスタイルを完全上書きする必要がある。
+_LIGHT_FORCED_QSS = """
+QToolTip {
+    color: #000000;
+    background-color: #ffffdc;
+    border: 1px solid #aaaaaa;
+}
+QHeaderView::section {
+    background-color: #f0f0f0;
+    color: #000000;
+    border: none;
+    border-right: 1px solid #d0d0d0;
+    border-bottom: 1px solid #d0d0d0;
+}
+QScrollBar:horizontal, QScrollBar:vertical {
+    background: #f0f0f0;
+}
+QScrollBar::handle:horizontal, QScrollBar::handle:vertical {
+    background: #c0c0c0;
+    border-radius: 4px;
+}
+QPushButton {
+    background-color: #e1e1e1;
+    color: #000000;
+    border: 1px solid #adadad;
+    border-radius: 3px;
+    padding: 2px 8px;
+}
+QPushButton:hover {
+    background-color: #e5f1fb;
+    border-color: #0078d4;
+}
+QPushButton:pressed {
+    background-color: #cce4f7;
+}
+QPushButton:checked {
+    background-color: #cce4f7;
+    color: #000000;
+    border-color: #0078d4;
+}
+QPushButton:disabled {
+    background-color: #f0f0f0;
+    color: #a0a0a0;
+    border-color: #d0d0d0;
+}
+QComboBox {
+    background-color: #ffffff;
+    color: #000000;
+    border: 1px solid #adadad;
+}
+QComboBox QAbstractItemView {
+    background-color: #ffffff;
+    color: #000000;
+    selection-background-color: #0078d4;
+    selection-color: #ffffff;
+}
+QLineEdit, QDateTimeEdit {
+    background-color: #ffffff;
+    color: #000000;
+    border: 1px solid #adadad;
+}
+QGroupBox {
+    color: #000000;
+    border: 1px solid #adadad;
+}
+
+QCheckBox {
+    color: #003580;
+}
+QProgressDialog QLabel {
+    color: #000000;
+}
+"""
+
+
+def _light_palette() -> QPalette:
+    """明示的なライトパレットを生成する。
+
+    Windows ダークモード時に QPalette() がシステムのダークパレットを返してしまう問題を
+    回避するため、白ベースの色を明示的に指定する。
+    """
+    p = QPalette()
+    white      = QColor("#ffffff")
+    light_gray = QColor("#f0f0f0")
+    mid_gray   = QColor("#c0c0c0")
+    dark_text  = QColor("#000000")
+    window     = QColor("#f0f0f0")
+    highlight  = QColor("#0078d4")
+    hi_text    = QColor("#ffffff")
+    link       = QColor("#0066cc")
+    disabled   = QColor("#a0a0a0")
+
+    p.setColor(QPalette.ColorRole.Window,          window)
+    p.setColor(QPalette.ColorRole.WindowText,      dark_text)
+    p.setColor(QPalette.ColorRole.Base,            white)
+    p.setColor(QPalette.ColorRole.AlternateBase,   light_gray)
+    p.setColor(QPalette.ColorRole.ToolTipBase,     white)
+    p.setColor(QPalette.ColorRole.ToolTipText,     dark_text)
+    p.setColor(QPalette.ColorRole.Text,            dark_text)
+    p.setColor(QPalette.ColorRole.Button,          window)
+    p.setColor(QPalette.ColorRole.ButtonText,      dark_text)
+    p.setColor(QPalette.ColorRole.BrightText,      QColor("#ff0000"))
+    p.setColor(QPalette.ColorRole.Highlight,       highlight)
+    p.setColor(QPalette.ColorRole.HighlightedText, hi_text)
+    p.setColor(QPalette.ColorRole.Link,            link)
+    p.setColor(QPalette.ColorRole.Mid,             mid_gray)
+
+    p.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Text,       disabled)
+    p.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.ButtonText, disabled)
+    p.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.WindowText, disabled)
+
+    return p
 
 
 def apply_dark(app: QApplication | None = None) -> None:
@@ -213,19 +407,66 @@ def apply_dark(app: QApplication | None = None) -> None:
 
 
 def apply_light(app: QApplication | None = None) -> None:
-    """アプリ全体をシステムデフォルト（ライト）テーマに戻す。"""
+    """アプリ全体をライトテーマに戻す。
+
+    - Windows がライトモードのとき: QPalette() + 最小限QSS でネイティブ描画を維持する。
+      QCheckBox などを QSS で明示するとネイティブスタイルが無効化されるため使わない。
+    - Windows がダークモードのとき: 明示的なパレット + 完全QSS でダーク描画を上書きする。
+    """
     global _dark_mode
     _dark_mode = False
     a: QApplication | None = app or QApplication.instance()  # type: ignore[assignment]
     if a:
-        a.setPalette(QPalette())   # デフォルトパレットに戻す
-        a.setStyleSheet(_LIGHT_GLOBAL_QSS)
+        if detect_system_dark():
+            # システムがダーク → 強制ライトパレット + 完全QSSで上書き
+            a.setPalette(_light_palette())
+            a.setStyleSheet(_LIGHT_FORCED_QSS)
+        else:
+            # システムがライト → ネイティブパレット + 最小限QSS (ネイティブ描画を維持)
+            a.setPalette(QPalette())
+            a.setStyleSheet(_LIGHT_NATIVE_QSS)
 
 
 def toggle(app: QApplication | None = None) -> bool:
-    """ダーク/ライトを切り替えて、切り替え後の状態 (True=dark) を返す。"""
-    if _dark_mode:
-        apply_light(app)
+    """テーマを切り替えて、切り替え後のダーク状態 (True=dark) を返す。
+
+    Default 状態のとき: 現在の表示の反対を強制モードとして適用
+    強制モードのとき : Default に戻り、Windows システム設定を再適用
+    """
+    global _theme_mode
+    if _theme_mode == "default":
+        # 現在の表示の逆を強制モードとして設定
+        if _dark_mode:
+            _theme_mode = "light"
+            apply_light(app)
+        else:
+            _theme_mode = "dark"
+            apply_dark(app)
     else:
-        apply_dark(app)
+        # Default に戻す → Windows システム設定を再適用
+        _theme_mode = "default"
+        if detect_system_dark():
+            apply_dark(app)
+        else:
+            apply_light(app)
+    _save_pref(_theme_mode)
     return _dark_mode
+
+
+def init_theme(app: QApplication | None = None) -> None:
+    """起動時のテーマを決定して適用する。
+
+    保存済みの設定があればそれを使用し、なければ Default (Windows システム設定) を使用する。
+    """
+    global _theme_mode
+    mode = _load_pref() or "default"
+    _theme_mode = mode
+    if mode == "dark":
+        apply_dark(app)
+    elif mode == "light":
+        apply_light(app)
+    else:  # "default"
+        if detect_system_dark():
+            apply_dark(app)
+        else:
+            apply_light(app)

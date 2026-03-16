@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (
     QProgressDialog,
 )
 
-from .theme import table_stylesheet, toggle as _toggle_theme, is_dark, apply_light as _apply_light
+from .theme import table_stylesheet, toggle as _toggle_theme, is_dark, init_theme as _init_theme, button_label as _theme_button_label
 from .updater import StartupUpdateChecker
 from .accsaber import (
     AccSaberPlayer,
@@ -229,8 +229,10 @@ class MainWindow(QMainWindow):
         self.full_sync_button.clicked.connect(self.full_sync)
         control_row.addWidget(self.full_sync_button)
 
-        self.dark_mode_button = QPushButton("🌙 Dark")
+        _initial_dark = is_dark()
+        self.dark_mode_button = QPushButton(_theme_button_label())
         self.dark_mode_button.setCheckable(True)
+        self.dark_mode_button.setChecked(_initial_dark)
         self.dark_mode_button.clicked.connect(self._toggle_dark_mode)
         control_row.addWidget(self.dark_mode_button)
 
@@ -447,9 +449,10 @@ class MainWindow(QMainWindow):
         self._fetched_bl_label.setText(_fmt_fetched_at(bl_path))
 
     def _toggle_dark_mode(self) -> None:
-        """ダーク / ライトモードを切り替える。"""
+        """\u30c0\u30fc\u30af / \u30e9\u30a4\u30c8\u30e2\u30fc\u30c9\u3092\u5207\u308a\u66ff\u3048\u308b\u3002"""
         dark = _toggle_theme()
-        self.dark_mode_button.setText("☀️ Light" if dark else "🌙 Dark")
+        self.dark_mode_button.setText(_theme_button_label())
+        self.dark_mode_button.setChecked(dark)
         # ダーク時はデフォルト間隔、ライト時は素のネイティブボタンりも間隔を狭める
         self._control_row.setSpacing(2)
         self.table.setStyleSheet(table_stylesheet())
@@ -1595,7 +1598,7 @@ class MainWindow(QMainWindow):
 
 def run() -> None:
     app = QApplication(sys.argv)
-    _apply_light(app)
+    _init_theme(app)  # 保存済み設定 or Windows システム設定でテーマを初期化
     window = MainWindow()
     window.resize(1650, 800)
     window.show()
