@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -36,7 +37,7 @@ from PySide6.QtWidgets import (
 )
 
 from .snapshot import Snapshot, SNAPSHOT_DIR, BASE_DIR, RESOURCES_DIR, StarClearStat, resource_path
-from .theme import table_stylesheet, toggle as _toggle_theme, is_dark, label_cell_color, label_cell_text_color, apply_light as _apply_light
+from .theme import table_stylesheet, toggle as _toggle_theme, is_dark, label_cell_color, label_cell_text_color, init_theme as _init_theme, button_label as _theme_button_label
 from .updater import StartupUpdateChecker, get_current_version
 from .accsaber import AccSaberPlayer, get_accsaber_playlist_map_counts_with_meta, get_accsaber_playlist_map_counts_from_cache
 from .snapshot_view import SnapshotCompareDialog
@@ -73,6 +74,20 @@ def _get_player_ids_from_index(steam_id: str):
     return steam_id, steam_id
 
 
+def _extract_steam_id_from_input(text: str) -> str:
+    """URL または準 URL から SteamID (17桌数字) を抽出する。
+
+    対応パターン:
+        https://scoresaber.com/u/<id>
+        https://beatleader.com/u/<id>
+        https://steamcommunity.com/profiles/<id>
+    ID が見つからない場合は元のテキストをそのまま返す。
+    """
+    text = text.strip()
+    m = re.search(r'(?:/u/|/profiles/)([0-9]{17})', text)
+    return m.group(1) if m else text
+
+
 class TakeSnapshotDialog(QDialog):
     """スナップショット取得時にSteamIDとデータ取得オプションを選択するダイアログ。"""
 
@@ -83,9 +98,11 @@ class TakeSnapshotDialog(QDialog):
 
         layout = QVBoxLayout(self)
 
-        # SteamID入力
+        # SteamID / URL 入力（URL を貼ると自動で SteamID を抽出する）
         form = QFormLayout()
         self._id_edit = QLineEdit(default_steam_id, self)
+        self._id_edit.setPlaceholderText("SteamID or ScoreSaber/BeatLeader/Steam URL")
+        self._id_edit.textChanged.connect(self._on_id_text_changed)
         form.addRow("SteamID:", self._id_edit)
         layout.addLayout(form)
 
@@ -264,6 +281,14 @@ class TakeSnapshotDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
+    def _on_id_text_changed(self, text: str) -> None:
+        """URL が貼られたとき SteamID を抽出してテキストボックスを置き換える。"""
+        extracted = _extract_steam_id_from_input(text)
+        if extracted != text:
+            self._id_edit.blockSignals(True)
+            self._id_edit.setText(extracted)
+            self._id_edit.blockSignals(False)
+
     def steam_id(self) -> str:
         return self._id_edit.text().strip()
 
@@ -433,8 +458,10 @@ class PlayerWindow(QMainWindow):
         self.fetch_ranking_button.clicked.connect(self._fetch_ranking_data)
         top_row.addWidget(self.fetch_ranking_button)
 
-        self.dark_mode_button = QPushButton("🌙 Dark")
+        _initial_dark = is_dark()
+        self.dark_mode_button = QPushButton(_theme_button_label())
         self.dark_mode_button.setCheckable(True)
+        self.dark_mode_button.setChecked(_initial_dark)
         self.dark_mode_button.clicked.connect(self._toggle_dark_mode)
         top_row.addWidget(self.dark_mode_button)
 
@@ -453,7 +480,8 @@ class PlayerWindow(QMainWindow):
         cache_info_row.addStretch(1)
         _ver = get_current_version()
         self._ver_label = QLabel(f"version：v{_ver}" if _ver else "", self)
-        self._ver_label.setStyleSheet("font-size: 12px; color: black; padding-right: 4px;")
+        _ver_color = "#cccccc" if is_dark() else "black"
+        self._ver_label.setStyleSheet(f"font-size: 12px; color: {_ver_color}; padding-right: 4px;")
         cache_info_row.addWidget(self._ver_label)
         layout.addLayout(cache_info_row)
 
@@ -465,9 +493,11 @@ class PlayerWindow(QMainWindow):
         # 1 列目の上段テーブル: ScoreSaber / BeatLeader の各種指標を 1 表にまとめる
         self.main_table = QTableWidget(0, 3, self)
         self.main_table.verticalHeader().setDefaultSectionSize(14)  # 行の高さを少し詰める
+        self.main_table.setStyleSheet(table_stylesheet())
 
         # 1 列目の下段テーブル: AccSaber 用の指標
         self.acc_table = QTableWidget(0, 5, self)
+        self.acc_table.setStyleSheet(table_stylesheet())
         self.main_table.setHorizontalHeaderLabels(["Metric", "", ""])
         self.acc_table.verticalHeader().setDefaultSectionSize(14)  # 行の高さを少し詰める
         # AccSaber の表であることが分かるよう、ヘッダに明示する
@@ -483,7 +513,7 @@ class PlayerWindow(QMainWindow):
         # SS(スローソング) も未クリア扱いとして別カラムで表示するため、NF/SS の 2 列を用意する。
         self.star_table = QTableWidget(0, 7, self)
         self.star_table.verticalHeader().setDefaultSectionSize(14)  # 行の高さを少し詰める
-        self.star_table.setStyleSheet("QTableWidget::item { padding: 0px; margin: 0px; }")
+        self.star_table.setStyleSheet(table_stylesheet() + "\nQTableWidget::item { padding: 0px; margin: 0px; }")
         self.star_table.verticalHeader().setMinimumSectionSize(0)
 
         self.star_table.setHorizontalHeaderLabels([
@@ -499,6 +529,7 @@ class PlayerWindow(QMainWindow):
         # 3 列目: BeatLeader 版 ★統計テーブル
         self.bl_star_table = QTableWidget(0, 7, self)
         self.bl_star_table.verticalHeader().setDefaultSectionSize(14)  # 行の高さを少し詰める
+        self.bl_star_table.setStyleSheet(table_stylesheet() + "\nQTableWidget::item { padding: 0px; margin: 0px; }")
         self.bl_star_table.setHorizontalHeaderLabels([
             "★",
             "Maps",
@@ -595,9 +626,9 @@ class PlayerWindow(QMainWindow):
         main_splitter.addWidget(self.star_table)
         main_splitter.addWidget(self.bl_star_table)
         # 1 列目をやや広め、2・3 列目を同程度にする
-        main_splitter.setStretchFactor(0, 31)
-        main_splitter.setStretchFactor(1, 30)
-        main_splitter.setStretchFactor(2, 30)
+        main_splitter.setStretchFactor(0, 28)
+        main_splitter.setStretchFactor(1, 32)
+        main_splitter.setStretchFactor(2, 32)
 
         layout.addWidget(main_splitter, 1)
 
@@ -938,6 +969,8 @@ class PlayerWindow(QMainWindow):
                 initial_country_code=country_code,
             )
             self._ranking_window.resize(1650, 800)
+            # ランキング画面でテーマを切り替えたとき Stats 画面の UI も同期する
+            self._ranking_window.dark_mode_button.clicked.connect(self._sync_ui_after_ranking_theme_change)
         else:
             win = self._ranking_window
             try:
@@ -1038,10 +1071,25 @@ class PlayerWindow(QMainWindow):
 
         return (overall_rank, true_rank, standard_rank, tech_rank)
 
+    def _sync_ui_after_ranking_theme_change(self) -> None:
+        """ランキング画面でテーマが切り替わったとき Stats 画面側の UI を更新する。
+
+        _toggle_theme() 自体はランキング画面側で呼ばれているので、
+        ここではテーマ状態を参照して表示だけを更新する。
+        """
+        dark = is_dark()
+        self.dark_mode_button.setText(_theme_button_label())
+        self.dark_mode_button.setChecked(dark)
+        _ver_color = "#cccccc" if dark else "black"
+        self._ver_label.setStyleSheet(f"font-size: 12px; color: {_ver_color}; padding-right: 4px;")
+        self._top_row.setSpacing(2)
+        self._update_view()
+
     def _toggle_dark_mode(self) -> None:
-        """ダーク / ライトモードを切り替える。"""
+        """\u30c0\u30fc\u30af / \u30e9\u30a4\u30c8\u30e2\u30fc\u30c9\u3092\u5207\u308a\u66ff\u3048\u308b\u3002"""
         dark = _toggle_theme()
-        self.dark_mode_button.setText("☀️ Light" if dark else "🌙 Dark")
+        self.dark_mode_button.setText(_theme_button_label())
+        self.dark_mode_button.setChecked(dark)
         _ver_color = "#cccccc" if dark else "black"
         self._ver_label.setStyleSheet(f"font-size: 12px; color: {_ver_color}; padding-right: 4px;")
         # ダーク時はデフォルト間隔、ライト時は素のネイティブボタンりも間隔を狭める
@@ -1054,7 +1102,7 @@ class PlayerWindow(QMainWindow):
             rw.table.setStyleSheet(table_stylesheet())
             rw._control_row.setSpacing(2)
             rw.dark_mode_button.setChecked(dark)
-            rw.dark_mode_button.setText("☀️ Light" if dark else "🌙 Dark")
+            rw.dark_mode_button.setText(_theme_button_label())
 
     def reload_snapshots(self) -> None:
         """snapshots フォルダを読み直して、プレイヤー一覧を更新する。"""
@@ -1147,6 +1195,12 @@ class PlayerWindow(QMainWindow):
         self._save_last_player_id()
 
     def _update_view(self) -> None:
+        # テーマ変更時に全テーブルのスタイルを更新する
+        _star_qss = table_stylesheet() + "\nQTableWidget::item { padding: 0px; margin: 0px; }"
+        self.star_table.setStyleSheet(_star_qss)
+        self.bl_star_table.setStyleSheet(_star_qss)
+        self.main_table.setStyleSheet(table_stylesheet())
+        self.acc_table.setStyleSheet(table_stylesheet())
         self.main_table.setRowCount(0)
         self.acc_table.setRowCount(0)
         self.star_table.setRowCount(0)
@@ -1695,7 +1749,7 @@ class PlayerWindow(QMainWindow):
 
 def run() -> None:
     app: QApplication = QApplication.instance() or QApplication([])  # type: ignore[assignment]
-    _apply_light(app)
+    _init_theme(app)  # 保存済み設定 or Windows システム設定でテーマを初期化
     # アプリ共通アイコンを設定（全ウィンドウのタイトルバー・タスクバーに反映）
     _icon_path = resource_path("app_icon.ico")
     if _icon_path.exists():
