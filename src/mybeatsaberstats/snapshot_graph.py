@@ -236,7 +236,8 @@ class LineChartWidget(QWidget):
         painter.drawLine(area.bottomLeft(), area.topLeft())
 
         # 目盛り (Y軸は4分割程度)
-        painter.setPen(self.palette().mid().color())
+        tick_pen = QPen(self.palette().mid().color())
+        text_pen = QPen(self.palette().text().color())
         font = painter.font()
         font.setPointSize(max(6, font.pointSize() - 1))
         painter.setFont(font)
@@ -250,11 +251,13 @@ class LineChartWidget(QWidget):
                 frac_screen = frac
             y = area.bottom() - int(frac_screen * area.height())
             v = v_min + frac * (v_max - v_min)
+            painter.setPen(tick_pen)
             painter.drawLine(area.left() - 4, y, area.left(), y)
             if self._y_as_int:
                 text = str(int(round(v)))
             else:
                 text = f"{v:.1f}"
+            painter.setPen(text_pen)
             painter.drawText(2, y + 4, text)
 
         # X軸の日付目盛り
@@ -278,7 +281,9 @@ class LineChartWidget(QWidget):
             x = map_x(t)
             dt = datetime.fromtimestamp(t).astimezone()
             text = dt.strftime("%m-%d")
+            painter.setPen(tick_pen)
             painter.drawLine(x, area.bottom(), x, area.bottom() + 4)
+            painter.setPen(text_pen)
             painter.drawText(x - 20, area.bottom() + 16, 40, 16, Qt.AlignmentFlag.AlignHCenter, text)
 
         # 折れ線（データそのままを直線で結ぶ）
