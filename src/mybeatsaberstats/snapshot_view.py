@@ -15,6 +15,7 @@ from .theme import (
     diff_negative_bg,
     diff_neutral_bg,
     diff_text_color,
+    table_stylesheet,
 )
 from PySide6.QtWidgets import (
     QComboBox,
@@ -186,6 +187,7 @@ class SnapshotCompareDialog(QDialog):
 
         # 左: プレイヤー/AccSaber 指標
         self.table = QTableWidget(0, 4, splitter)
+        self.table.setStyleSheet(table_stylesheet())
         self.table.verticalHeader().setDefaultSectionSize(14)  # 行の高さを少し詰める
 
         self.table.setHorizontalHeaderLabels([
@@ -206,6 +208,7 @@ class SnapshotCompareDialog(QDialog):
 
         # 中央: ScoreSaber ★別（クリア数 + AvgAcc 比較）
         self.ss_star_table = QTableWidget(0, 7, splitter)
+        self.ss_star_table.setStyleSheet(table_stylesheet())
         self.ss_star_table.verticalHeader().setDefaultSectionSize(14)  # 行の高さを少し詰める
         self.ss_star_table.setHorizontalHeaderLabels([
             "★",
@@ -236,6 +239,7 @@ class SnapshotCompareDialog(QDialog):
 
         # 右: BeatLeader ★別（クリア数 + AvgAcc 比較）
         self.bl_star_table = QTableWidget(0, 7, splitter)
+        self.bl_star_table.setStyleSheet(table_stylesheet())
         self.bl_star_table.verticalHeader().setDefaultSectionSize(14)  # 行の高さを少し詰める
         self.bl_star_table.setHorizontalHeaderLabels([
             "★",
