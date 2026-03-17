@@ -214,6 +214,14 @@ QHeaderView::section {
     border-right: 1px solid #434343;
     border-bottom: 1px solid #434343;
 }
+QHeaderView::section:vertical {
+    background-color: #2d2d2d;
+    color: #e0e0e0;
+    border: none;
+    border-right: 1px solid #434343;
+    border-bottom: 1px solid #434343;
+    padding-right: 4px;
+}
 QScrollBar:horizontal, QScrollBar:vertical {
     background: #2d2d2d;
 }
@@ -298,6 +306,14 @@ QHeaderView::section {
     border: none;
     border-right: 1px solid #d0d0d0;
     border-bottom: 1px solid #d0d0d0;
+}
+QHeaderView::section:vertical {
+    background-color: #f8f8f8;
+    color: #111111;
+    border: none;
+    border-right: 1px solid #d0d0d0;
+    border-bottom: 1px solid #d0d0d0;
+    padding-right: 4px;
 }
 QScrollBar:horizontal, QScrollBar:vertical {
     background: #f0f0f0;

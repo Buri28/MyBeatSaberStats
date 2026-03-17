@@ -520,6 +520,9 @@ class PlayerWindow(QMainWindow):
         # 1 列目の上段テーブル: ScoreSaber / BeatLeader の各種指標を 1 表にまとめる
         self.main_table = QTableWidget(0, 3, self)
         self.main_table.verticalHeader().setDefaultSectionSize(14)  # 行の高さを少し詰める
+        self.main_table.verticalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.main_table.verticalHeader().setMinimumSectionSize(0)
+        self.main_table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
         self.main_table.setStyleSheet(table_stylesheet())
 
         # 1 列目の下段テーブル: AccSaber 用の指標
@@ -527,6 +530,9 @@ class PlayerWindow(QMainWindow):
         self.acc_table.setStyleSheet(table_stylesheet())
         self.main_table.setHorizontalHeaderLabels(["Metric", "", ""])
         self.acc_table.verticalHeader().setDefaultSectionSize(14)  # 行の高さを少し詰める
+        self.acc_table.verticalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.acc_table.verticalHeader().setMinimumSectionSize(0)
+        self.acc_table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
         # AccSaber の表であることが分かるよう、ヘッダに明示する
         self.acc_table.setHorizontalHeaderLabels([
             "Metric",
@@ -612,6 +618,9 @@ class PlayerWindow(QMainWindow):
         # ★テーブルは行番号(No.1〜)が紛らわしいので非表示にする
         self.star_table.verticalHeader().setVisible(False)
         self.bl_star_table.verticalHeader().setVisible(False)
+        # Metric列で内容が分かるため main_table / acc_table の行番号も非表示にする
+        self.main_table.verticalHeader().setVisible(False)
+        self.acc_table.verticalHeader().setVisible(False)
 
         # パーセンテージ列に横棒グラフを表示するデリゲートを適用
         # Clear Rate 用: 0〜100% で赤→黄→緑グラデーション
@@ -653,7 +662,7 @@ class PlayerWindow(QMainWindow):
         main_splitter.addWidget(self.star_table)
         main_splitter.addWidget(self.bl_star_table)
         # 1 列目をやや広め、2・3 列目を同程度にする
-        main_splitter.setStretchFactor(0, 28)
+        main_splitter.setStretchFactor(0, 26)
         main_splitter.setStretchFactor(1, 32)
         main_splitter.setStretchFactor(2, 32)
 

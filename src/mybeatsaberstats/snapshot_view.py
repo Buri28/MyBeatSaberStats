@@ -206,6 +206,11 @@ class SnapshotCompareDialog(QDialog):
         self.table = QTableWidget(0, 4, splitter)
         self.table.setStyleSheet(table_stylesheet())
         self.table.verticalHeader().setDefaultSectionSize(14)  # 行の高さを少し詰める
+        self.table.verticalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.table.verticalHeader().setMinimumSectionSize(0)
+        self.table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
+        # Metric列で内容が分かるため行番号は非表示にする
+        self.table.verticalHeader().setVisible(False)
 
         self.table.setHorizontalHeaderLabels([
             "Metric",
@@ -302,7 +307,7 @@ class SnapshotCompareDialog(QDialog):
 
         root_layout.addWidget(splitter, 1)
         # デフォルトの分割比率
-        splitter.setSizes([350, 350, 350])
+        splitter.setSizes([325, 350, 350])
 
         self._load_snapshots()
         # Stats 画面から steam_id が渡されている場合はそちらを優先し、
