@@ -9,7 +9,7 @@ import json
 from datetime import datetime, timezone
 
 from PySide6.QtCore import Qt, QDateTime, QTimer
-from PySide6.QtGui import QColor, QIcon
+from PySide6.QtGui import QColor, QIcon, QPalette
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -331,6 +331,9 @@ class PercentageBarDelegate(QStyledItemDelegate):
 
     gradient_min を指定すると、その値以下は常に「0%扱い」（=赤）とし、
     そこから max_value に向けてグラデーションさせる。
+
+    テキスト色はダーク/ライト × バー重なりあり/なし の4パターンを個別に指定可能。
+    None を指定するとパレットのデフォルト色をそのまま使用する。
     """
 
     def __init__(
@@ -338,23 +341,44 @@ class PercentageBarDelegate(QStyledItemDelegate):
         parent: Optional[QWidget] = None,
         max_value: float = 100.0,
         gradient_min: float = 0.0,
+        dark_text_on_bar: Optional[str] = "#3333FF",
+        dark_text_off_bar: Optional[str] = "#4499FF",
+        light_text_on_bar: Optional[str] = "#2222FF",
+        light_text_off_bar: Optional[str] = "#111199",
     ) -> None:
         """ コンストラクタ。
         :param parent: 親ウィジェット
         :param max_value: パーセンテージの最大値（100% に対応する値）
         :param gradient_min: グラデーションの最小値。この値以下は常に 0% 扱いとする。
+        :param dark_text_on_bar: ダークモード・明るいバー重なり時のテキスト色（None=デフォルト）
+        :param dark_text_off_bar: ダークモード・バーなし/暗いバー時のテキスト色（None=デフォルト）
+        :param light_text_on_bar: ライトモード・明るいバー重なり時のテキスト色（None=デフォルト）
+        :param light_text_off_bar: ライトモード・バーなし/暗いバー時のテキスト色（None=デフォルト）
         """
         super().__init__(parent)
         self._max_value = max_value
         self._min_value = gradient_min
+        self._dark_text_on_bar = dark_text_on_bar
+        self._dark_text_off_bar = dark_text_off_bar
+        self._light_text_on_bar = light_text_on_bar
+        self._light_text_off_bar = light_text_off_bar
+
+    def _parse_value(self, value_str) -> "Optional[float]":
+        try:
+            return float(str(value_str)) if value_str not in (None, "") else None
+        except ValueError:
+            return None
+
+    def initStyleOption(self, option, index) -> None:  # type: ignore[override]
+        super().initStyleOption(option, index)
+        value = self._parse_value(index.data())
+        if value is not None and value >= self._max_value - 1e-3:
+            option.font.setBold(True)
+            option.text = option.text + " 🏆"
 
     def paint(self, painter, option, index):  # type: ignore[override]
         """index の値をパーセンテージとして解釈し、横棒グラフを描画する。"""
-        value_str = index.data()
-        try:
-            value = float(str(value_str)) if value_str not in (None, "") else None
-        except ValueError:
-            value = None
+        value = self._parse_value(index.data())
 
         # 通常描画のみ
         if value is None or not (self._max_value > 0):
@@ -401,16 +425,19 @@ class PercentageBarDelegate(QStyledItemDelegate):
         # 100% だけは太字で少しだけ強調する
         is_full = value >= self._max_value - 1e-3
 
-        # 数値テキストを描画（100% のときは太字にする）
-        if is_full:
-            painter.save()
-            font = option.font
-            font.setBold(True)
-            painter.setFont(font)
-            super().paint(painter, option, index)
-            painter.restore()
-        else:
-            super().paint(painter, option, index)
+        # バー色の輝度からテキスト色を決定
+        bar_lum = 0.299 * r + 0.587 * g + 0.114 * b
+        use_dark_text = ratio >= 0.4 and bar_lum > 140
+        dark = is_dark()
+        text_color_str = (
+            self._dark_text_on_bar if dark else self._light_text_on_bar
+        ) if use_dark_text else (
+            self._dark_text_off_bar if dark else self._light_text_off_bar
+        )
+        if text_color_str is not None:
+            option.palette.setColor(QPalette.ColorRole.Text, QColor(text_color_str))
+
+        super().paint(painter, option, index)
 
 
 class PlayerWindow(QMainWindow):
@@ -1601,7 +1628,7 @@ class PlayerWindow(QMainWindow):
             percent_text = f"{s.clear_rate * 100:.1f}" if s.map_count > 0 else ""
             self.star_table.setItem(row, 3, QTableWidgetItem(percent_text))
 
-            avg_acc_text = f"{s.average_acc:.2f}" if getattr(s, "average_acc", None) is not None else ""
+            avg_acc_text = f"{s.average_acc:.2f}" if getattr(s, "average_acc", None) is not None else ("0.00" if s.map_count > 0 else "")
             self.star_table.setItem(row, 4, QTableWidgetItem(avg_acc_text))
 
             self.star_table.setItem(row, 5, QTableWidgetItem(str(s.nf_count)))
@@ -1674,7 +1701,7 @@ class PlayerWindow(QMainWindow):
             percent_text = f"{s.clear_rate * 100:.1f}" if s.map_count > 0 else ""
             self.bl_star_table.setItem(row, 3, QTableWidgetItem(percent_text))
 
-            avg_acc_text = f"{s.average_acc:.2f}" if getattr(s, "average_acc", None) is not None else ""
+            avg_acc_text = f"{s.average_acc:.2f}" if getattr(s, "average_acc", None) is not None else ("0.00" if s.map_count > 0 else "")
             self.bl_star_table.setItem(row, 4, QTableWidgetItem(avg_acc_text))
 
             self.bl_star_table.setItem(row, 5, QTableWidgetItem(str(s.nf_count)))
