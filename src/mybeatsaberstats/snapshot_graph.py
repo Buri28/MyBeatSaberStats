@@ -261,21 +261,33 @@ class LineChartWidget(QWidget):
             painter.drawText(2, y + 4, text)
 
         # X軸の日付目盛り
+        # グラフ幅に応じて 5〜10 本程度になるよう、きりの良い間隔を自動選択する
         x_positions: List[float] = []
-        if self._t_min_explicit is not None and self._t_max_explicit is not None:
-            # From/To が指定されている場合は、日単位の目盛りを打つ
-            d_start = self._t_min_explicit.date()
-            d_end = self._t_max_explicit.date()
-            day_count = (d_end - d_start).days + 1
-            # 日数が多すぎるとごちゃつくので、ある程度までに限定
-            if day_count <= 10:
-                for i in range(day_count):
-                    dt_tick = datetime(d_start.year, d_start.month, d_start.day, 0, 0, 0) + timedelta(days=i)
-                    x_positions.append(dt_tick.timestamp())
-            else:
-                x_positions = [t_min, (t_min + t_max) / 2.0, t_max]
-        else:
-            x_positions = [t_min, (t_min + t_max) / 2.0, t_max]
+        d_start = (self._t_min_explicit.date() if self._t_min_explicit is not None
+                   else datetime.fromtimestamp(t_min).astimezone().date())
+        d_end = (self._t_max_explicit.date() if self._t_max_explicit is not None
+                 else datetime.fromtimestamp(t_max).astimezone().date())
+        span_days = max(1, (d_end - d_start).days)
+
+        # 目盛りの最大本数はグラフ幅 ÷ 55px 程度を上限とする
+        max_ticks = max(3, area.width() // 55)
+
+        # きりの良い間隔候補（日単位）から max_ticks 以内に収まる最小のものを選ぶ
+        interval_days = 365
+        for _cand in [1, 2, 3, 5, 7, 10, 14, 21, 30, 60, 90, 180, 365]:
+            if span_days / _cand <= max_ticks:
+                interval_days = _cand
+                break
+
+        cur = d_start
+        while cur <= d_end:
+            dt_tick = datetime(cur.year, cur.month, cur.day, 0, 0, 0)
+            x_positions.append(dt_tick.timestamp())
+            cur += timedelta(days=interval_days)
+        # 末尾が d_end と離れている場合は終端を追加
+        dt_end_ts = datetime(d_end.year, d_end.month, d_end.day, 0, 0, 0).timestamp()
+        if not x_positions or abs(x_positions[-1] - dt_end_ts) > interval_days * 86400 * 0.5:
+            x_positions.append(dt_end_ts)
 
         for t in x_positions:
             x = map_x(t)
@@ -344,11 +356,13 @@ class SnapshotGraphDialog(QDialog):
         control_row.addWidget(QLabel("From:"))
         self.from_date = QDateEdit(self)
         self.from_date.setCalendarPopup(True)
+        self.from_date.setMinimumWidth(110)
         control_row.addWidget(self.from_date)
 
         control_row.addWidget(QLabel("To:"))
         self.to_date = QDateEdit(self)
         self.to_date.setCalendarPopup(True)
+        self.to_date.setMinimumWidth(110)
         control_row.addWidget(self.to_date)
 
         # To の右に「Latest」ボタンを配置し、押下で To を今日に設定する
