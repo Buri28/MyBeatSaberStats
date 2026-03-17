@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 import json
 import re
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor, QIcon
+from PySide6.QtGui import QColor, QIcon, QPalette
 from .theme import (
     label_cell_color,
     label_cell_text_color,
@@ -16,6 +16,7 @@ from .theme import (
     diff_neutral_bg,
     diff_text_color,
     table_stylesheet,
+    is_dark,
 )
 from PySide6.QtWidgets import (
     QComboBox,
@@ -37,38 +38,50 @@ from .accsaber import get_accsaber_playlist_map_counts
 
 
 class PercentageBarDelegate(QStyledItemDelegate):
-    """パーセンテージ値を持つセルに簡易な横棒グラフを描画するデリゲート。"""
+    """パーセンテージ値を持つセルに簡易な横棒グラフを描画するデリゲート。
+
+    テキスト色はダーク/ライト × バー重なりあり/なし の4パターンを個別に指定可能。
+    None を指定するとパレットのデフォルト色をそのまま使用する。
+    """
 
     def __init__(
         self,
         parent: Optional[QWidget] = None,
         max_value: float = 100.0,
         gradient_min: float = 0.0,
+        dark_text_on_bar: Optional[str] = "#3333FF",
+        dark_text_off_bar: Optional[str] = "#3388FF",
+        light_text_on_bar: Optional[str] = "#2222FF",
+        light_text_off_bar: Optional[str] = "#111199",
     ) -> None:
         super().__init__(parent)
         self._max_value = max_value
         self._min_value = gradient_min
+        self._dark_text_on_bar = dark_text_on_bar
+        self._dark_text_off_bar = dark_text_off_bar
+        self._light_text_on_bar = light_text_on_bar
+        self._light_text_off_bar = light_text_off_bar
+
+    def _parse_value(self, value_str) -> "Optional[float]":
+        if value_str in (None, ""):
+            return None
+        s = str(value_str).strip()
+        m = re.search(r"([-+]?\d+(?:\.\d+)?)\s*%", s)
+        num_str = m.group(1) if m else s
+        try:
+            return float(num_str)
+        except ValueError:
+            return None
+
+    def initStyleOption(self, option, index) -> None:  # type: ignore[override]
+        super().initStyleOption(option, index)
+        value = self._parse_value(index.data())
+        if value is not None and value >= self._max_value - 1e-3:
+            option.font.setBold(True)
+            option.text = option.text + " 🏆"
 
     def paint(self, painter, option, index):  # type: ignore[override]
-        value_str = index.data()
-        value: Optional[float]
-        if value_str in (None, ""):
-            value = None
-        else:
-            s = str(value_str).strip()
-            # セル文字列中に含まれるパーセンテージ表記から数値部分だけを取り出す
-            # 例: "98.90%", "98.90 %", "949 (100.0%)" など
-            m = re.search(r"([-+]?\d+(?:\.\d+)?)\s*%", s)
-            if m:
-                num_str = m.group(1)
-            else:
-                # % を含まない場合は、そのまま数値として解釈を試みる
-                num_str = s
-
-            try:
-                value = float(num_str)
-            except ValueError:
-                value = None
+        value = self._parse_value(index.data())
 
         if value is None or not (self._max_value > 0):
             return super().paint(painter, option, index)
@@ -111,15 +124,19 @@ class PercentageBarDelegate(QStyledItemDelegate):
 
         is_full = value >= self._max_value - 1e-3
 
-        if is_full:
-            painter.save()
-            font = option.font
-            font.setBold(True)
-            painter.setFont(font)
-            super().paint(painter, option, index)
-            painter.restore()
-        else:
-            super().paint(painter, option, index)
+        # バー色の輝度からテキスト色を決定
+        bar_lum = 0.299 * r + 0.587 * g + 0.114 * b
+        use_dark_text = ratio >= 0.4 and bar_lum > 140
+        dark = is_dark()
+        text_color_str = (
+            self._dark_text_on_bar if dark else self._light_text_on_bar
+        ) if use_dark_text else (
+            self._dark_text_off_bar if dark else self._light_text_off_bar
+        )
+        if text_color_str is not None:
+            option.palette.setColor(QPalette.ColorRole.Text, QColor(text_color_str))
+
+        super().paint(painter, option, index)
 
 
 class SnapshotCompareDialog(QDialog):

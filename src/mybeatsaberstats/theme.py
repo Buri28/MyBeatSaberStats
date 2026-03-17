@@ -199,6 +199,9 @@ def _dark_palette() -> QPalette:
 
 
 _DARK_GLOBAL_QSS = """
+QDialog {
+    background-color: #141414;
+}
 QToolTip {
     color: #d4d4d4;
     background-color: #252526;
@@ -262,7 +265,7 @@ QGroupBox {
     border: 1px solid #555555;
 }
 QCheckBox {
-    color: #84d4FF;
+    color: #CCAA99;
 }
 QProgressDialog QLabel {
     color: #d4d4d4;
