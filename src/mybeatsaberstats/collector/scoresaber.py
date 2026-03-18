@@ -999,6 +999,7 @@ def _collect_star_stats_from_scoresaber(scoresaber_id: str, session: requests.Se
     star_clear_count: dict[int, int] = defaultdict(int)
     star_nf_count: dict[int, int] = defaultdict(int)
     star_ss_count: dict[int, int] = defaultdict(int)
+    star_fc_count: dict[int, int] = defaultdict(int)
     # ★別の平均精度算出用
     star_acc_sum: dict[int, float] = defaultdict(float)
     star_acc_count: dict[int, int] = defaultdict(int)
@@ -1010,6 +1011,7 @@ def _collect_star_stats_from_scoresaber(scoresaber_id: str, session: requests.Se
         nf: bool
         ss: bool
         best_acc: Optional[float]
+        has_fc: bool
 
     per_leaderboard: dict[str, _PerLeaderboardState] = {}
 
@@ -1043,7 +1045,7 @@ def _collect_star_stats_from_scoresaber(scoresaber_id: str, session: requests.Se
 
         state = per_leaderboard.get(lb_id)
         if state is None:
-            state = _PerLeaderboardState(star=star_bucket, clear=False, nf=False, ss=False, best_acc=None)
+            state = _PerLeaderboardState(star=star_bucket, clear=False, nf=False, ss=False, best_acc=None, has_fc=False)
             per_leaderboard[lb_id] = state
 
         modifiers = ""
@@ -1060,11 +1062,9 @@ def _collect_star_stats_from_scoresaber(scoresaber_id: str, session: requests.Se
             state["ss"] = True
         else:
             state["clear"] = True
-            
-            # if star_bucket == 11:
-            #     print(f"★クリア済み leaderboard ID: {lb_id} 星: {star_bucket} songName: {leaderboard.get('songName')}")
-            
-            # print(f"★クリア済み leaderboard ID: {lb_id} 星: {star_bucket}")
+
+            if isinstance(score_info, dict) and score_info.get("fullCombo") is True:
+                state["has_fc"] = True
 
             # NF/SS なしスコアの精度(%)を best_acc として保持
             acc: Optional[float] = None
@@ -1102,6 +1102,8 @@ def _collect_star_stats_from_scoresaber(scoresaber_id: str, session: requests.Se
         if has_clear:
             # print(f"クリア済み leaderboard (星 {star_bucket}){state.get("best_acc")=}")
             star_clear_count[star_bucket] += 1
+            if state.get("has_fc"):
+                star_fc_count[star_bucket] += 1
             # クリア済み譜面については best_acc を★別に集計
             best_acc = state.get("best_acc")
             if isinstance(best_acc, (int, float)) and math.isfinite(float(best_acc)):
@@ -1142,6 +1144,7 @@ def _collect_star_stats_from_scoresaber(scoresaber_id: str, session: requests.Se
                 ss_count=ss_count,
                 clear_rate=clear_rate,
                 average_acc=avg_acc,
+                fc_count=star_fc_count.get(star, 0),
             )
         )
 

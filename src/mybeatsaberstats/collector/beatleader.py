@@ -732,6 +732,11 @@ def collect_beatleader_star_stats(beatleader_id: str, session: Optional[requests
     star_ss_count: dict[int, int] = defaultdict(int)
     star_acc_sum: dict[int, float] = defaultdict(float)
     star_acc_count: dict[int, int] = defaultdict(int)
+    star_acc_left_sum: dict[int, float] = defaultdict(float)
+    star_acc_left_count: dict[int, int] = defaultdict(int)
+    star_acc_right_sum: dict[int, float] = defaultdict(float)
+    star_acc_right_count: dict[int, int] = defaultdict(int)
+    star_fc_count_dict: dict[int, int] = defaultdict(int)
 
     per_leaderboard: dict[str, dict] = {}
 
@@ -757,7 +762,7 @@ def collect_beatleader_star_stats(beatleader_id: str, session: Optional[requests
 
         state = per_leaderboard.get(lb_id)
         if state is None:
-            state = {"star": star_bucket, "clear": False, "nf": False, "ss": False, "best_acc": None}
+            state = {"star": star_bucket, "clear": False, "nf": False, "ss": False, "best_acc": None, "best_acc_left": None, "best_acc_right": None, "has_fc": False}
             per_leaderboard[lb_id] = state
 
         score_info = item.get("score") if isinstance(item, dict) else None
@@ -779,11 +784,19 @@ def collect_beatleader_star_stats(beatleader_id: str, session: Optional[requests
         else:
             state["clear"] = True
 
+            if isinstance(score_info, dict) and score_info.get("fullCombo") is True:
+                state["has_fc"] = True
+
             acc = _extract_beatleader_accuracy(score_info) if isinstance(score_info, dict) else None
             if acc is not None:
                 best = state.get("best_acc")
                 if best is None or acc > best:
                     state["best_acc"] = acc
+                    if isinstance(score_info, dict):
+                        al = score_info.get("accLeft")
+                        ar = score_info.get("accRight")
+                        state["best_acc_left"] = float(al) if al is not None else None
+                        state["best_acc_right"] = float(ar) if ar is not None else None
 
     for state in per_leaderboard.values():
         star_bucket = int(state["star"])
@@ -793,10 +806,36 @@ def collect_beatleader_star_stats(beatleader_id: str, session: Optional[requests
 
         if has_clear:
             star_clear_count[star_bucket] += 1
+            if bool(state.get("has_fc")):
+                star_fc_count_dict[star_bucket] += 1
             best_acc = state.get("best_acc")
             if isinstance(best_acc, (int, float)) and math.isfinite(float(best_acc)):
                 star_acc_sum[star_bucket] += float(best_acc)
                 star_acc_count[star_bucket] += 1
+                best_left = state.get("best_acc_left")
+                best_right = state.get("best_acc_right")
+                best_acc_val = float(best_acc)
+                # L/R acc の計算: 2 * acc * accL / (accL + accR)
+                # accLeft/accRight はヒットしたノーツのみの平均点（ミス除外）なので、
+                # 単純に /115 * acc とするとミスが二重にペナルティされる。
+                # ノーツが L/R 均等と仮定すると:
+                #   acc = hit_rate * (accL + accR) / (2*115) * 100
+                #   L_acc = hit_rate * accL / 115 * 100
+                #         = 2 * acc * accL / (accL + accR)
+                # これにより avg(L_acc, R_acc) = acc が成立する。
+                if (best_left is not None and best_right is not None
+                        and math.isfinite(float(best_left))
+                        and math.isfinite(float(best_right))):
+                    al = float(best_left)
+                    ar = float(best_right)
+                    if al + ar > 0:
+                        l_val = 2.0 * best_acc_val * al / (al + ar)
+                        r_val = 2.0 * best_acc_val * ar / (al + ar)
+                        if math.isfinite(l_val) and math.isfinite(r_val):
+                            star_acc_left_sum[star_bucket] += l_val
+                            star_acc_right_sum[star_bucket] += r_val
+                            star_acc_left_count[star_bucket] += 1
+                            star_acc_right_count[star_bucket] += 1
         elif has_nf:
             star_nf_count[star_bucket] += 1
         elif has_ss:
@@ -814,6 +853,18 @@ def collect_beatleader_star_stats(beatleader_id: str, session: Optional[requests
         if acc_count > 0 and math.isfinite(float(acc_sum)):
             avg_acc = acc_sum / acc_count
 
+        avg_acc_left = None
+        left_cnt = star_acc_left_count.get(star, 0)
+        if left_cnt > 0:
+            avg_acc_left = star_acc_left_sum.get(star, 0.0) / left_cnt
+
+        avg_acc_right = None
+        right_cnt = star_acc_right_count.get(star, 0)
+        if right_cnt > 0:
+            avg_acc_right = star_acc_right_sum.get(star, 0.0) / right_cnt
+
+        fc_count = star_fc_count_dict.get(star, 0)
+
         # ScoreSaber 側と同様にクリア率 (0.0-1.0) を計算
         clear_rate = (cleared / map_count) if map_count > 0 else 0.0
 
@@ -824,6 +875,10 @@ def collect_beatleader_star_stats(beatleader_id: str, session: Optional[requests
             nf_count=nf,
             ss_count=ss,
             clear_rate=clear_rate,
-            average_acc=avg_acc))
+            average_acc=avg_acc,
+            fc_count=fc_count,
+            avg_acc_left=avg_acc_left,
+            avg_acc_right=avg_acc_right,
+        ))
 
     return stats
