@@ -149,7 +149,7 @@ class SnapshotCompareDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Snapshot Compare")
-        self.resize(1360, 680)
+        self.resize(1460, 680)
 
         # steam_id ごとにスナップショットを管理する
         self._snapshots_by_player: dict[str, List[Snapshot]] = {}
@@ -244,17 +244,19 @@ class SnapshotCompareDialog(QDialog):
         ss_star_header = self.ss_star_table.horizontalHeader()
         ss_star_header.setStretchLastSection(False)
         # ★と差分列などは内容に合わせて、A/B Clear 列は固定幅で少し広めにする
-        ss_star_header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        ss_star_header.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
         ss_star_header.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
         ss_star_header.setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
         ss_star_header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
-        ss_star_header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
-        ss_star_header.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
+        ss_star_header.setSectionResizeMode(4, QHeaderView.ResizeMode.Interactive)
+        ss_star_header.setSectionResizeMode(5, QHeaderView.ResizeMode.Interactive)
         ss_star_header.setSectionResizeMode(6, QHeaderView.ResizeMode.ResizeToContents)
-        ss_star_header.resizeSection(0, 70)
-        ss_star_header.resizeSection(1, 90)
-        ss_star_header.resizeSection(2, 90)
+        ss_star_header.resizeSection(0, 35)
+        ss_star_header.resizeSection(1, 100)
+        ss_star_header.resizeSection(2, 100)
         ss_star_header.resizeSection(3, 70)
+        ss_star_header.resizeSection(4, 80)
+        ss_star_header.resizeSection(5, 80)
         ss_star_header.resizeSection(6, 70)
         # 下段★テーブルは行番号(No)が紛らわしいので非表示にする
         self.ss_star_table.verticalHeader().setVisible(False)
@@ -274,17 +276,19 @@ class SnapshotCompareDialog(QDialog):
         ])
         bl_star_header = self.bl_star_table.horizontalHeader()
         bl_star_header.setStretchLastSection(False)
-        bl_star_header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        bl_star_header.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
         bl_star_header.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
         bl_star_header.setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
         bl_star_header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
-        bl_star_header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
-        bl_star_header.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
+        bl_star_header.setSectionResizeMode(4, QHeaderView.ResizeMode.Interactive)
+        bl_star_header.setSectionResizeMode(5, QHeaderView.ResizeMode.Interactive)
         bl_star_header.setSectionResizeMode(6, QHeaderView.ResizeMode.ResizeToContents)
-        bl_star_header.resizeSection(0, 70)
-        bl_star_header.resizeSection(1, 90)
-        bl_star_header.resizeSection(2, 90)
+        bl_star_header.resizeSection(0, 35)
+        bl_star_header.resizeSection(1, 100)
+        bl_star_header.resizeSection(2, 100)
         bl_star_header.resizeSection(3, 70)
+        bl_star_header.resizeSection(4, 80)
+        bl_star_header.resizeSection(5, 80)
         bl_star_header.resizeSection(6, 70)
         self.bl_star_table.verticalHeader().setVisible(False)
 
@@ -307,7 +311,7 @@ class SnapshotCompareDialog(QDialog):
 
         root_layout.addWidget(splitter, 1)
         # デフォルトの分割比率
-        splitter.setSizes([325, 350, 350])
+        splitter.setSizes([290, 360, 360])
 
         self._load_snapshots()
         # Stats 画面から steam_id が渡されている場合はそちらを優先し、
@@ -691,8 +695,7 @@ class SnapshotCompareDialog(QDialog):
         table.setItem(row, 2, QTableWidgetItem(text_b))
 
         diff_item = QTableWidgetItem("")
-
-        # 数値同士なら差分を計算して色を付ける
+        # diff_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         if isinstance(a_numeric, (int, float)) and isinstance(b_numeric, (int, float)):
             # Rank 系の指標は「数値が小さいほど良い」ので符号を反転させる。
             # 例: ランクが 1000 → 900 に改善した場合、+100 として扱う。
@@ -1206,6 +1209,7 @@ class SnapshotCompareDialog(QDialog):
 
             # Clear 差分
             diff_clear_item = QTableWidgetItem("")
+            diff_clear_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             if isinstance(a_clear_val, (int, float)) and isinstance(b_clear_val, (int, float)):
                 diff = b_clear_val - a_clear_val
                 if isinstance(a_clear_val, float) or isinstance(b_clear_val, float):
@@ -1234,6 +1238,7 @@ class SnapshotCompareDialog(QDialog):
 
             # AvgAcc 差分
             diff_acc_item = QTableWidgetItem("0.00%")
+            diff_acc_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             if isinstance(a_avg_val, (int, float)) and isinstance(b_avg_val, (int, float)):
                 diff = b_avg_val - a_avg_val
                 diff_acc_item.setText(f"{diff:+.2f}%")

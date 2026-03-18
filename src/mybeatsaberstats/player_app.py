@@ -1644,6 +1644,7 @@ class PlayerWindow(QMainWindow):
             item5 = self.star_table.item(row, 5)
             if item5 is not None:
                 item5.setTextAlignment(Qt.AlignmentFlag.AlignRight)
+            self.star_table.setItem(row, 6, QTableWidgetItem(str(s.ss_count)))
             item6 = self.star_table.item(row, 6)
             if item6 is not None:
                 item6.setTextAlignment(Qt.AlignmentFlag.AlignRight)
@@ -1676,8 +1677,12 @@ class PlayerWindow(QMainWindow):
                 total_avg_text = ""
             self.star_table.setItem(total_row, 4, QTableWidgetItem(total_avg_text))
 
-            self.star_table.setItem(total_row, 5, QTableWidgetItem(str(total_nf)))
-            self.star_table.setItem(total_row, 6, QTableWidgetItem(str(total_ss)))
+            nf_total_item = QTableWidgetItem(str(total_nf))
+            nf_total_item.setTextAlignment(Qt.AlignmentFlag.AlignRight)
+            self.star_table.setItem(total_row, 5, nf_total_item)
+            ss_total_item = QTableWidgetItem(str(total_ss))
+            ss_total_item.setTextAlignment(Qt.AlignmentFlag.AlignRight)
+            self.star_table.setItem(total_row, 6, ss_total_item)
 
         self.star_table.resizeColumnsToContents()
 
@@ -1748,8 +1753,12 @@ class PlayerWindow(QMainWindow):
                 bl_total_avg_text = ""
             self.bl_star_table.setItem(bl_total_row, 4, QTableWidgetItem(bl_total_avg_text))
 
-            self.bl_star_table.setItem(bl_total_row, 5, QTableWidgetItem(str(bl_total_nf)))
-            self.bl_star_table.setItem(bl_total_row, 6, QTableWidgetItem(str(bl_total_ss)))
+            bl_nf_total_item = QTableWidgetItem(str(bl_total_nf))
+            bl_nf_total_item.setTextAlignment(Qt.AlignmentFlag.AlignRight)
+            self.bl_star_table.setItem(bl_total_row, 5, bl_nf_total_item)
+            bl_ss_total_item = QTableWidgetItem(str(bl_total_ss))
+            bl_ss_total_item.setTextAlignment(Qt.AlignmentFlag.AlignRight)
+            self.bl_star_table.setItem(bl_total_row, 6, bl_ss_total_item)
 
         self.bl_star_table.resizeColumnsToContents()
 
