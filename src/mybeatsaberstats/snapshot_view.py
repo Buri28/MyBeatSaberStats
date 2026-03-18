@@ -149,7 +149,7 @@ class SnapshotCompareDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Snapshot Compare")
-        self.resize(1460, 680)
+        self.resize(1520, 680)
 
         # steam_id ごとにスナップショットを管理する
         self._snapshots_by_player: dict[str, List[Snapshot]] = {}
@@ -216,7 +216,7 @@ class SnapshotCompareDialog(QDialog):
             "Metric",
             "A",
             "B",
-            "Diff (A -> B)",
+            "Diff (A⇒B)",
         ])
 
         header = self.table.horizontalHeader()
@@ -226,7 +226,7 @@ class SnapshotCompareDialog(QDialog):
         header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
         header.resizeSection(0, 150)
-        header.resizeSection(3, 70)
+        header.resizeSection(3, 50)
 
         # 中央: ScoreSaber ★別（クリア数 + AvgAcc 比較）
         self.ss_star_table = QTableWidget(0, 7, splitter)
@@ -311,7 +311,7 @@ class SnapshotCompareDialog(QDialog):
 
         root_layout.addWidget(splitter, 1)
         # デフォルトの分割比率
-        splitter.setSizes([290, 360, 360])
+        splitter.setSizes([290, 360, 425])
 
         self._load_snapshots()
         # Stats 画面から steam_id が渡されている場合はそちらを優先し、
@@ -752,7 +752,7 @@ class SnapshotCompareDialog(QDialog):
             "Metric",
             f"A ({date_a})",
             f"B ({date_b})",
-            "Diff (A -> B)",
+            "Diff (A⇒B)",
         ])
         # ★テーブル側のヘッダはコンパクトな固定ラベルを使う（サービス名はアイコンで表現）
         self.ss_star_table.setHorizontalHeaderLabels([
@@ -771,7 +771,10 @@ class SnapshotCompareDialog(QDialog):
             "ΔClear",
             "A AvgAcc",
             "B AvgAcc",
-            "ΔAcc",
+            "ΔAcc(L / R)",
+            "A FC",
+            "B FC",
+            "ΔFC",
         ])
 
         # ★列ヘッダにサービスアイコンを設定
@@ -1169,6 +1172,36 @@ class SnapshotCompareDialog(QDialog):
                     return avg, f"{avg:.2f}"
             return None
 
+        def _avg_acc_left_star_value_and_text(stats, star: int):
+            """指定★帯の左手平均精度(%)を数値＋表示文字列のタプルで返す（BL専用）。"""
+
+            for s in stats:
+                if getattr(s, "star", None) == star:
+                    val = getattr(s, "avg_acc_left", None)
+                    if val is None:
+                        return None
+                    return val, f"{val:.2f}"
+            return None
+
+        def _avg_acc_right_star_value_and_text(stats, star: int):
+            """指定★帯の右手平均精度(%)を数値＋表示文字列のタプルで返す（BL専用）。"""
+
+            for s in stats:
+                if getattr(s, "star", None) == star:
+                    val = getattr(s, "avg_acc_right", None)
+                    if val is None:
+                        return None
+                    return val, f"{val:.2f}"
+            return None
+
+        def _fc_star_count(stats, star: int) -> int:
+            """指定★帯のFC数を返す（BL専用）。"""
+
+            for s in stats:
+                if getattr(s, "star", None) == star:
+                    return getattr(s, "fc_count", 0)
+            return 0
+
         def _avg_acc_total_value_and_text(avg_acc: Optional[float]):
             """全体の平均精度(%)を数値＋表示文字列のタプルで返す。"""
 
@@ -1184,9 +1217,21 @@ class SnapshotCompareDialog(QDialog):
             numeric, text = value_and_text
             return numeric, "" if text is None else str(text)
 
-        def _set_star_row(table: QTableWidget, row: int, label: str,  # type: ignore[name-defined]
-                          clear_a, clear_b, avg_a, avg_b) -> None:
-            """★別テーブルの 1 行分 (Clear + AvgAcc) を設定する。"""
+        def _set_star_row(  # type: ignore[name-defined]
+            table: QTableWidget,
+            row: int,
+            label: str,
+            clear_a, clear_b,
+            avg_a, avg_b,
+            avg_left_a=None, avg_left_b=None,
+            avg_right_a=None, avg_right_b=None,
+            fc_a: "Optional[int]" = None, fc_b: "Optional[int]" = None,
+        ) -> None:
+            """★別テーブルの 1 行分 (Clear + AvgAcc [+ FC]) を設定する。
+
+            avg_left_a/b, avg_right_a/b を渡すと ΔAcc セルに L/R 差分を付加する。
+            fc_a/b を渡すと列 7-9 に FC 数と差分を設定する（BL テーブル専用）。
+            """
 
             while table.rowCount() <= row:
                 table.insertRow(table.rowCount())
@@ -1236,12 +1281,29 @@ class SnapshotCompareDialog(QDialog):
             table.setItem(row, 4, QTableWidgetItem(a_avg_text + "%"))
             table.setItem(row, 5, QTableWidgetItem(b_avg_text + "%"))
 
-            # AvgAcc 差分
-            diff_acc_item = QTableWidgetItem("0.00%")
-            diff_acc_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            # ΔAcc (L/R 差分を付加する場合は括弧内に表示)
+            diff_acc_item = QTableWidgetItem("+0.00%")
+            diff_acc_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
             if isinstance(a_avg_val, (int, float)) and isinstance(b_avg_val, (int, float)):
                 diff = b_avg_val - a_avg_val
-                diff_acc_item.setText(f"{diff:+.2f}%")
+                diff_text = f"{diff:+.2f}%"
+
+                # L/R が渡されている場合は括弧内に付加する
+                a_left_val, _ = _normalize_pair(avg_left_a)
+                b_left_val, _ = _normalize_pair(avg_left_b)
+                a_right_val, _ = _normalize_pair(avg_right_a)
+                b_right_val, _ = _normalize_pair(avg_right_b)
+                if isinstance(a_left_val, (int, float)) or isinstance(b_left_val, (int, float)):
+                    al = a_left_val if isinstance(a_left_val, (int, float)) else 0.0
+                    bl_v = b_left_val if isinstance(b_left_val, (int, float)) else 0.0
+                    ar = a_right_val if isinstance(a_right_val, (int, float)) else 0.0
+                    br = b_right_val if isinstance(b_right_val, (int, float)) else 0.0
+                    ld = bl_v - al
+                    rd = br - ar
+                    # L/R のどちらかが数値として渡されていれば、括弧内に両方の差分を表示する
+                    diff_text += f"({ld:+.2f} / {rd:+.2f})"
+
+                diff_acc_item.setText(diff_text)
 
                 if diff > 0:
                     color = diff_positive_bg()
@@ -1253,6 +1315,30 @@ class SnapshotCompareDialog(QDialog):
                 diff_acc_item.setForeground(diff_text_color())
 
             table.setItem(row, 6, diff_acc_item)
+
+            # FC 列 (BL テーブル専用: 列 7/8/9)
+            if fc_a is not None or fc_b is not None:
+                a_fc = fc_a if fc_a is not None else 0
+                b_fc = fc_b if fc_b is not None else 0
+                a_fc_item = QTableWidgetItem(str(a_fc))
+                a_fc_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                b_fc_item = QTableWidgetItem(str(b_fc))
+                b_fc_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                table.setItem(row, 7, a_fc_item)
+                table.setItem(row, 8, b_fc_item)
+
+                diff_fc_item = QTableWidgetItem("")
+                diff_fc_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                fc_diff = b_fc - a_fc
+                diff_fc_item.setText(f"{fc_diff:+d}")
+                if fc_diff > 0:
+                    diff_fc_item.setBackground(diff_positive_bg())
+                elif fc_diff < 0:
+                    diff_fc_item.setBackground(diff_negative_bg())
+                else:
+                    diff_fc_item.setBackground(diff_neutral_bg())
+                diff_fc_item.setForeground(diff_text_color())
+                table.setItem(row, 9, diff_fc_item)
 
         # ScoreSaber 側テーブル
         stars_ss = sorted({s.star for s in ss_stats_a} | {s.star for s in ss_stats_b})
@@ -1283,12 +1369,30 @@ class SnapshotCompareDialog(QDialog):
             bl_b_clear = _clear_star_value_and_text(bl_stats_b, star)
             bl_a_avg = _avg_acc_star_value_and_text(bl_stats_a, star)
             bl_b_avg = _avg_acc_star_value_and_text(bl_stats_b, star)
-            _set_star_row(self.bl_star_table, row_bl, str(star), bl_a_clear, bl_b_clear, bl_a_avg, bl_b_avg)
+            bl_a_left = _avg_acc_left_star_value_and_text(bl_stats_a, star)
+            bl_b_left = _avg_acc_left_star_value_and_text(bl_stats_b, star)
+            bl_a_right = _avg_acc_right_star_value_and_text(bl_stats_a, star)
+            bl_b_right = _avg_acc_right_star_value_and_text(bl_stats_b, star)
+            bl_a_fc = _fc_star_count(bl_stats_a, star)
+            bl_b_fc = _fc_star_count(bl_stats_b, star)
+            _set_star_row(
+                self.bl_star_table, row_bl, str(star),
+                bl_a_clear, bl_b_clear, bl_a_avg, bl_b_avg,
+                avg_left_a=bl_a_left, avg_left_b=bl_b_left,
+                avg_right_a=bl_a_right, avg_right_b=bl_b_right,
+                fc_a=bl_a_fc, fc_b=bl_b_fc,
+            )
             row_bl += 1
 
         if bl_clear_total_a is not None or bl_clear_total_b is not None:
             bl_avg_total_a = _avg_acc_total_value_and_text(snap_a.beatleader_average_ranked_acc)
             bl_avg_total_b = _avg_acc_total_value_and_text(snap_b.beatleader_average_ranked_acc)
-            _set_star_row(self.bl_star_table, row_bl, "Total", bl_clear_total_a, bl_clear_total_b, bl_avg_total_a, bl_avg_total_b)
+            bl_fc_total_a = sum(getattr(s, "fc_count", 0) for s in bl_stats_a) if bl_stats_a else 0
+            bl_fc_total_b = sum(getattr(s, "fc_count", 0) for s in bl_stats_b) if bl_stats_b else 0
+            _set_star_row(
+                self.bl_star_table, row_bl, "Total",
+                bl_clear_total_a, bl_clear_total_b, bl_avg_total_a, bl_avg_total_b,
+                fc_a=bl_fc_total_a, fc_b=bl_fc_total_b,
+            )
 
         self.table.resizeColumnsToContents()
