@@ -1670,7 +1670,7 @@ class PlayerWindow(QMainWindow):
             if item2 is not None:
                 item2.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
-            fc_item = QTableWidgetItem(str(getattr(s, "fc_count", 0)))
+            fc_item = QTableWidgetItem(str(getattr(s, "fc_count", None) or 0))
             fc_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             self.star_table.setItem(row, 3, fc_item)
 
@@ -1693,7 +1693,7 @@ class PlayerWindow(QMainWindow):
             total_clears += s.clear_count
             total_nf += s.nf_count
             total_ss += s.ss_count
-            total_fc += getattr(s, "fc_count", 0)
+            total_fc += getattr(s, "fc_count", None) or 0
 
         if stats:
             total_row = self.star_table.rowCount()
@@ -1759,7 +1759,7 @@ class PlayerWindow(QMainWindow):
             if item2 is not None:
                 item2.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
-            bl_fc_item = QTableWidgetItem(str(getattr(s, "fc_count", 0)))
+            bl_fc_item = QTableWidgetItem(str(getattr(s, "fc_count", None) or 0))
             bl_fc_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             self.bl_star_table.setItem(row, 3, bl_fc_item)
 
@@ -1788,7 +1788,7 @@ class PlayerWindow(QMainWindow):
             bl_total_clears = sum(s.clear_count for s in bl_stats)
             bl_total_nf = sum(s.nf_count for s in bl_stats)
             bl_total_ss = sum(s.ss_count for s in bl_stats)
-            bl_total_fc = sum(getattr(s, "fc_count", 0) for s in bl_stats)
+            bl_total_fc = sum(getattr(s, "fc_count", None) or 0 for s in bl_stats)
 
         if bl_total_maps > 0:
             bl_total_row = self.bl_star_table.rowCount()
@@ -1937,7 +1937,7 @@ class PlayerWindow(QMainWindow):
                 continue
             if show_fc:
                 if s.clear_count > 0:
-                    fc_rate = getattr(s, "fc_count", 0) / s.clear_count * 100
+                    fc_rate = (getattr(s, "fc_count", None) or 0) / s.clear_count * 100
                     item.setText(f"{fc_rate:.1f}")
                 else:
                     item.setText("0.0" if s.map_count > 0 else "")
@@ -1950,7 +1950,7 @@ class PlayerWindow(QMainWindow):
             if item is not None:
                 if show_fc:
                     total_clears = sum(s.clear_count for s in stats)
-                    total_fc = sum(getattr(s, "fc_count", 0) for s in stats)
+                    total_fc = sum(getattr(s, "fc_count", None) or 0 for s in stats)
                     item.setText(f"{total_fc / total_clears * 100:.1f}" if total_clears > 0 else "0.0")
                 else:
                     total_maps = sum(s.map_count for s in stats)
@@ -1979,7 +1979,7 @@ class PlayerWindow(QMainWindow):
                 continue
             if show_fc:
                 if s.clear_count > 0:
-                    fc_rate = getattr(s, "fc_count", 0) / s.clear_count * 100
+                    fc_rate = (getattr(s, "fc_count", None) or 0) / s.clear_count * 100
                     item.setText(f"{fc_rate:.1f}")
                 else:
                     item.setText("0.0" if s.map_count > 0 else "")
@@ -1992,7 +1992,7 @@ class PlayerWindow(QMainWindow):
             if item is not None:
                 if show_fc:
                     total_clears = sum(s.clear_count for s in stats)
-                    total_fc = sum(getattr(s, "fc_count", 0) for s in stats)
+                    total_fc = sum(getattr(s, "fc_count", None) or 0 for s in stats)
                     item.setText(f"{total_fc / total_clears * 100:.1f}" if total_clears > 0 else "0.0")
                 else:
                     total_maps = sum(s.map_count for s in stats)
