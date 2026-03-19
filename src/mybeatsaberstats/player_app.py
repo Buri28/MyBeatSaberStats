@@ -9,8 +9,9 @@ import json
 from datetime import datetime, timezone
 
 from PySide6.QtCore import Qt, QDateTime, QTimer
-from PySide6.QtGui import QColor, QIcon, QPalette
+from PySide6.QtGui import QBrush, QColor, QIcon, QPalette
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QApplication,
     QCheckBox,
     QComboBox,
@@ -563,11 +564,11 @@ class PlayerWindow(QMainWindow):
             "★",
             "Maps",
             "Clears",
+            "FC",
             "Clear Rate (%) ",
             "Avg ACC (%) ",
             "NF",
             "SS",
-            "FC",
         ])
 
         # 3 列目: BeatLeader 版 ★統計テーブル
@@ -578,11 +579,11 @@ class PlayerWindow(QMainWindow):
             "★",
             "Maps",
             "Clears",
+            "FC",
             "Clear Rate (%) ",
             "Avg ACC (%) ",
             "NF",
             "SS",
-            "FC",
         ])
 
         # 列幅は内容に合わせて自動調整し、最後の列がレイアウト都合で
@@ -591,6 +592,7 @@ class PlayerWindow(QMainWindow):
             header = table.horizontalHeader()
             header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
             header.setStretchLastSection(False)
+            table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
 
         # サービスごとのアイコンをヘッダに設定
         resources_dir = RESOURCES_DIR
@@ -637,16 +639,16 @@ class PlayerWindow(QMainWindow):
         # パーセンテージ列に横棒グラフを表示するデリゲートを適用
         # Clear Rate 用: 0〜100% で赤→黄→緑グラデーション
         perc_clear = PercentageBarDelegate(self, max_value=100.0, gradient_min=0.0)
-        # Avg ACC 用: 50% 以下は常に赤、それ以上を 50〜100% の範囲でグラデーション
-        perc_acc = PercentageBarDelegate(self, max_value=100.0, gradient_min=50.0)
+        # Avg ACC 用: 70% 以下は常に赤、それ以上を 70〜100% の範囲でグラデーション
+        perc_acc = PercentageBarDelegate(self, max_value=100.0, gradient_min=70.0)
 
-        # ScoreSaber: Clear Rate (3列目) と Avg ACC (4列目)
-        self.star_table.setItemDelegateForColumn(3, perc_clear)
+        # ScoreSaber: Clear Rate (4列目) と Avg ACC (5列目)
+        self.star_table.setItemDelegateForColumn(4, perc_clear)
 
-        self.star_table.setItemDelegateForColumn(4, perc_acc)
+        self.star_table.setItemDelegateForColumn(5, perc_acc)
         # BeatLeader: Clear Rate / Avg ACC
-        self.bl_star_table.setItemDelegateForColumn(3, perc_clear)
-        self.bl_star_table.setItemDelegateForColumn(4, perc_acc)
+        self.bl_star_table.setItemDelegateForColumn(4, perc_clear)
+        self.bl_star_table.setItemDelegateForColumn(5, perc_acc)
 
         # BL Avg ACC 列の L/R トグル変数
         self._bl_acc_show_lr: bool = False
@@ -654,6 +656,19 @@ class PlayerWindow(QMainWindow):
         self.bl_star_table.cellClicked.connect(self._on_bl_acc_cell_clicked)
         self.bl_star_table.horizontalHeader().sectionClicked.connect(
             lambda col: self._on_bl_acc_cell_clicked(0, col)
+        )
+
+        # SS/BL Clear Rate → FC Rate トグル変数
+        self._ss_clear_show_fc: bool = False
+        self._current_ss_stats: list = []
+        self._bl_clear_show_fc: bool = False
+        self.star_table.cellClicked.connect(self._on_ss_clear_cell_clicked)
+        self.star_table.horizontalHeader().sectionClicked.connect(
+            lambda col: self._on_ss_clear_cell_clicked(0, col)
+        )
+        self.bl_star_table.cellClicked.connect(self._on_bl_clear_cell_clicked)
+        self.bl_star_table.horizontalHeader().sectionClicked.connect(
+            lambda col: self._on_bl_clear_cell_clicked(0, col)
         )
 
         # 1 列目は main_table(上) と acc_table(下) を縦に並べる
@@ -684,7 +699,7 @@ class PlayerWindow(QMainWindow):
         # セパレータの比率 1 列目をやや広め、2・3 列目を同程度にする
         main_splitter.setStretchFactor(0, 28)
         main_splitter.setStretchFactor(1, 38)
-        main_splitter.setStretchFactor(2, 38)
+        main_splitter.setStretchFactor(2, 39)
 
         layout.addWidget(main_splitter, 1)
 
@@ -1642,37 +1657,37 @@ class PlayerWindow(QMainWindow):
             star_item.setBackground(label_cell_color())
             star_item.setForeground(label_cell_text_color())
             # 右寄せ
-            star_item.setTextAlignment(Qt.AlignmentFlag.AlignRight)
+            star_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
             self.star_table.setItem(row, 0, star_item)
             self.star_table.setItem(row, 1, QTableWidgetItem(str(s.map_count)))
             # 右寄せ
             item1 = self.star_table.item(row, 1)
             if item1 is not None:
-                item1.setTextAlignment(Qt.AlignmentFlag.AlignRight)
+                item1.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             self.star_table.setItem(row, 2, QTableWidgetItem(str(s.clear_count)))
             item2 = self.star_table.item(row, 2)
             if item2 is not None:
-                item2.setTextAlignment(Qt.AlignmentFlag.AlignRight)
+                item2.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+
+            fc_item = QTableWidgetItem(str(getattr(s, "fc_count", 0)))
+            fc_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            self.star_table.setItem(row, 3, fc_item)
 
             percent_text = f"{s.clear_rate * 100:.1f}" if s.map_count > 0 else ""
-            self.star_table.setItem(row, 3, QTableWidgetItem(percent_text))
+            self.star_table.setItem(row, 4, QTableWidgetItem(percent_text))
 
             avg_acc_text = f"{s.average_acc:.2f}" if getattr(s, "average_acc", None) is not None else ("0.00" if s.map_count > 0 else "")
-            self.star_table.setItem(row, 4, QTableWidgetItem(avg_acc_text))
+            self.star_table.setItem(row, 5, QTableWidgetItem(avg_acc_text))
 
-            self.star_table.setItem(row, 5, QTableWidgetItem(str(s.nf_count)))
-            item5 = self.star_table.item(row, 5)
-            if item5 is not None:
-                item5.setTextAlignment(Qt.AlignmentFlag.AlignRight)
-            self.star_table.setItem(row, 6, QTableWidgetItem(str(s.ss_count)))
+            self.star_table.setItem(row, 6, QTableWidgetItem(str(s.nf_count)))
             item6 = self.star_table.item(row, 6)
             if item6 is not None:
-                item6.setTextAlignment(Qt.AlignmentFlag.AlignRight)
-            self.star_table.setItem(row, 7, QTableWidgetItem(str(getattr(s, "fc_count", 0))))
+                item6.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            self.star_table.setItem(row, 7, QTableWidgetItem(str(s.ss_count)))
             item7 = self.star_table.item(row, 7)
             if item7 is not None:
-                item7.setTextAlignment(Qt.AlignmentFlag.AlignRight)
+                item7.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
             total_maps += s.map_count
             total_clears += s.clear_count
@@ -1689,30 +1704,32 @@ class PlayerWindow(QMainWindow):
             self.star_table.setItem(total_row, 0, total_item)
             self.star_table.setItem(total_row, 1, QTableWidgetItem(str(total_maps)))
             self.star_table.setItem(total_row, 2, QTableWidgetItem(str(total_clears)))
+            fc_total_item = QTableWidgetItem(str(total_fc))
+            fc_total_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            self.star_table.setItem(total_row, 3, fc_total_item)
             if total_maps > 0:
                 total_clear_rate = total_clears / total_maps
                 percent_text = f"{total_clear_rate * 100:.1f}"
             else:
                 percent_text = ""
-            self.star_table.setItem(total_row, 3, QTableWidgetItem(percent_text))
+            self.star_table.setItem(total_row, 4, QTableWidgetItem(percent_text))
 
             # Total 行の平均精度は Snapshot 上段で取得している overall の平均精度を表示する
             if snap.scoresaber_average_ranked_acc is not None:
                 total_avg_text = f"{snap.scoresaber_average_ranked_acc:.2f}"
             else:
                 total_avg_text = ""
-            self.star_table.setItem(total_row, 4, QTableWidgetItem(total_avg_text))
+            self.star_table.setItem(total_row, 5, QTableWidgetItem(total_avg_text))
 
             nf_total_item = QTableWidgetItem(str(total_nf))
-            nf_total_item.setTextAlignment(Qt.AlignmentFlag.AlignRight)
-            self.star_table.setItem(total_row, 5, nf_total_item)
+            nf_total_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            self.star_table.setItem(total_row, 6, nf_total_item)
             ss_total_item = QTableWidgetItem(str(total_ss))
-            ss_total_item.setTextAlignment(Qt.AlignmentFlag.AlignRight)
-            self.star_table.setItem(total_row, 6, ss_total_item)
-            fc_total_item = QTableWidgetItem(str(total_fc))
-            fc_total_item.setTextAlignment(Qt.AlignmentFlag.AlignRight)
-            self.star_table.setItem(total_row, 7, fc_total_item)
+            ss_total_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            self.star_table.setItem(total_row, 7, ss_total_item)
 
+        self._current_ss_stats = list(stats)
+        self._refresh_ss_clear_rate()
         self.star_table.resizeColumnsToContents()
 
         # BeatLeader ★別統計と Total 行
@@ -1730,40 +1747,40 @@ class PlayerWindow(QMainWindow):
             star_item.setBackground(label_cell_color())
             star_item.setForeground(label_cell_text_color())
             # 右寄せ
-            star_item.setTextAlignment(Qt.AlignmentFlag.AlignRight)
+            star_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
             self.bl_star_table.setItem(row, 0, star_item)
             self.bl_star_table.setItem(row, 1, QTableWidgetItem(str(s.map_count)))
             item1 = self.bl_star_table.item(row, 1)
             if item1 is not None:
-                item1.setTextAlignment(Qt.AlignmentFlag.AlignRight)
+                item1.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             self.bl_star_table.setItem(row, 2, QTableWidgetItem(str(s.clear_count)))
             item2 = self.bl_star_table.item(row, 2)
             if item2 is not None:
-                item2.setTextAlignment(Qt.AlignmentFlag.AlignRight)
+                item2.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+
+            bl_fc_item = QTableWidgetItem(str(getattr(s, "fc_count", 0)))
+            bl_fc_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            self.bl_star_table.setItem(row, 3, bl_fc_item)
 
             percent_text = f"{s.clear_rate * 100:.1f}" if s.map_count > 0 else ""
-            self.bl_star_table.setItem(row, 3, QTableWidgetItem(percent_text))
+            self.bl_star_table.setItem(row, 4, QTableWidgetItem(percent_text))
 
             avg_acc_val = getattr(s, "average_acc", None)
             avg_acc_text = f"{avg_acc_val:.2f}" if avg_acc_val is not None else ("0.00" if s.map_count > 0 else "")
             acc_item = QTableWidgetItem(avg_acc_text)
             if avg_acc_val is not None:
                 acc_item.setData(Qt.ItemDataRole.UserRole, float(avg_acc_val))
-            self.bl_star_table.setItem(row, 4, acc_item)
+            self.bl_star_table.setItem(row, 5, acc_item)
 
-            self.bl_star_table.setItem(row, 5, QTableWidgetItem(str(s.nf_count)))
-            item5 = self.bl_star_table.item(row, 5)
-            if item5 is not None:
-                item5.setTextAlignment(Qt.AlignmentFlag.AlignRight)
-            self.bl_star_table.setItem(row, 6, QTableWidgetItem(str(s.ss_count)))
+            self.bl_star_table.setItem(row, 6, QTableWidgetItem(str(s.nf_count)))
             item6 = self.bl_star_table.item(row, 6)
             if item6 is not None:
-                item6.setTextAlignment(Qt.AlignmentFlag.AlignRight)
-            self.bl_star_table.setItem(row, 7, QTableWidgetItem(str(getattr(s, "fc_count", 0))))
+                item6.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            self.bl_star_table.setItem(row, 7, QTableWidgetItem(str(s.ss_count)))
             item7 = self.bl_star_table.item(row, 7)
             if item7 is not None:
-                item7.setTextAlignment(Qt.AlignmentFlag.AlignRight)
+                item7.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
         # Total 行は bl_stats 全体から集計
         if bl_stats:
@@ -1782,35 +1799,39 @@ class PlayerWindow(QMainWindow):
             self.bl_star_table.setItem(bl_total_row, 0, total_item)
             self.bl_star_table.setItem(bl_total_row, 1, QTableWidgetItem(str(bl_total_maps)))
             self.bl_star_table.setItem(bl_total_row, 2, QTableWidgetItem(str(bl_total_clears)))
+            bl_fc_total_item = QTableWidgetItem(str(bl_total_fc))
+            bl_fc_total_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            self.bl_star_table.setItem(bl_total_row, 3, bl_fc_total_item)
             bl_total_clear_rate = bl_total_clears / bl_total_maps
             percent_text = f"{bl_total_clear_rate * 100:.1f}"
-            self.bl_star_table.setItem(bl_total_row, 3, QTableWidgetItem(percent_text))
+            self.bl_star_table.setItem(bl_total_row, 4, QTableWidgetItem(percent_text))
 
             if snap.beatleader_average_ranked_acc is not None:
                 bl_total_avg_text = f"{snap.beatleader_average_ranked_acc:.2f}"
             else:
                 bl_total_avg_text = ""
-            self.bl_star_table.setItem(bl_total_row, 4, QTableWidgetItem(bl_total_avg_text))
+            bl_total_acc_item = QTableWidgetItem(bl_total_avg_text)
+            if snap.beatleader_average_ranked_acc is not None:
+                bl_total_acc_item.setData(Qt.ItemDataRole.UserRole, float(snap.beatleader_average_ranked_acc))
+            self.bl_star_table.setItem(bl_total_row, 5, bl_total_acc_item)
 
             bl_nf_total_item = QTableWidgetItem(str(bl_total_nf))
-            bl_nf_total_item.setTextAlignment(Qt.AlignmentFlag.AlignRight)
-            self.bl_star_table.setItem(bl_total_row, 5, bl_nf_total_item)
+            bl_nf_total_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            self.bl_star_table.setItem(bl_total_row, 6, bl_nf_total_item)
             bl_ss_total_item = QTableWidgetItem(str(bl_total_ss))
-            bl_ss_total_item.setTextAlignment(Qt.AlignmentFlag.AlignRight)
-            self.bl_star_table.setItem(bl_total_row, 6, bl_ss_total_item)
-            bl_fc_total_item = QTableWidgetItem(str(bl_total_fc))
-            bl_fc_total_item.setTextAlignment(Qt.AlignmentFlag.AlignRight)
-            self.bl_star_table.setItem(bl_total_row, 7, bl_fc_total_item)
+            bl_ss_total_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            self.bl_star_table.setItem(bl_total_row, 7, bl_ss_total_item)
 
         self.bl_star_table.resizeColumnsToContents()
 
         # L/R トグル状態を保存してヘッダを更新する
         self._current_bl_stats = list(bl_stats)
         self._refresh_bl_avg_acc()
+        self._refresh_bl_clear_rate()
 
     def _on_bl_acc_cell_clicked(self, row: int, col: int) -> None:
         """BL ★テーブルの Avg ACC 列クリックで L/R 表示をトグルする。"""
-        if col != 4:
+        if col != 5:
             return
         self._bl_acc_show_lr = not self._bl_acc_show_lr
         self._refresh_bl_avg_acc()
@@ -1821,10 +1842,10 @@ class PlayerWindow(QMainWindow):
         stats = self._current_bl_stats
 
         # ヘッダを更新
-        header_item = self.bl_star_table.horizontalHeaderItem(4)
+        header_item = self.bl_star_table.horizontalHeaderItem(5)
         if header_item is None:
             header_item = QTableWidgetItem()
-            self.bl_star_table.setHorizontalHeaderItem(4, header_item)
+            self.bl_star_table.setHorizontalHeaderItem(5, header_item)
         if show_lr:
             header_item.setText("Avg LR ACC(%)")
             header_item.setToolTip("クリックして通常表示に戻す")
@@ -1832,8 +1853,10 @@ class PlayerWindow(QMainWindow):
             header_item.setText("Avg ACC(%)🔄")
             header_item.setToolTip("クリックして左右精度(L/R)表示に切り替え")
 
+        _lr_color = QColor("#3388FF") if is_dark() else QColor("#111199")
+
         for row, s in enumerate(stats):
-            item = self.bl_star_table.item(row, 4)
+            item = self.bl_star_table.item(row, 5)
             if item is None:
                 continue
             avg_acc_val = getattr(s, "average_acc", None)
@@ -1844,13 +1867,137 @@ class PlayerWindow(QMainWindow):
                     al_str = f"{al:.1f}" if al is not None else "?"
                     ar_str = f"{ar:.1f}" if ar is not None else "?"
                     item.setText(f"{al_str} / {ar_str}")
+                    item.setForeground(QBrush())
                 else:
                     item.setText("L / R")
-                # L/Rデータなし: テキストはそのまま
+                    item.setForeground(_lr_color)
             else:
-                # 通常表示に戻す
+                # 通常表示に戻す: foreground ロールをクリアしてデリゲートに色付けを委ねる
+                item.setForeground(QBrush())
                 avg_text = f"{avg_acc_val:.2f}" if avg_acc_val is not None else ("0.00" if s.map_count > 0 else "")
                 item.setText(avg_text)
+
+        # Total 行
+        total_item = self.bl_star_table.item(len(stats), 5)
+        if total_item is not None:
+            if show_lr:
+                left_pairs = [
+                    (getattr(s, "avg_acc_left", None), s.clear_count)
+                    for s in stats
+                    if getattr(s, "avg_acc_left", None) is not None and s.clear_count > 0
+                ]
+                right_pairs = [
+                    (getattr(s, "avg_acc_right", None), s.clear_count)
+                    for s in stats
+                    if getattr(s, "avg_acc_right", None) is not None and s.clear_count > 0
+                ]
+                al_str = f"{sum(v * c for v, c in left_pairs) / sum(c for _, c in left_pairs):.1f}" if left_pairs else "?"
+                ar_str = f"{sum(v * c for v, c in right_pairs) / sum(c for _, c in right_pairs):.1f}" if right_pairs else "?"
+                total_item.setText(f"{al_str} / {ar_str}")
+                total_item.setForeground(QBrush())
+            else:
+                total_item.setForeground(QBrush())
+                avg_val = total_item.data(Qt.ItemDataRole.UserRole)
+                if isinstance(avg_val, float):
+                    total_item.setText(f"{avg_val:.2f}")
+
+    def _on_ss_clear_cell_clicked(self, row: int, col: int) -> None:
+        """SS ★テーブルの Clear Rate 列クリックで FC Rate 表示をトグルする。"""
+        if col != 4:
+            return
+        self._ss_clear_show_fc = not self._ss_clear_show_fc
+        self._refresh_ss_clear_rate()
+
+    def _on_bl_clear_cell_clicked(self, row: int, col: int) -> None:
+        """BL ★テーブルの Clear Rate 列クリックで FC Rate 表示をトグルする。"""
+        if col != 4:
+            return
+        self._bl_clear_show_fc = not self._bl_clear_show_fc
+        self._refresh_bl_clear_rate()
+
+    def _refresh_ss_clear_rate(self) -> None:
+        """現在の _ss_clear_show_fc に合わせて SS Clear Rate 列の表示を更新する。"""
+        show_fc = self._ss_clear_show_fc
+        stats = self._current_ss_stats
+
+        header_item = self.star_table.horizontalHeaderItem(4)
+        if header_item is None:
+            header_item = QTableWidgetItem()
+            self.star_table.setHorizontalHeaderItem(4, header_item)
+        if show_fc:
+            header_item.setText("FC Rate(%)   🔄")
+            header_item.setToolTip("クリックしてClear Rate表示に戻す")
+        else:
+            header_item.setText("Clear Rate(%)🔄")
+            header_item.setToolTip("クリックしてFC Rate表示に切り替え")
+
+        for row, s in enumerate(stats):
+            item = self.star_table.item(row, 4)
+            if item is None:
+                continue
+            if show_fc:
+                if s.clear_count > 0:
+                    fc_rate = getattr(s, "fc_count", 0) / s.clear_count * 100
+                    item.setText(f"{fc_rate:.1f}")
+                else:
+                    item.setText("0.0" if s.map_count > 0 else "")
+            else:
+                item.setText(f"{s.clear_rate * 100:.1f}" if s.map_count > 0 else "")
+
+        if stats:
+            total_row = len(stats)
+            item = self.star_table.item(total_row, 4)
+            if item is not None:
+                if show_fc:
+                    total_clears = sum(s.clear_count for s in stats)
+                    total_fc = sum(getattr(s, "fc_count", 0) for s in stats)
+                    item.setText(f"{total_fc / total_clears * 100:.1f}" if total_clears > 0 else "0.0")
+                else:
+                    total_maps = sum(s.map_count for s in stats)
+                    total_clears = sum(s.clear_count for s in stats)
+                    item.setText(f"{total_clears / total_maps * 100:.1f}" if total_maps > 0 else "")
+
+    def _refresh_bl_clear_rate(self) -> None:
+        """現在の _bl_clear_show_fc に合わせて BL Clear Rate 列の表示を更新する。"""
+        show_fc = self._bl_clear_show_fc
+        stats = self._current_bl_stats
+
+        header_item = self.bl_star_table.horizontalHeaderItem(4)
+        if header_item is None:
+            header_item = QTableWidgetItem()
+            self.bl_star_table.setHorizontalHeaderItem(4, header_item)
+        if show_fc:
+            header_item.setText("FC Rate(%)   🔄")
+            header_item.setToolTip("クリックしてClear Rate表示に戻す")
+        else:
+            header_item.setText("Clear Rate(%)🔄")
+            header_item.setToolTip("クリックしてFC Rate表示に切り替え")
+
+        for row, s in enumerate(stats):
+            item = self.bl_star_table.item(row, 4)
+            if item is None:
+                continue
+            if show_fc:
+                if s.clear_count > 0:
+                    fc_rate = getattr(s, "fc_count", 0) / s.clear_count * 100
+                    item.setText(f"{fc_rate:.1f}")
+                else:
+                    item.setText("0.0" if s.map_count > 0 else "")
+            else:
+                item.setText(f"{s.clear_rate * 100:.1f}" if s.map_count > 0 else "")
+
+        if stats:
+            total_row = len(stats)
+            item = self.bl_star_table.item(total_row, 4)
+            if item is not None:
+                if show_fc:
+                    total_clears = sum(s.clear_count for s in stats)
+                    total_fc = sum(getattr(s, "fc_count", 0) for s in stats)
+                    item.setText(f"{total_fc / total_clears * 100:.1f}" if total_clears > 0 else "0.0")
+                else:
+                    total_maps = sum(s.map_count for s in stats)
+                    total_clears = sum(s.clear_count for s in stats)
+                    item.setText(f"{total_clears / total_maps * 100:.1f}" if total_maps > 0 else "")
 
     def open_compare(self) -> None:
         """スナップショット比較ダイアログを開く。"""

@@ -7,6 +7,7 @@ import json
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QDialog,
     QVBoxLayout,
     QTableWidget,
@@ -109,6 +110,7 @@ class RankingDialog(QDialog):
         layout = QVBoxLayout(self)
 
         self.table = QTableWidget(0, 11, self)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setHorizontalHeaderLabels([
             "Player",           # 0
             "Country",          # 1
