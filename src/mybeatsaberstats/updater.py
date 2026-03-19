@@ -199,21 +199,30 @@ def apply_update(
     )
 
     for i, repo_path in enumerate(files):
-        filename = Path(repo_path).name
+        # src/mybeatsaberstats/ を除いたサブパスを維持する
+        # 例: src/mybeatsaberstats/collector/beatleader.py → collector/beatleader.py
+        rel_path = Path(repo_path).relative_to(_SOURCE_PREFIX)
         if progress:
-            progress(f"ダウンロード中: {filename}", i + 1, total)
+            progress(f"ダウンロード中: {rel_path}", i + 1, total)
 
         raw_url = f"{raw_base}/{repo_path}"
         resp = requests.get(raw_url, timeout=30)
         resp.raise_for_status()
 
-        dest = lib / filename
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(resp.content)
+        content = resp.content
+        # UTF-8 BOM を除去
+        if content.startswith(b"\xef\xbb\xbf"):
+            content = content[3:]
+        # 改行コードを CRLF に統一 (まず LF に正規化してから CRLF へ変換)
+        content = content.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+        content = content.replace(b"\n", b"\r\n")
 
-    # 古い .pyc を削除して新しい .py が確実に読まれるようにする
-    cache_dir = lib / "__pycache__"
-    if cache_dir.exists():
+        dest = lib / rel_path
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(content)
+
+    # 古い .pyc をすべて削除して新しい .py が確実に読まれるようにする
+    for cache_dir in lib.rglob("__pycache__"):
         shutil.rmtree(cache_dir, ignore_errors=True)
 
     save_current_version(info.latest_version)
