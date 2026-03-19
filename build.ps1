@@ -13,6 +13,7 @@
       "stats"   → MyBeatSaberStats.exe のみ (デフォルト)
       "ranking" → MyBeatSaberRanking.exe のみ
       "all"     → 両方ビルド
+      "patcher" → パッチ適用プログラム + パッチフォルダを生成
 
 .PARAMETER Version
     リリースバージョン (例: 1.0.1)。指定すると version.json を更新する。
@@ -28,7 +29,7 @@
 #>
 
 param(
-    [ValidateSet("stats", "ranking", "all")]
+    [ValidateSet("stats", "ranking", "all", "patcher")]
     [string]$Target = "stats",
 
     [string]$Version = "",
@@ -135,6 +136,20 @@ if ($Target -eq "stats" -or $Target -eq "all") {
 if ($Target -eq "ranking" -or $Target -eq "all") {
     Build-Spec "MyBeatSaberRanking.spec" "MyBeatSaberRanking"
 }
+if ($Target -eq "patcher") {
+    Write-Host ""
+    Write-Host "[BUILD] MyBeatSaberPatcher.spec (--onefile) ..." -ForegroundColor Cyan
+    & $Python -m PyInstaller MyBeatSaberPatcher.spec --noconfirm
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "PyInstaller が失敗しました (exit code $LASTEXITCODE)"
+        exit $LASTEXITCODE
+    }
+    # --onefile なので dist\ に直接 apply_patch.exe が生成される
+    $patcherReleaseDir = Join-Path $ReleaseDir "MyBeatSaberPatcher"
+    New-Item $patcherReleaseDir -ItemType Directory -Force | Out-Null
+    Copy-Item "$ScriptDir\dist\apply_patch.exe" "$patcherReleaseDir\apply_patch.exe" -Force
+    Write-Host "  → $patcherReleaseDir\apply_patch.exe" -ForegroundColor Green
+}
 
 # ─────────────────────────────────────────────
 # 共通ファイルのコピー (version.json)
@@ -185,6 +200,31 @@ if ($Target -eq "ranking" -or $Target -eq "all") {
     Copy-CommonFiles "MyBeatSaberRanking"
 }
 
+# patcher ターゲット: apply_patch.exe + patch/ フォルダを生成
+if ($Target -eq "patcher") {
+    Write-Host "  パッチフォルダを生成中..." -ForegroundColor Yellow
+
+    $patcherReleaseDir = Join-Path $ReleaseDir "MyBeatSaberPatcher"
+    $patchContentDir   = Join-Path $patcherReleaseDir "patch"
+    $patchLibDir       = Join-Path $patchContentDir "lib\mybeatsaberstats"
+
+    # apply_patch.exe（--onefile なので dist に直接生成される）を release へコピー
+    $patcherExe = Join-Path $ScriptDir "dist\apply_patch.exe"
+    if (Test-Path $patcherExe) {
+        Copy-Item $patcherExe $patcherReleaseDir -Force
+        Write-Host "  apply_patch.exe → $patcherReleaseDir"
+    }
+
+    # patch/lib/mybeatsaberstats/ に src/mybeatsaberstats/ をコピー
+    New-Item $patchLibDir -ItemType Directory -Force | Out-Null
+    Copy-Item "$ScriptDir\src\mybeatsaberstats\*" $patchLibDir -Recurse -Force
+    Write-Host "  src/mybeatsaberstats/ → $patchLibDir"
+
+    # patch/version.json をコピー
+    Copy-Item "$ScriptDir\version.json" "$patchContentDir\version.json" -Force
+    Write-Host "  version.json → $patchContentDir"
+}
+
 # ─────────────────────────────────────────────
 # 完了メッセージ
 # ─────────────────────────────────────────────
@@ -203,6 +243,16 @@ if ($Target -eq "ranking" -or $Target -eq "all") {
     $size = (Get-ChildItem $path -Recurse -File | Measure-Object -Property Length -Sum).Sum
     Write-Host ("  MyBeatSaberRanking: {0:N0} MB" -f ($size / 1MB)) -ForegroundColor Cyan
     Write-Host "    フォルダ: $path"
+}
+if ($Target -eq "patcher") {
+    $path = Join-Path $ReleaseDir "MyBeatSaberPatcher"
+    $size = (Get-ChildItem $path -Recurse -File | Measure-Object -Property Length -Sum).Sum
+    Write-Host ("  MyBeatSaberPatcher: {0:N0} MB" -f ($size / 1MB)) -ForegroundColor Cyan
+    Write-Host "    フォルダ: $path"
+    Write-Host ""
+    Write-Host "配布手順 (patcher):" -ForegroundColor Cyan
+    Write-Host "  release\MyBeatSaberPatcher\ の内容を ZIP して配布"
+    Write-Host "  ユーザーは ZIP を MyBeatSaberStats フォルダに展開し apply_patch.exe を実行"
 }
 
 Write-Host ""
