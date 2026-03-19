@@ -1298,8 +1298,10 @@ class SnapshotCompareDialog(QDialog):
 
             for s in stats:
                 if getattr(s, "star", None) == star:
+                    fc = getattr(s, "fc_count", None)
+                    if fc is None:
+                        return None  # 未集計
                     maps = s.map_count
-                    fc = getattr(s, "fc_count", 0)
                     if maps <= 0:
                         text = f"{fc} (0.0%)"
                     else:
@@ -1313,8 +1315,10 @@ class SnapshotCompareDialog(QDialog):
 
             if not stats:
                 return None
+            if all(getattr(s, "fc_count", None) is None for s in stats):
+                return None  # 未集計
             total_maps = sum(s.map_count for s in stats)
-            total_fc = sum(getattr(s, "fc_count", 0) for s in stats)
+            total_fc = sum(getattr(s, "fc_count", None) or 0 for s in stats)
             if total_maps <= 0:
                 text = f"{total_fc} (0.0%)"
             else:
@@ -1390,6 +1394,8 @@ class SnapshotCompareDialog(QDialog):
                     color = diff_neutral_bg()
                 diff_clear_item.setBackground(color)
                 diff_clear_item.setForeground(diff_text_color())
+            elif a_clear_val is not None or b_clear_val is not None:
+                diff_clear_item.setText("-")
 
             table.setItem(row, 3, diff_clear_item)
 
@@ -1402,7 +1408,7 @@ class SnapshotCompareDialog(QDialog):
             table.setItem(row, 5, QTableWidgetItem(b_avg_text + "%"))
 
             # ΔAcc (L/R 差分を付加する場合は括弧内に表示)
-            diff_acc_item = QTableWidgetItem("+0.00%")
+            diff_acc_item = QTableWidgetItem("")
             diff_acc_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
             if isinstance(a_avg_val, (int, float)) and isinstance(b_avg_val, (int, float)):
                 diff = b_avg_val - a_avg_val
@@ -1413,14 +1419,14 @@ class SnapshotCompareDialog(QDialog):
                 b_left_val, _ = _normalize_pair(avg_left_b)
                 a_right_val, _ = _normalize_pair(avg_right_a)
                 b_right_val, _ = _normalize_pair(avg_right_b)
-                if isinstance(a_left_val, (int, float)) or isinstance(b_left_val, (int, float)):
-                    al = a_left_val if isinstance(a_left_val, (int, float)) else 0.0
-                    bl_v = b_left_val if isinstance(b_left_val, (int, float)) else 0.0
+                if isinstance(a_left_val, (int, float)) and isinstance(b_left_val, (int, float)):
+                    al = a_left_val
+                    bl_v = b_left_val
                     ar = a_right_val if isinstance(a_right_val, (int, float)) else 0.0
                     br = b_right_val if isinstance(b_right_val, (int, float)) else 0.0
                     ld = bl_v - al
                     rd = br - ar
-                    # L/R のどちらかが数値として渡されていれば、括弧内に両方の差分を表示する
+                    # 両方に L/R データがある場合のみ括弧内に差分を表示する
                     diff_text += f"({ld:+.2f}/{rd:+.2f})"
 
                 diff_acc_item.setText(diff_text)
@@ -1433,13 +1439,15 @@ class SnapshotCompareDialog(QDialog):
                     color = diff_neutral_bg()
                 diff_acc_item.setBackground(color)
                 diff_acc_item.setForeground(diff_text_color())
+            elif a_avg_val is not None or b_avg_val is not None:
+                diff_acc_item.setText("-")
 
             table.setItem(row, 6, diff_acc_item)
 
             # FC 列 (列 7/8、ΔFC は列数が 10 以上の場合のみ列 9)
             if fc_a is not None or fc_b is not None:
-                a_fc_val, a_fc_text = _normalize_pair(fc_a) if fc_a is not None else (0, "")
-                b_fc_val, b_fc_text = _normalize_pair(fc_b) if fc_b is not None else (0, "")
+                a_fc_val, a_fc_text = _normalize_pair(fc_a) if fc_a is not None else (None, "")
+                b_fc_val, b_fc_text = _normalize_pair(fc_b) if fc_b is not None else (None, "")
                 table.setItem(row, 7, QTableWidgetItem(a_fc_text))
                 table.setItem(row, 8, QTableWidgetItem(b_fc_text))
 
@@ -1456,6 +1464,8 @@ class SnapshotCompareDialog(QDialog):
                         else:
                             diff_fc_item.setBackground(diff_neutral_bg())
                         diff_fc_item.setForeground(diff_text_color())
+                    elif a_fc_val is not None or b_fc_val is not None:
+                        diff_fc_item.setText("-")
                     table.setItem(row, 9, diff_fc_item)
 
         # ScoreSaber 側テーブル

@@ -78,7 +78,7 @@ class StarClearStat:
     ss_count: int = 0
     clear_rate: float = 0.0  # 0.0 - 1.0
     average_acc: float | None = None  # 0.0 - 100.0, None は未集計
-    fc_count: int = 0  # フルコンボ数（BeatLeader 専用。ScoreSaber は常に 0）
+    fc_count: int | None = None  # フルコンボ数（None は未集計、0 は集計済みで 0 件）
     avg_acc_left: float | None = None  # BL 専用: 左手平均精度 (0.0-100.0)
     avg_acc_right: float | None = None  # BL 専用: 右手平均精度 (0.0-100.0)
 
@@ -209,9 +209,6 @@ class Snapshot:
                     if "ss_count" not in s:
                         s = dict(s)
                         s["ss_count"] = 0
-                    if "fc_count" not in s:
-                        s = dict(s)
-                        s["fc_count"] = 0
                     converted.append(StarClearStat(**s))
                     continue
                 except TypeError:
@@ -246,9 +243,6 @@ class Snapshot:
                 if "ss_count" not in s:
                     s = dict(s)
                     s["ss_count"] = 0
-                if "fc_count" not in s:
-                    s = dict(s)
-                    s["fc_count"] = 0
                 bl_converted.append(StarClearStat(**s))
             except TypeError:
                 continue
