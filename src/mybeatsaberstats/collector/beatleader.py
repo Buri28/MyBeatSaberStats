@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from collections import defaultdict
 from datetime import datetime
@@ -737,6 +737,8 @@ def collect_beatleader_star_stats(beatleader_id: str, session: Optional[requests
     star_acc_right_sum: dict[int, float] = defaultdict(float)
     star_acc_right_count: dict[int, int] = defaultdict(int)
     star_fc_count_dict: dict[int, int] = defaultdict(int)
+    # ★別 PP 合計
+    star_pp_sum: dict[int, float] = defaultdict(float)
 
     per_leaderboard: dict[str, dict] = {}
 
@@ -762,7 +764,7 @@ def collect_beatleader_star_stats(beatleader_id: str, session: Optional[requests
 
         state = per_leaderboard.get(lb_id)
         if state is None:
-            state = {"star": star_bucket, "clear": False, "nf": False, "ss": False, "best_acc": None, "best_acc_left": None, "best_acc_right": None, "has_fc": False}
+            state = {"star": star_bucket, "clear": False, "nf": False, "ss": False, "best_acc": None, "best_acc_left": None, "best_acc_right": None, "has_fc": False, "best_pp": None}
             per_leaderboard[lb_id] = state
 
         score_info = item.get("score") if isinstance(item, dict) else None
@@ -797,6 +799,17 @@ def collect_beatleader_star_stats(beatleader_id: str, session: Optional[requests
                         ar = score_info.get("accRight")
                         state["best_acc_left"] = float(al) if al is not None else None
                         state["best_acc_right"] = float(ar) if ar is not None else None
+
+            # クリア済みスコアの pp 値を記録（最大値を保持）
+            if isinstance(score_info, dict):
+                try:
+                    pp_val = float(score_info.get("pp") or 0)
+                    if math.isfinite(pp_val) and pp_val > 0:
+                        prev_pp = state.get("best_pp")
+                        if prev_pp is None or pp_val > prev_pp:
+                            state["best_pp"] = pp_val
+                except (TypeError, ValueError):
+                    pass
 
     for state in per_leaderboard.values():
         star_bucket = int(state["star"])
@@ -841,6 +854,28 @@ def collect_beatleader_star_stats(beatleader_id: str, session: Optional[requests
         elif has_ss:
             star_ss_count[star_bucket] += 1
 
+    # PP を全スコア降順でソートし、重み 0.965^(rank-1) を掛けて★別に集計
+    cleared_pp_entries_bl: list[tuple[int, float]] = []
+    for state in per_leaderboard.values():
+        if not bool(state["clear"]):
+            continue
+        pp_val = state.get("best_pp")
+        if isinstance(pp_val, (int, float)) and math.isfinite(float(pp_val)) and float(pp_val) > 0:
+            cleared_pp_entries_bl.append((int(state["star"]), float(pp_val)))
+    cleared_pp_entries_bl.sort(key=lambda x: x[1], reverse=True)
+    for rank, (star_bucket, pp_val) in enumerate(cleared_pp_entries_bl, start=1):
+        weight = 0.965 ** (rank - 1)
+        star_pp_sum[star_bucket] += pp_val * weight
+
+    # ★帯内ローカルランクで Solo PP を計算
+    star_pp_solo_sum: dict[int, float] = defaultdict(float)
+    star_pp_list_bl: dict[int, list[float]] = defaultdict(list)
+    for star_bucket, pp_val in cleared_pp_entries_bl:
+        star_pp_list_bl[star_bucket].append(pp_val)
+    for star_bucket, pp_vals in star_pp_list_bl.items():
+        for local_rank, pp_v in enumerate(sorted(pp_vals, reverse=True), start=1):
+            star_pp_solo_sum[star_bucket] += pp_v * (0.965 ** (local_rank - 1))
+
     stats: list[StarClearStat] = []
     for star, map_count in sorted(star_map_count.items(), key=lambda x: x[0]):
         cleared = star_clear_count.get(star, 0)
@@ -868,6 +903,11 @@ def collect_beatleader_star_stats(beatleader_id: str, session: Optional[requests
         # ScoreSaber 側と同様にクリア率 (0.0-1.0) を計算
         clear_rate = (cleared / map_count) if map_count > 0 else 0.0
 
+        pp_total = star_pp_sum.get(star)
+        pp_contribution = float(pp_total) if pp_total is not None and pp_total > 0 else (0.0 if cleared > 0 else None)
+        pp_solo_val = star_pp_solo_sum.get(star)
+        pp_solo = float(pp_solo_val) if pp_solo_val is not None and pp_solo_val > 0 else (0.0 if cleared > 0 else None)
+
         stats.append(StarClearStat(
             star=star,
             map_count=map_count,
@@ -879,6 +919,8 @@ def collect_beatleader_star_stats(beatleader_id: str, session: Optional[requests
             fc_count=fc_count,
             avg_acc_left=avg_acc_left,
             avg_acc_right=avg_acc_right,
+            pp_contribution=pp_contribution,
+            pp_solo=pp_solo,
         ))
 
     return stats

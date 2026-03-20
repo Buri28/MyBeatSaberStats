@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from collections import defaultdict
 from datetime import datetime
@@ -1003,6 +1003,8 @@ def _collect_star_stats_from_scoresaber(scoresaber_id: str, session: requests.Se
     # ★別の平均精度算出用
     star_acc_sum: dict[int, float] = defaultdict(float)
     star_acc_count: dict[int, int] = defaultdict(int)
+    # ★別 PP 合計
+    star_pp_sum: dict[int, float] = defaultdict(float)
 
     # leaderboardId ごとに「クリア有り / NF有り / SS有り」とベスト精度を記録する
     class _PerLeaderboardState(TypedDict):
@@ -1012,6 +1014,7 @@ def _collect_star_stats_from_scoresaber(scoresaber_id: str, session: requests.Se
         ss: bool
         best_acc: Optional[float]
         has_fc: bool
+        best_pp: Optional[float]
 
     per_leaderboard: dict[str, _PerLeaderboardState] = {}
 
@@ -1045,7 +1048,7 @@ def _collect_star_stats_from_scoresaber(scoresaber_id: str, session: requests.Se
 
         state = per_leaderboard.get(lb_id)
         if state is None:
-            state = _PerLeaderboardState(star=star_bucket, clear=False, nf=False, ss=False, best_acc=None, has_fc=False)
+            state = _PerLeaderboardState(star=star_bucket, clear=False, nf=False, ss=False, best_acc=None, has_fc=False, best_pp=None)
             per_leaderboard[lb_id] = state
 
         modifiers = ""
@@ -1091,6 +1094,17 @@ def _collect_star_stats_from_scoresaber(scoresaber_id: str, session: requests.Se
                 if best is None or acc > best:
                     state["best_acc"] = acc
 
+            # クリア済みスコアの pp 値を記録（最大値を保持）
+            if isinstance(score_info, dict):
+                try:
+                    pp_val = float(score_info.get("pp") or 0)
+                    if math.isfinite(pp_val) and pp_val > 0:
+                        prev_pp = state.get("best_pp")
+                        if prev_pp is None or pp_val > prev_pp:
+                            state["best_pp"] = pp_val
+                except (TypeError, ValueError):
+                    pass
+
     # leaderboard ごとの状態から★別のクリア数 / NF数を算出
     print(f"集計対象 leaderboard 数: {len(per_leaderboard)}")
     for state in per_leaderboard.values():
@@ -1118,6 +1132,28 @@ def _collect_star_stats_from_scoresaber(scoresaber_id: str, session: requests.Se
             # print(f"SS leaderboard (星 {star_bucket})")
             star_ss_count[star_bucket] += 1
 
+    # PP を全スコア降順でソートし、重み 0.965^(rank-1) を掛けて★別に集計
+    cleared_pp_entries: list[tuple[int, float]] = []
+    for state in per_leaderboard.values():
+        if not bool(state["clear"]):
+            continue
+        pp_val = state.get("best_pp")
+        if isinstance(pp_val, (int, float)) and math.isfinite(float(pp_val)) and float(pp_val) > 0:
+            cleared_pp_entries.append((int(state["star"]), float(pp_val)))
+    cleared_pp_entries.sort(key=lambda x: x[1], reverse=True)
+    for rank, (star_bucket, pp_val) in enumerate(cleared_pp_entries, start=1):
+        weight = 0.965 ** (rank - 1)
+        star_pp_sum[star_bucket] += pp_val * weight
+
+    # ★帯内ローカルランクで Solo PP を計算
+    star_pp_solo_sum: dict[int, float] = defaultdict(float)
+    star_pp_list: dict[int, list[float]] = defaultdict(list)
+    for star_bucket, pp_val in cleared_pp_entries:
+        star_pp_list[star_bucket].append(pp_val)
+    for star_bucket, pp_vals in star_pp_list.items():
+        for local_rank, pp_v in enumerate(sorted(pp_vals, reverse=True), start=1):
+            star_pp_solo_sum[star_bucket] += pp_v * (0.965 ** (local_rank - 1))
+
     # 3) StarClearStat へ変換
     stats: list[StarClearStat] = []
 
@@ -1135,6 +1171,11 @@ def _collect_star_stats_from_scoresaber(scoresaber_id: str, session: requests.Se
         else:
             avg_acc = None
 
+        pp_total = star_pp_sum.get(star)
+        pp_contribution = float(pp_total) if pp_total is not None and pp_total > 0 else (0.0 if clear_count > 0 else None)
+        pp_solo_val = star_pp_solo_sum.get(star)
+        pp_solo = float(pp_solo_val) if pp_solo_val is not None and pp_solo_val > 0 else (0.0 if clear_count > 0 else None)
+
         stats.append(
             StarClearStat(
                 star=star,
@@ -1145,6 +1186,8 @@ def _collect_star_stats_from_scoresaber(scoresaber_id: str, session: requests.Se
                 clear_rate=clear_rate,
                 average_acc=avg_acc,
                 fc_count=star_fc_count.get(star, 0),
+                pp_contribution=pp_contribution,
+                pp_solo=pp_solo,
             )
         )
 
