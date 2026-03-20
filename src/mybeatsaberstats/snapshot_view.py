@@ -257,7 +257,7 @@ class SnapshotCompareDialog(QDialog):
         header.resizeSection(3, 50)
 
         # 中央: ScoreSaber ★別（クリア数 + AvgAcc 比較）
-        self.ss_star_table = QTableWidget(0, 10, self._splitter)
+        self.ss_star_table = QTableWidget(0, 16, self._splitter)
         self.ss_star_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.ss_star_table.setStyleSheet(table_stylesheet())
         self.ss_star_table.verticalHeader().setDefaultSectionSize(14)  # 行の高さを少し詰める
@@ -272,6 +272,12 @@ class SnapshotCompareDialog(QDialog):
             "A FC",
             "B FC",
             "ΔFC",
+            "A PP",
+            "B PP",
+            "ΔPP",
+            "A ★PP",
+            "B ★PP",
+            "Δ★PP",
         ])
         ss_star_header = self.ss_star_table.horizontalHeader()
         ss_star_header.setStretchLastSection(False)
@@ -286,21 +292,33 @@ class SnapshotCompareDialog(QDialog):
         ss_star_header.setSectionResizeMode(7, QHeaderView.ResizeMode.Interactive)
         ss_star_header.setSectionResizeMode(8, QHeaderView.ResizeMode.Interactive)
         ss_star_header.setSectionResizeMode(9, QHeaderView.ResizeMode.ResizeToContents)
+        ss_star_header.setSectionResizeMode(10, QHeaderView.ResizeMode.Interactive)
+        ss_star_header.setSectionResizeMode(11, QHeaderView.ResizeMode.Interactive)
+        ss_star_header.setSectionResizeMode(12, QHeaderView.ResizeMode.ResizeToContents)
+        ss_star_header.setSectionResizeMode(13, QHeaderView.ResizeMode.Interactive)
+        ss_star_header.setSectionResizeMode(14, QHeaderView.ResizeMode.Interactive)
+        ss_star_header.setSectionResizeMode(15, QHeaderView.ResizeMode.ResizeToContents)
         ss_star_header.resizeSection(0, 35)
-        ss_star_header.resizeSection(1, 80)
-        ss_star_header.resizeSection(2, 80)
+        ss_star_header.resizeSection(1, 85)
+        ss_star_header.resizeSection(2, 85)
         ss_star_header.resizeSection(3, 70)
-        ss_star_header.resizeSection(4, 80)
-        ss_star_header.resizeSection(5, 80)
+        ss_star_header.resizeSection(4, 85)
+        ss_star_header.resizeSection(5, 85)
         ss_star_header.resizeSection(6, 70)
-        ss_star_header.resizeSection(7, 80)
-        ss_star_header.resizeSection(8, 80)
+        ss_star_header.resizeSection(7, 85)
+        ss_star_header.resizeSection(8, 85)
         ss_star_header.resizeSection(9, 60)
+        ss_star_header.resizeSection(10, 65)
+        ss_star_header.resizeSection(11, 65)
+        ss_star_header.resizeSection(12, 65)
+        ss_star_header.resizeSection(13, 65)
+        ss_star_header.resizeSection(14, 65)
+        ss_star_header.resizeSection(15, 65)
         # 下段★テーブルは行番号(No)が紛らわしいので非表示にする
         self.ss_star_table.verticalHeader().setVisible(False)
 
         # 右: BeatLeader ★別（クリア数 + AvgAcc 比較）
-        self.bl_star_table = QTableWidget(0, 10, self._splitter)
+        self.bl_star_table = QTableWidget(0, 16, self._splitter)
         self.bl_star_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.bl_star_table.setStyleSheet(table_stylesheet())
         self.bl_star_table.verticalHeader().setDefaultSectionSize(14)  # 行の高さを少し詰める
@@ -315,6 +333,12 @@ class SnapshotCompareDialog(QDialog):
             "A FC",
             "B FC",
             "ΔFC",
+            "A PP",
+            "B PP",
+            "ΔPP",
+            "A ★PP",
+            "B ★PP",
+            "Δ★PP",
         ])
         bl_star_header = self.bl_star_table.horizontalHeader()
         bl_star_header.setStretchLastSection(False)
@@ -328,16 +352,28 @@ class SnapshotCompareDialog(QDialog):
         bl_star_header.setSectionResizeMode(7, QHeaderView.ResizeMode.Interactive)
         bl_star_header.setSectionResizeMode(8, QHeaderView.ResizeMode.Interactive)
         bl_star_header.setSectionResizeMode(9, QHeaderView.ResizeMode.ResizeToContents)
+        bl_star_header.setSectionResizeMode(10, QHeaderView.ResizeMode.Interactive)
+        bl_star_header.setSectionResizeMode(11, QHeaderView.ResizeMode.Interactive)
+        bl_star_header.setSectionResizeMode(12, QHeaderView.ResizeMode.ResizeToContents)
+        bl_star_header.setSectionResizeMode(13, QHeaderView.ResizeMode.Interactive)
+        bl_star_header.setSectionResizeMode(14, QHeaderView.ResizeMode.Interactive)
+        bl_star_header.setSectionResizeMode(15, QHeaderView.ResizeMode.ResizeToContents)
         bl_star_header.resizeSection(0, 35)
-        bl_star_header.resizeSection(1, 80)
-        bl_star_header.resizeSection(2, 80)
+        bl_star_header.resizeSection(1, 85)
+        bl_star_header.resizeSection(2, 85)
         bl_star_header.resizeSection(3, 70)
-        bl_star_header.resizeSection(4, 80)
-        bl_star_header.resizeSection(5, 80)
+        bl_star_header.resizeSection(4, 85)
+        bl_star_header.resizeSection(5, 85)
         bl_star_header.resizeSection(6, 70)
-        bl_star_header.resizeSection(7, 80)
-        bl_star_header.resizeSection(8, 80)
+        bl_star_header.resizeSection(7, 85)
+        bl_star_header.resizeSection(8, 85)
         bl_star_header.resizeSection(9, 60)
+        bl_star_header.resizeSection(10, 65)
+        bl_star_header.resizeSection(11, 65)
+        bl_star_header.resizeSection(12, 65)
+        bl_star_header.resizeSection(13, 65)
+        bl_star_header.resizeSection(14, 65)
+        bl_star_header.resizeSection(15, 65)
         self.bl_star_table.verticalHeader().setVisible(False)
 
         # パーセンテージ列に横棒グラフを表示するデリゲートを適用
@@ -862,6 +898,12 @@ class SnapshotCompareDialog(QDialog):
             "A FC",
             "B FC",
             "ΔFC",
+            "A PP",
+            "B PP",
+            "ΔPP",
+            "A ★PP",
+            "B ★PP",
+            "Δ★PP",
         ])
         self.bl_star_table.setHorizontalHeaderLabels([
             "★",
@@ -874,6 +916,12 @@ class SnapshotCompareDialog(QDialog):
             "A FC",
             "B FC",
             "ΔFC",
+            "A PP",
+            "B PP",
+            "ΔPP",
+            "A ★PP",
+            "B ★PP",
+            "Δ★PP",
         ])
 
         # ★列ヘッダにサービスアイコンを設定
@@ -1333,6 +1381,50 @@ class SnapshotCompareDialog(QDialog):
                 return None
             return avg_acc, f"{avg_acc:.2f}"
 
+        def _pp_star_value_and_text(stats, star: int):
+            """指定★帯の pp_contribution を数値＋表示文字列のタプルで返す。"""
+
+            for s in stats:
+                if getattr(s, "star", None) == star:
+                    pp = getattr(s, "pp_contribution", None)
+                    if pp is None:
+                        return None
+                    return pp, f"{pp:.0f}"
+            return None
+
+        def _pp_total_value_and_text(stats):
+            """全★帯合計 pp_contribution を数値＋表示文字列のタプルで返す。"""
+
+            if not stats:
+                return None
+            vals = [getattr(s, "pp_contribution", None) for s in stats]
+            if all(v is None for v in vals):
+                return None
+            total_pp = sum(v for v in vals if v is not None)
+            return total_pp, f"{total_pp:.0f}"
+
+        def _pp_solo_star_value_and_text(stats, star: int):
+            """指定★帯の pp_solo を数値＋表示文字列のタプルで返す。"""
+
+            for s in stats:
+                if getattr(s, "star", None) == star:
+                    pp = getattr(s, "pp_solo", None)
+                    if pp is None:
+                        return None
+                    return pp, f"{pp:.0f}"
+            return None
+
+        def _pp_solo_total_value_and_text(stats):
+            """全★帯合計 pp_solo を数値＋表示文字列のタプルで返す。"""
+
+            if not stats:
+                return None
+            vals = [getattr(s, "pp_solo", None) for s in stats]
+            if all(v is None for v in vals):
+                return None
+            total_pp = sum(v for v in vals if v is not None)
+            return total_pp, f"{total_pp:.0f}"
+
         def _normalize_pair(value_and_text):
             """(value, text) または None を (numeric, text) 形式に正規化する。"""
 
@@ -1350,11 +1442,15 @@ class SnapshotCompareDialog(QDialog):
             avg_left_a=None, avg_left_b=None,
             avg_right_a=None, avg_right_b=None,
             fc_a=None, fc_b=None,
+            pp_a=None, pp_b=None,
+            pp_solo_a=None, pp_solo_b=None,
         ) -> None:
-            """★別テーブルの 1 行分 (Clear + AvgAcc [+ FC]) を設定する。
+            """★別テーブルの 1 行分 (Clear + AvgAcc [+ FC [+ PP [+ Solo PP]]]) を設定する。
 
             avg_left_a/b, avg_right_a/b を渡すと ΔAcc セルに L/R 差分を付加する。
-            fc_a/b を渡すと列 7-9 に FC 数と差分を設定する（BL テーブル専用）。
+            fc_a/b を渡すと列 7-9 に FC 数と差分を設定する。
+            pp_a/b を渡すと列 10-12 に PP 値と差分を設定する。
+            pp_solo_a/b を渡すと列 13-15 に Solo PP 値と差分を設定する。
             """
 
             while table.rowCount() <= row:
@@ -1468,6 +1564,54 @@ class SnapshotCompareDialog(QDialog):
                         diff_fc_item.setText("-")
                     table.setItem(row, 9, diff_fc_item)
 
+            # PP 列 (列 10/11, ΔPP は列 12)
+            if pp_a is not None or pp_b is not None:
+                a_pp_val, a_pp_text = _normalize_pair(pp_a) if pp_a is not None else (None, "")
+                b_pp_val, b_pp_text = _normalize_pair(pp_b) if pp_b is not None else (None, "")
+                table.setItem(row, 10, QTableWidgetItem(a_pp_text))
+                table.setItem(row, 11, QTableWidgetItem(b_pp_text))
+
+                if table.columnCount() >= 13:
+                    diff_pp_item = QTableWidgetItem("")
+                    diff_pp_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                    if isinstance(a_pp_val, (int, float)) and isinstance(b_pp_val, (int, float)):
+                        pp_diff = b_pp_val - a_pp_val
+                        diff_pp_item.setText(f"{pp_diff:+.0f}")
+                        if pp_diff > 0:
+                            diff_pp_item.setBackground(diff_positive_bg())
+                        elif pp_diff < 0:
+                            diff_pp_item.setBackground(diff_negative_bg())
+                        else:
+                            diff_pp_item.setBackground(diff_neutral_bg())
+                        diff_pp_item.setForeground(diff_text_color())
+                    elif a_pp_val is not None or b_pp_val is not None:
+                        diff_pp_item.setText("-")
+                    table.setItem(row, 12, diff_pp_item)
+
+            # Solo PP 列 (列 13/14, ΔSolo は列 15)
+            if pp_solo_a is not None or pp_solo_b is not None:
+                a_sp_val, a_sp_text = _normalize_pair(pp_solo_a) if pp_solo_a is not None else (None, "")
+                b_sp_val, b_sp_text = _normalize_pair(pp_solo_b) if pp_solo_b is not None else (None, "")
+                table.setItem(row, 13, QTableWidgetItem(a_sp_text))
+                table.setItem(row, 14, QTableWidgetItem(b_sp_text))
+
+                if table.columnCount() >= 16:
+                    diff_sp_item = QTableWidgetItem("")
+                    diff_sp_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                    if isinstance(a_sp_val, (int, float)) and isinstance(b_sp_val, (int, float)):
+                        sp_diff = b_sp_val - a_sp_val
+                        diff_sp_item.setText(f"{sp_diff:+.0f}")
+                        if sp_diff > 0:
+                            diff_sp_item.setBackground(diff_positive_bg())
+                        elif sp_diff < 0:
+                            diff_sp_item.setBackground(diff_negative_bg())
+                        else:
+                            diff_sp_item.setBackground(diff_neutral_bg())
+                        diff_sp_item.setForeground(diff_text_color())
+                    elif a_sp_val is not None or b_sp_val is not None:
+                        diff_sp_item.setText("-")
+                    table.setItem(row, 15, diff_sp_item)
+
         # ScoreSaber 側テーブル
         stars_ss = sorted({s.star for s in ss_stats_a} | {s.star for s in ss_stats_b})
         # ScoreSaber は現在★15が存在しないので、★0〜14 までに限定
@@ -1481,7 +1625,11 @@ class SnapshotCompareDialog(QDialog):
             ss_b_avg = _avg_acc_star_value_and_text(ss_stats_b, star)
             ss_a_fc = _fc_star_value_and_text(ss_stats_a, star)
             ss_b_fc = _fc_star_value_and_text(ss_stats_b, star)
-            _set_star_row(self.ss_star_table, row_ss, str(star), ss_a_clear, ss_b_clear, ss_a_avg, ss_b_avg, fc_a=ss_a_fc, fc_b=ss_b_fc)
+            ss_a_pp = _pp_star_value_and_text(ss_stats_a, star)
+            ss_b_pp = _pp_star_value_and_text(ss_stats_b, star)
+            ss_a_sp = _pp_solo_star_value_and_text(ss_stats_a, star)
+            ss_b_sp = _pp_solo_star_value_and_text(ss_stats_b, star)
+            _set_star_row(self.ss_star_table, row_ss, str(star), ss_a_clear, ss_b_clear, ss_a_avg, ss_b_avg, fc_a=ss_a_fc, fc_b=ss_b_fc, pp_a=ss_a_pp, pp_b=ss_b_pp, pp_solo_a=ss_a_sp, pp_solo_b=ss_b_sp)
             row_ss += 1
 
         # Total は一番下に表示
@@ -1490,7 +1638,11 @@ class SnapshotCompareDialog(QDialog):
             ss_avg_total_b = _avg_acc_total_value_and_text(snap_b.scoresaber_average_ranked_acc)
             ss_fc_total_a = _fc_total_value_and_text(ss_stats_a)
             ss_fc_total_b = _fc_total_value_and_text(ss_stats_b)
-            _set_star_row(self.ss_star_table, row_ss, "Total", ss_clear_total_a, ss_clear_total_b, ss_avg_total_a, ss_avg_total_b, fc_a=ss_fc_total_a, fc_b=ss_fc_total_b)
+            ss_pp_total_a = _pp_total_value_and_text(ss_stats_a)
+            ss_pp_total_b = _pp_total_value_and_text(ss_stats_b)
+            ss_sp_total_a = _pp_solo_total_value_and_text(ss_stats_a)
+            ss_sp_total_b = _pp_solo_total_value_and_text(ss_stats_b)
+            _set_star_row(self.ss_star_table, row_ss, "Total", ss_clear_total_a, ss_clear_total_b, ss_avg_total_a, ss_avg_total_b, fc_a=ss_fc_total_a, fc_b=ss_fc_total_b, pp_a=ss_pp_total_a, pp_b=ss_pp_total_b, pp_solo_a=ss_sp_total_a, pp_solo_b=ss_sp_total_b)
 
         # BeatLeader 側テーブル
         stars_bl = sorted({s.star for s in bl_stats_a} | {s.star for s in bl_stats_b})
@@ -1507,12 +1659,18 @@ class SnapshotCompareDialog(QDialog):
             bl_b_right = _avg_acc_right_star_value_and_text(bl_stats_b, star)
             bl_a_fc = _fc_star_value_and_text(bl_stats_a, star)
             bl_b_fc = _fc_star_value_and_text(bl_stats_b, star)
+            bl_a_pp = _pp_star_value_and_text(bl_stats_a, star)
+            bl_b_pp = _pp_star_value_and_text(bl_stats_b, star)
+            bl_a_sp = _pp_solo_star_value_and_text(bl_stats_a, star)
+            bl_b_sp = _pp_solo_star_value_and_text(bl_stats_b, star)
             _set_star_row(
                 self.bl_star_table, row_bl, str(star),
                 bl_a_clear, bl_b_clear, bl_a_avg, bl_b_avg,
                 avg_left_a=bl_a_left, avg_left_b=bl_b_left,
                 avg_right_a=bl_a_right, avg_right_b=bl_b_right,
                 fc_a=bl_a_fc, fc_b=bl_b_fc,
+                pp_a=bl_a_pp, pp_b=bl_b_pp,
+                pp_solo_a=bl_a_sp, pp_solo_b=bl_b_sp,
             )
             row_bl += 1
 
@@ -1521,10 +1679,16 @@ class SnapshotCompareDialog(QDialog):
             bl_avg_total_b = _avg_acc_total_value_and_text(snap_b.beatleader_average_ranked_acc)
             bl_fc_total_a = _fc_total_value_and_text(bl_stats_a)
             bl_fc_total_b = _fc_total_value_and_text(bl_stats_b)
+            bl_pp_total_a = _pp_total_value_and_text(bl_stats_a)
+            bl_pp_total_b = _pp_total_value_and_text(bl_stats_b)
+            bl_sp_total_a = _pp_solo_total_value_and_text(bl_stats_a)
+            bl_sp_total_b = _pp_solo_total_value_and_text(bl_stats_b)
             _set_star_row(
                 self.bl_star_table, row_bl, "Total",
                 bl_clear_total_a, bl_clear_total_b, bl_avg_total_a, bl_avg_total_b,
                 fc_a=bl_fc_total_a, fc_b=bl_fc_total_b,
+                pp_a=bl_pp_total_a, pp_b=bl_pp_total_b,
+                pp_solo_a=bl_sp_total_a, pp_solo_b=bl_sp_total_b,
             )
 
         self.table.resizeColumnsToContents()

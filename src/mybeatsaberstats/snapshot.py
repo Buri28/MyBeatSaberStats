@@ -81,6 +81,8 @@ class StarClearStat:
     fc_count: int | None = None  # フルコンボ数（None は未集計、0 は集計済みで 0 件）
     avg_acc_left: float | None = None  # BL 専用: 左手平均精度 (0.0-100.0)
     avg_acc_right: float | None = None  # BL 専用: 右手平均精度 (0.0-100.0)
+    pp_contribution: float | None = None  # ★帯の Ranked スコア pp 合計（None は未集計）
+    pp_solo: float | None = None  # ★帯内スコアのみで計算した仮想 PP（None は未集計）
 
 
 @dataclass
