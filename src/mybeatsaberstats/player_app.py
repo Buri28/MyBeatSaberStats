@@ -1590,7 +1590,7 @@ class PlayerWindow(QMainWindow):
         # 行1: ["Name" | Name値 | "Avg ACC" | Avg ACC値 | "Ranked" | Ranked値]
         def _set_info_tbl(
             tbl: QTableWidget,
-            name_val: Optional[str],
+            id_val: Optional[str],
             pp_val: Optional[str],
             rank_val: Optional[str],
             acc_val: Optional[str],
@@ -1606,32 +1606,32 @@ class PlayerWindow(QMainWindow):
             def _val(v: Optional[object]) -> QTableWidgetItem:
                 return QTableWidgetItem(str(v) if v is not None else "")
 
-            # 行0: ["PP" | PP値 | "Rank" | Rank値 | "Total" | Total値]
-            tbl.setItem(0, 0, _lbl("PP"))
-            tbl.setItem(0, 1, _val(pp_val))
+            # 行0: ["ID" | ID値 | "Rank" | Rank値 | "Total" | Total値]
+            tbl.setItem(0, 0, _lbl("ID"))
+            tbl.setItem(0, 1, _val(id_val))
             tbl.setItem(0, 2, _lbl("Rank"))
             tbl.setItem(0, 3, _val(rank_val))
             tbl.setItem(0, 4, _lbl("Total Play Count"))
             tbl.setItem(0, 5, QTableWidgetItem(f"{total_val:,}" if total_val is not None else ""))
-            # 行1: ["Name" | Name値 | "Avg ACC" | Avg ACC値 | "Ranked" | Ranked値]
-            tbl.setItem(1, 0, _lbl("Name"))
-            tbl.setItem(1, 1, _val(name_val))
+            # 行1: ["PP" | PP値 | "Avg ACC" | Avg ACC値 | "Ranked" | Ranked値]
+            tbl.setItem(1, 0, _lbl("PP"))
+            tbl.setItem(1, 1, _val(pp_val))
             tbl.setItem(1, 2, _lbl("Avg ACC"))
             tbl.setItem(1, 3, _val(acc_val))
             tbl.setItem(1, 4, _lbl("Ranked Play Count"))
             tbl.setItem(1, 5, _val(ranked_val))
             tbl.resizeColumnsToContents()
 
-        self._ss_id_label.setText(snap.scoresaber_id or snap.steam_id or "")
-        self._bl_id_label.setText(snap.beatleader_id or snap.steam_id or "")
+        self._ss_id_label.setText(ss_name_country or "")
+        self._bl_id_label.setText(bl_name_country or "")
         _set_info_tbl(
             self.ss_info_table,
-            ss_name_country, ss_pp_text, ss_rank_text,
+            snap.scoresaber_id or snap.steam_id or "", ss_pp_text, ss_rank_text,
             ss_acc_text, snap.scoresaber_total_play_count, ranked_play_ss_text,
         )
         _set_info_tbl(
             self.bl_info_table,
-            bl_name_country, bl_pp_text, bl_rank_text,
+            snap.beatleader_id or snap.steam_id or "", bl_pp_text, bl_rank_text,
             bl_acc_text, snap.beatleader_total_play_count, ranked_play_bl_text,
         )
 
