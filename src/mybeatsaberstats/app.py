@@ -1277,24 +1277,24 @@ class MainWindow(QMainWindow):
             # ACC Rank / True/Standard/Tech Rank / Country Rank (数値ソート)
             if acc is not None:
                 # Overall Rank
-                self.table.setItem(row, COL_ACC_RANK, NumericTableWidgetItem(str(acc.rank), acc.rank))
+                self.table.setItem(row, COL_ACC_RANK, NumericTableWidgetItem(f"{acc.rank:,}", acc.rank))
 
                 # True / Standard / Tech Global Rank
                 t_rank = true_rank_by_sid.get(sid)
-                t_rank_text = "" if t_rank is None else str(t_rank)
+                t_rank_text = "" if t_rank is None else f"{t_rank:,}"
                 self.table.setItem(row, COL_TRUE_ACC_RANK, NumericTableWidgetItem(t_rank_text, t_rank))
 
                 s_rank = standard_rank_by_sid.get(sid)
-                s_rank_text = "" if s_rank is None else str(s_rank)
+                s_rank_text = "" if s_rank is None else f"{s_rank:,}"
                 self.table.setItem(row, COL_STANDARD_ACC_RANK, NumericTableWidgetItem(s_rank_text, s_rank))
 
                 te_rank = tech_rank_by_sid.get(sid)
-                te_rank_text = "" if te_rank is None else str(te_rank)
+                te_rank_text = "" if te_rank is None else f"{te_rank:,}"
                 self.table.setItem(row, COL_TECH_ACC_RANK, NumericTableWidgetItem(te_rank_text, te_rank))
 
                 # Country Rank 群
                 acc_country_rank_val: Optional[int] = acc_country_rank.get(sid)
-                acc_cr_text = "" if acc_country_rank_val is None else str(acc_country_rank_val)
+                acc_cr_text = "" if acc_country_rank_val is None else f"{acc_country_rank_val:,}"
                 self.table.setItem(
                     row,
                     COL_ACC_COUNTRY_RANK,
@@ -1302,15 +1302,15 @@ class MainWindow(QMainWindow):
                 )
 
                 t_cr = true_country_rank_by_sid.get(sid)
-                t_cr_text = "" if t_cr is None else str(t_cr)
+                t_cr_text = "" if t_cr is None else f"{t_cr:,}"
                 self.table.setItem(row, COL_TRUE_ACC_COUNTRY_RANK, NumericTableWidgetItem(t_cr_text, t_cr))
 
                 s_cr = standard_country_rank_by_sid.get(sid)
-                s_cr_text = "" if s_cr is None else str(s_cr)
+                s_cr_text = "" if s_cr is None else f"{s_cr:,}"
                 self.table.setItem(row, COL_STANDARD_ACC_COUNTRY_RANK, NumericTableWidgetItem(s_cr_text, s_cr))
 
                 te_cr = tech_country_rank_by_sid.get(sid)
-                te_cr_text = "" if te_cr is None else str(te_cr)
+                te_cr_text = "" if te_cr is None else f"{te_cr:,}"
                 self.table.setItem(row, COL_TECH_ACC_COUNTRY_RANK, NumericTableWidgetItem(te_cr_text, te_cr))
             else:
                 for col in [
@@ -1354,23 +1354,23 @@ class MainWindow(QMainWindow):
             # AP 系列・平均ACC・Plays は数値ソート (AccSaber 未参加の場合は空欄)
             if acc is not None:
                 total_ap_val = _parse_float(acc.total_ap)
-                self.table.setItem(row, COL_AP, NumericTableWidgetItem(f"{total_ap_val:.2f}", total_ap_val))
+                self.table.setItem(row, COL_AP, NumericTableWidgetItem(f"{total_ap_val:,.2f}", total_ap_val))
 
                 true_ap_text = getattr(acc, "true_ap", "")
                 true_ap_val = _parse_float(true_ap_text)
-                self.table.setItem(row, COL_TRUE_AP, NumericTableWidgetItem(f"{true_ap_val:.2f}" if true_ap_val else "", true_ap_val))
+                self.table.setItem(row, COL_TRUE_AP, NumericTableWidgetItem(f"{true_ap_val:,.2f}" if true_ap_val else "", true_ap_val))
 
                 standard_ap_text = getattr(acc, "standard_ap", "")
                 standard_ap_val = _parse_float(standard_ap_text)
                 self.table.setItem(
                     row,
                     COL_STANDARD_AP,
-                    NumericTableWidgetItem(f"{standard_ap_val:.2f}" if standard_ap_val else "", standard_ap_val),
+                    NumericTableWidgetItem(f"{standard_ap_val:,.2f}" if standard_ap_val else "", standard_ap_val),
                 )
 
                 tech_ap_text = getattr(acc, "tech_ap", "")
                 tech_ap_val = _parse_float(tech_ap_text)
-                self.table.setItem(row, COL_TECH_AP, NumericTableWidgetItem(f"{tech_ap_val:.2f}" if tech_ap_val else "", tech_ap_val))
+                self.table.setItem(row, COL_TECH_AP, NumericTableWidgetItem(f"{tech_ap_val:,.2f}" if tech_ap_val else "", tech_ap_val))
 
                 avg_acc_val = _parse_float(acc.average_acc)
                 avg_acc_text = f"{avg_acc_val * 100:.2f}%" if avg_acc_val else ""
@@ -1390,21 +1390,18 @@ class MainWindow(QMainWindow):
                     self.table.setItem(row, col, NumericTableWidgetItem("", None))
 
             # ScoreSaber 列 (必ず存在する前提)
-            ss_pp_text = f"{ss.pp:.2f}"
+            ss_pp_text = f"{ss.pp:,.2f}"
             self.table.setItem(row, COL_SS_PP, NumericTableWidgetItem(ss_pp_text, ss.pp))
-
-
-
 
             self.table.setItem(
                 row,
                 COL_SS_GLOBAL_RANK,
-                NumericTableWidgetItem(str(ss.global_rank), ss.global_rank),
+                NumericTableWidgetItem(f"{ss.global_rank:,}", ss.global_rank),
             )
             self.table.setItem(
                 row,
                 COL_SS_COUNTRY_RANK,
-                NumericTableWidgetItem(str(ss.country_rank), ss.country_rank),
+                NumericTableWidgetItem(f"{ss.country_rank:,}", ss.country_rank),
             )
 
             # BeatLeader 列
@@ -1413,20 +1410,18 @@ class MainWindow(QMainWindow):
             if bl is not None:
                 if bl.id:
                     attached_bl_ids.add(bl.id)
-                bl_pp_text = f"{bl.pp:.2f}"
+                bl_pp_text = f"{bl.pp:,.2f}"
                 self.table.setItem(row, COL_BL_PP, NumericTableWidgetItem(bl_pp_text, bl.pp))
-                
-
 
                 self.table.setItem(
                     row,
                     COL_BL_GLOBAL_RANK,
-                    NumericTableWidgetItem(str(bl.global_rank), bl.global_rank),
+                    NumericTableWidgetItem(f"{bl.global_rank:,}", bl.global_rank),
                 )
 
                 if country is None or bl_ok:
                     _bl_cr = (bl.country_rank or None) if bl.country_rank else None
-                    _bl_cr_text = str(_bl_cr) if _bl_cr is not None else ""
+                    _bl_cr_text = f"{_bl_cr:,}" if _bl_cr is not None else ""
                     self.table.setItem(
                         row,
                         COL_BL_COUNTRY_RANK,
@@ -1550,18 +1545,18 @@ class MainWindow(QMainWindow):
                 self.table.setItem(row, col, NumericTableWidgetItem("", None))
 
             # BeatLeader 列は JSON の値をそのまま表示
-            bl_pp_text = f"{bl.pp:.2f}"
+            bl_pp_text = f"{bl.pp:,.2f}"
             self.table.setItem(row, COL_BL_PP, NumericTableWidgetItem(bl_pp_text, bl.pp))
             self.table.setItem(
                 row,
                 COL_BL_GLOBAL_RANK,
-                NumericTableWidgetItem(str(bl.global_rank), bl.global_rank),
+                NumericTableWidgetItem(f"{bl.global_rank:,}", bl.global_rank),
             )
 
             # 国フィルタと一致する場合だけ Country Rank を表示（グローバル時はそのまま）
             if country is None or (bl.country and bl.country.upper() == country.upper()):
                 _bl_cr2 = (bl.country_rank or None) if bl.country_rank else None
-                _bl_cr2_text = str(_bl_cr2) if _bl_cr2 is not None else ""
+                _bl_cr2_text = f"{_bl_cr2:,}" if _bl_cr2 is not None else ""
                 self.table.setItem(
                     row,
                     COL_BL_COUNTRY_RANK,
