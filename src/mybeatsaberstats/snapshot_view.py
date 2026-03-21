@@ -211,7 +211,8 @@ class SnapshotCompareDialog(QDialog):
         self._snapshots_by_player: dict[str, List[Snapshot]] = {}
         # Stats 画面側から渡された「最初に選択しておきたいプレイヤー」
         self._initial_steam_id: Optional[str] = initial_steam_id
-        self._metric_preferred_width: int = 300
+        # Metric 列の幅の非表示から復帰用
+        self._metric_preferred_width: int = 415
 
         root_layout = QVBoxLayout(self)
 
