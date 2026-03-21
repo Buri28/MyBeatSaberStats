@@ -823,10 +823,11 @@ class PlayerWindow(QMainWindow):
 
         # 下部: 横スプリッタ [キャッシュ情報 | AccSaber テーブル]
         bottom_h_splitter = QSplitter(Qt.Orientation.Horizontal, self)
-        bottom_h_splitter.addWidget(left_bottom_widget)
         bottom_h_splitter.addWidget(self.acc_table)
+        bottom_h_splitter.addWidget(left_bottom_widget)
         bottom_h_splitter.setStretchFactor(0, 1)
         bottom_h_splitter.setStretchFactor(1, 1)
+        bottom_h_splitter.setSizes([360, 360])  # 初期サイズ配分の目安
 
         # 中央エリア (★テーブル) と下部エリアの間に縦スプリッタを設置
         mid_bottom_splitter = QSplitter(Qt.Orientation.Vertical, self)
@@ -834,6 +835,7 @@ class PlayerWindow(QMainWindow):
         mid_bottom_splitter.addWidget(bottom_h_splitter)
         mid_bottom_splitter.setStretchFactor(0, 1)
         mid_bottom_splitter.setStretchFactor(1, 0)
+        mid_bottom_splitter.setSizes([600, 110])  # 初期サイズ配分の目安
 
         layout.addWidget(mid_bottom_splitter, 1)
 
@@ -1607,14 +1609,14 @@ class PlayerWindow(QMainWindow):
             tbl.setItem(0, 1, _val(pp_val))
             tbl.setItem(0, 2, _lbl("Rank"))
             tbl.setItem(0, 3, _val(rank_val))
-            tbl.setItem(0, 4, _lbl("Total"))
+            tbl.setItem(0, 4, _lbl("Total Play Count"))
             tbl.setItem(0, 5, _val(total_val))
             # 行1: ["Name" | Name値 | "Avg ACC" | Avg ACC値 | "Ranked" | Ranked値]
             tbl.setItem(1, 0, _lbl("Name"))
             tbl.setItem(1, 1, _val(name_val))
             tbl.setItem(1, 2, _lbl("Avg ACC"))
             tbl.setItem(1, 3, _val(acc_val))
-            tbl.setItem(1, 4, _lbl("Ranked"))
+            tbl.setItem(1, 4, _lbl("Ranked Play Count"))
             tbl.setItem(1, 5, _val(ranked_val))
             tbl.resizeColumnsToContents()
 
@@ -2215,7 +2217,7 @@ def run() -> None:
         app.setWindowIcon(QIcon(str(_icon_path)))
     window = PlayerWindow()
     # ScoreSaber / BeatLeader / AccSaber と★0〜15が見やすいように、やや横長＋縦広めに取る
-    window.resize(1160, 700)
+    window.resize(1160, 720)
     window.show()
 
     # 起動直後にスナップショットが1つも無い場合は、最初にだけ
