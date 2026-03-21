@@ -9,7 +9,7 @@ import json
 from datetime import datetime, timezone
 
 from PySide6.QtCore import Qt, QDateTime, QTimer
-from PySide6.QtGui import QBrush, QColor, QIcon, QPalette
+from PySide6.QtGui import QBrush, QColor, QFont, QIcon, QPalette
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -590,42 +590,50 @@ class PlayerWindow(QMainWindow):
         self.snapshot_latest_button.setFixedWidth(60)
         self.snapshot_latest_button.clicked.connect(lambda: self.snapshot_combo.setCurrentIndex(0))
         snapshot_row.addWidget(self.snapshot_latest_button)
-        snapshot_row.addStretch(1)
-        layout.addLayout(snapshot_row)
-
-        # --- キャッシュ情報行: SS/BL player_scores の最終読み込み日時と総スコア数 ---
-        cache_info_row = QHBoxLayout()
-        self._ss_cache_label = QLabel("ScoreSaber scores: -")
-        self._bl_cache_label = QLabel("BeatLeader scores: -")
-        cache_info_row.addWidget(self._ss_cache_label)
-        cache_info_row.addSpacing(24)
-        cache_info_row.addWidget(self._bl_cache_label)
-        cache_info_row.addStretch(1)
         _ver = get_current_version()
         self._ver_label = QLabel(f"version：v{_ver}" if _ver else "", self)
         _ver_color = "#cccccc" if is_dark() else "black"
         self._ver_label.setStyleSheet(f"font-size: 12px; color: {_ver_color}; padding-right: 4px;")
-        cache_info_row.addWidget(self._ver_label)
-        layout.addLayout(cache_info_row)
+        snapshot_row.addStretch(1)
+        snapshot_row.addWidget(self._ver_label)
+        layout.addLayout(snapshot_row)
 
-        # --- 中央〜下部: 3 列レイアウト ---
-        # 1 列目: 上段に ScoreSaber/BeatLeader、下段に AccSaber
-        # 2 列目: ScoreSaber ★別
-        # 3 列目: BeatLeader ★別
+        # キャッシュ情報ラベル（下部エリアに配置）
+        self._ss_cache_label = QLabel("ScoreSaber scores: -", self)
+        self._bl_cache_label = QLabel("BeatLeader scores: -", self)
 
-        # 1 列目の上段テーブル: ScoreSaber / BeatLeader の各種指標を 1 表にまとめる
-        self.main_table = QTableWidget(0, 3, self)
-        self.main_table.verticalHeader().setDefaultSectionSize(14)  # 行の高さを少し詰める
-        self.main_table.verticalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        self.main_table.verticalHeader().setMinimumSectionSize(0)
-        self.main_table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
-        self.main_table.setStyleSheet(table_stylesheet())
+        # --- 中央〜下部: 2 列レイアウト (SS パネル | BL パネル) + 下部 AccSaber ---
 
-        # 1 列目の下段テーブル: AccSaber 用の指標
+        # SS / BL プレイヤー情報テーブル (2行×6列、star_table のヘッダ上に固定配置)
+        # 列: [col0=ID(icon+bold) | col1=空 | col2="PP" | col3=PP値 | col4="Rank" | col5=Rank値]
+        #       [col0="Name"         | col1=Name値 | col2="Avg ACC" | col3=Avg値 | col4="Total/Ranked" | col5=値]
+        def _make_info_table() -> QTableWidget:
+            tbl = QTableWidget(0, 6, self)   # 先に0行で作成してから行を追加する
+            tbl.verticalHeader().setDefaultSectionSize(22)
+            tbl.verticalHeader().setMinimumSectionSize(0)
+            tbl.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
+            tbl.verticalHeader().setVisible(False)
+            tbl.horizontalHeader().setVisible(False)
+            tbl.setStyleSheet(table_stylesheet())
+            tbl.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+            tbl.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            tbl.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            hdr = tbl.horizontalHeader()
+            hdr.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+            hdr.setStretchLastSection(True)
+            tbl.setRowCount(2)              # デフォルト行高18px が適用された状態で2行追加
+            for _r in range(2):
+                tbl.setRowHeight(_r, 22)    # 明示的に行高を固定
+            tbl.setFixedHeight(2 * 22 + tbl.frameWidth() * 2 + 2)  # frame + grid分を加算
+            return tbl
+
+        self.ss_info_table = _make_info_table()
+        self.bl_info_table = _make_info_table()
+
+        # AccSaber 用の指標テーブル
         self.acc_table = QTableWidget(0, 5, self)
         self.acc_table.setStyleSheet(table_stylesheet())
-        self.main_table.setHorizontalHeaderLabels(["Metric", "", ""])
-        self.acc_table.verticalHeader().setDefaultSectionSize(14)  # 行の高さを少し詰める
+        self.acc_table.verticalHeader().setDefaultSectionSize(14)
         self.acc_table.verticalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.acc_table.verticalHeader().setMinimumSectionSize(0)
         self.acc_table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
@@ -638,13 +646,12 @@ class PlayerWindow(QMainWindow):
             "Tech",
         ])
 
-        # 2 列目: ★別クリア統計テーブル（ScoreSaber）
+        # SS ★別クリア統計テーブル
         # SS(スローソング) も未クリア扱いとして別カラムで表示するため、NF/SS の 2 列を用意する。
         self.star_table = QTableWidget(0, 11, self)
         self.star_table.verticalHeader().setDefaultSectionSize(14)  # 行の高さを少し詰める
         self.star_table.setStyleSheet(table_stylesheet() + "\nQTableWidget::item { padding: 0px; margin: 0px; }")
         self.star_table.verticalHeader().setMinimumSectionSize(0)
-
         self.star_table.setHorizontalHeaderLabels([
             "★",
             "Maps",
@@ -659,7 +666,7 @@ class PlayerWindow(QMainWindow):
             "★PP",
         ])
 
-        # 3 列目: BeatLeader 版 ★統計テーブル
+        # BL ★別クリア統計テーブル
         self.bl_star_table = QTableWidget(0, 11, self)
         self.bl_star_table.verticalHeader().setDefaultSectionSize(14)  # 行の高さを少し詰める
         self.bl_star_table.setStyleSheet(table_stylesheet() + "\nQTableWidget::item { padding: 0px; margin: 0px; }")
@@ -679,7 +686,7 @@ class PlayerWindow(QMainWindow):
 
         # 列幅は内容に合わせて自動調整し、最後の列がレイアウト都合で
         # 不自然に広がらないように stretchLastSection は無効にする
-        for table in (self.main_table, self.acc_table, self.star_table, self.bl_star_table):
+        for table in (self.acc_table, self.star_table, self.bl_star_table):
             header = table.horizontalHeader()
             header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
             header.setStretchLastSection(False)
@@ -690,17 +697,9 @@ class PlayerWindow(QMainWindow):
         icon_scoresaber = QIcon(str(resources_dir / "scoresaber_logo.svg"))
         icon_beatleader = QIcon(str(resources_dir / "beatleader_logo.jpg"))
         icon_accsaber = QIcon(str(resources_dir / "asssaber_logo.webp"))
-
-        # 上段メインテーブル: ScoreSaber / BeatLeader 列にアイコンを付与
-        ss_header_item = self.main_table.horizontalHeaderItem(1) or QTableWidgetItem("")
-        ss_header_item.setIcon(icon_scoresaber)
-        ss_header_item.setToolTip("ScoreSaber")
-        self.main_table.setHorizontalHeaderItem(1, ss_header_item)
-
-        bl_header_item = self.main_table.horizontalHeaderItem(2) or QTableWidgetItem("")
-        bl_header_item.setIcon(icon_beatleader)
-        bl_header_item.setToolTip("BeatLeader")
-        self.main_table.setHorizontalHeaderItem(2, bl_header_item)
+        # _update_view から参照できるようインスタンス属性として保存
+        self._icon_scoresaber = icon_scoresaber
+        self._icon_beatleader = icon_beatleader
 
         # AccSaber テーブル: データ列に AccSaber アイコンを付与
         for col in range(1, 5):
@@ -723,8 +722,7 @@ class PlayerWindow(QMainWindow):
         # ★テーブルは行番号(No.1〜)が紛らわしいので非表示にする
         self.star_table.verticalHeader().setVisible(False)
         self.bl_star_table.verticalHeader().setVisible(False)
-        # Metric列で内容が分かるため main_table / acc_table の行番号も非表示にする
-        self.main_table.verticalHeader().setVisible(False)
+        # acc_table の行番号も非表示にする
         self.acc_table.verticalHeader().setVisible(False)
 
         # パーセンテージ列に横棒グラフを表示するデリゲートを適用
@@ -759,37 +757,85 @@ class PlayerWindow(QMainWindow):
             lambda col: self._on_bl_acc_cell_clicked(0, col)
         )
 
-        # 1 列目は main_table(上) と acc_table(下) を縦に並べる
-        # acc_table はキャッシュ使用時の警告ラベルと合わせてコンテナに格納する
-        left_splitter = QSplitter(Qt.Orientation.Vertical, self)
-        left_splitter.addWidget(self.main_table)
+        # --- SS パネル (左列): [アイコン+IDヘッダ] + [情報テーブル(2行6列)] + [★テーブル] ---
+        self._ss_id_label = QLabel("", self)
+        self._ss_id_label.setStyleSheet("font-weight: bold; padding: 2px 4px;")
+        _ss_icon_label = QLabel(self)
+        _ss_icon_label.setPixmap(icon_scoresaber.pixmap(16, 16))
+        _ss_hdr_row = QHBoxLayout()
+        _ss_hdr_row.setSpacing(4)
+        _ss_hdr_row.setContentsMargins(2, 2, 2, 2)
+        _ss_hdr_row.addWidget(_ss_icon_label)
+        _ss_hdr_row.addWidget(self._ss_id_label)
+        _ss_hdr_row.addStretch(1)
+        _ss_hdr_widget = QWidget(self)
+        _ss_hdr_widget.setLayout(_ss_hdr_row)
 
-        acc_container = QWidget(self)
-        acc_container_layout = QVBoxLayout(acc_container)
-        acc_container_layout.setContentsMargins(0, 0, 0, 0)
-        acc_container_layout.setSpacing(2)
+        ss_column = QWidget(self)
+        ss_col_layout = QVBoxLayout(ss_column)
+        ss_col_layout.setContentsMargins(0, 0, 0, 0)
+        ss_col_layout.setSpacing(0)
+        ss_col_layout.addWidget(_ss_hdr_widget)         # アイコン + SteamID
+        ss_col_layout.addWidget(self.ss_info_table)     # スクロールしない情報行
+        ss_col_layout.addWidget(self.star_table, 1)     # stretch=1 → 残りを占有
+
+        # --- BL パネル (右列): [アイコン+IDヘッダ] + [情報テーブル(2行6列)] + [★テーブル] ---
+        self._bl_id_label = QLabel("", self)
+        self._bl_id_label.setStyleSheet("font-weight: bold; padding: 2px 4px;")
+        _bl_icon_label = QLabel(self)
+        _bl_icon_label.setPixmap(icon_beatleader.pixmap(16, 16))
+        _bl_hdr_row = QHBoxLayout()
+        _bl_hdr_row.setSpacing(4)
+        _bl_hdr_row.setContentsMargins(2, 2, 2, 2)
+        _bl_hdr_row.addWidget(_bl_icon_label)
+        _bl_hdr_row.addWidget(self._bl_id_label)
+        _bl_hdr_row.addStretch(1)
+        _bl_hdr_widget = QWidget(self)
+        _bl_hdr_widget.setLayout(_bl_hdr_row)
+
+        bl_column = QWidget(self)
+        bl_col_layout = QVBoxLayout(bl_column)
+        bl_col_layout.setContentsMargins(0, 0, 0, 0)
+        bl_col_layout.setSpacing(0)
+        bl_col_layout.addWidget(_bl_hdr_widget)         # アイコン + SteamID
+        bl_col_layout.addWidget(self.bl_info_table)     # スクロールしない情報行
+        bl_col_layout.addWidget(self.bl_star_table, 1)  # stretch=1 → 残りを占有
+
+        # 全体: 2列横スプリッタ [SS パネル (左) | BL パネル (右)]
+        main_splitter = QSplitter(Qt.Orientation.Horizontal, self)
+        main_splitter.addWidget(ss_column)
+        main_splitter.addWidget(bl_column)
+        main_splitter.setStretchFactor(0, 1)
+        main_splitter.setStretchFactor(1, 1)
+
+        # --- 下部: キャッシュ情報 (左) + AccSaber テーブル (右) を横スプリッタで分割 ---
+        left_bottom_widget = QWidget(self)
+        left_bottom_layout = QVBoxLayout(left_bottom_widget)
+        left_bottom_layout.setContentsMargins(2, 2, 2, 2)
+        left_bottom_layout.setSpacing(2)
+        left_bottom_layout.addWidget(self._ss_cache_label)
+        left_bottom_layout.addWidget(self._bl_cache_label)
         self._acc_warning_label = QLabel("", self)
         self._acc_warning_label.setStyleSheet("color: orange; font-size: 11px;")
         self._acc_warning_label.setVisible(False)
-        acc_container_layout.addWidget(self._acc_warning_label)
-        acc_container_layout.addWidget(self.acc_table)
-        left_splitter.addWidget(acc_container)
+        left_bottom_layout.addWidget(self._acc_warning_label)
+        left_bottom_layout.addStretch(1)
 
-        # 上段をやや広めに、下段を少し狭めに取る
-        left_splitter.setStretchFactor(0, 35)
-        left_splitter.setStretchFactor(1, 30)
+        # 下部: 横スプリッタ [キャッシュ情報 | AccSaber テーブル]
+        bottom_h_splitter = QSplitter(Qt.Orientation.Horizontal, self)
+        bottom_h_splitter.addWidget(left_bottom_widget)
+        bottom_h_splitter.addWidget(self.acc_table)
+        bottom_h_splitter.setStretchFactor(0, 1)
+        bottom_h_splitter.setStretchFactor(1, 1)
 
-        # 全体は 3 列構成: [1 列目] ScoreSaber/BeatLeader + AccSaber, [2 列目] SS ★別, [3 列目] BL ★別
-        main_splitter = QSplitter(Qt.Orientation.Horizontal, self)
-        main_splitter.addWidget(left_splitter)
-        main_splitter.addWidget(self.star_table)
-        main_splitter.addWidget(self.bl_star_table)
-        # セパレータの比率 1 列目をやや広め、2・3 列目を同程度にする
-        main_splitter.setStretchFactor(0, 28)
-        main_splitter.setStretchFactor(1, 38)
-        main_splitter.setStretchFactor(2, 39)
+        # 中央エリア (★テーブル) と下部エリアの間に縦スプリッタを設置
+        mid_bottom_splitter = QSplitter(Qt.Orientation.Vertical, self)
+        mid_bottom_splitter.addWidget(main_splitter)
+        mid_bottom_splitter.addWidget(bottom_h_splitter)
+        mid_bottom_splitter.setStretchFactor(0, 1)
+        mid_bottom_splitter.setStretchFactor(1, 0)
 
-        layout.addWidget(main_splitter, 1)
+        layout.addWidget(mid_bottom_splitter, 1)
 
         self.setCentralWidget(central)
 
@@ -1385,9 +1431,13 @@ class PlayerWindow(QMainWindow):
         _star_qss = table_stylesheet() + "\nQTableWidget::item { padding: 0px; margin: 0px; }"
         self.star_table.setStyleSheet(_star_qss)
         self.bl_star_table.setStyleSheet(_star_qss)
-        self.main_table.setStyleSheet(table_stylesheet())
+        self.ss_info_table.setStyleSheet(table_stylesheet())
+        self.bl_info_table.setStyleSheet(table_stylesheet())
         self.acc_table.setStyleSheet(table_stylesheet())
-        self.main_table.setRowCount(0)
+        self.ss_info_table.clearContents()
+        self.bl_info_table.clearContents()
+        self._ss_id_label.setText("")
+        self._bl_id_label.setText("")
         self.acc_table.setRowCount(0)
         self.star_table.setRowCount(0)
         self.bl_star_table.setRowCount(0)
@@ -1531,31 +1581,55 @@ class PlayerWindow(QMainWindow):
             snap.beatleader_rank_country,
         )
 
-        # 上段テーブル: Name/Rank/ACC/Total/Ranked をフル表記で表示する
-        metrics = [
-            ("SteamID", snap.steam_id, None),
-            ("Name", ss_name_country, bl_name_country),
-            ("PP", ss_pp_text, bl_pp_text),
-            ("Rank", ss_rank_text, bl_rank_text),
-            ("Average Ranked ACC", ss_acc_text, bl_acc_text),
-            ("Total Play Count", snap.scoresaber_total_play_count, snap.beatleader_total_play_count),
-            ("Ranked Play Count", ranked_play_ss_text, ranked_play_bl_text),
-        ]
+        # SS / BL 情報テーブル (2行×6列) を更新する
+        # 行0: ["PP" | PP値 | "Rank" | Rank値 | "Total" | Total値]
+        # 行1: ["Name" | Name値 | "Avg ACC" | Avg ACC値 | "Ranked" | Ranked値]
+        def _set_info_tbl(
+            tbl: QTableWidget,
+            name_val: Optional[str],
+            pp_val: Optional[str],
+            rank_val: Optional[str],
+            acc_val: Optional[str],
+            total_val: Optional[int],
+            ranked_val: Optional[str],
+        ) -> None:
+            def _lbl(text: str) -> QTableWidgetItem:
+                it = QTableWidgetItem(text)
+                it.setBackground(label_cell_color())
+                it.setForeground(label_cell_text_color())
+                return it
 
-        for row, (label, ss_value, bl_value) in enumerate(metrics):
-            self.main_table.insertRow(row)
-            metric_item = QTableWidgetItem(label)
-            metric_item.setBackground(label_cell_color())
-            metric_item.setForeground(label_cell_text_color())
-            self.main_table.setItem(row, 0, metric_item)
+            def _val(v: Optional[object]) -> QTableWidgetItem:
+                return QTableWidgetItem(str(v) if v is not None else "")
 
-            ss_text = "" if ss_value is None else str(ss_value)
-            self.main_table.setItem(row, 1, QTableWidgetItem(ss_text))
+            # 行0: ["PP" | PP値 | "Rank" | Rank値 | "Total" | Total値]
+            tbl.setItem(0, 0, _lbl("PP"))
+            tbl.setItem(0, 1, _val(pp_val))
+            tbl.setItem(0, 2, _lbl("Rank"))
+            tbl.setItem(0, 3, _val(rank_val))
+            tbl.setItem(0, 4, _lbl("Total"))
+            tbl.setItem(0, 5, _val(total_val))
+            # 行1: ["Name" | Name値 | "Avg ACC" | Avg ACC値 | "Ranked" | Ranked値]
+            tbl.setItem(1, 0, _lbl("Name"))
+            tbl.setItem(1, 1, _val(name_val))
+            tbl.setItem(1, 2, _lbl("Avg ACC"))
+            tbl.setItem(1, 3, _val(acc_val))
+            tbl.setItem(1, 4, _lbl("Ranked"))
+            tbl.setItem(1, 5, _val(ranked_val))
+            tbl.resizeColumnsToContents()
 
-            bl_text = "" if bl_value is None else str(bl_value)
-            self.main_table.setItem(row, 2, QTableWidgetItem(bl_text))
-
-        self.main_table.resizeColumnsToContents()
+        self._ss_id_label.setText(snap.scoresaber_id or snap.steam_id or "")
+        self._bl_id_label.setText(snap.beatleader_id or snap.steam_id or "")
+        _set_info_tbl(
+            self.ss_info_table,
+            ss_name_country, ss_pp_text, ss_rank_text,
+            ss_acc_text, snap.scoresaber_total_play_count, ranked_play_ss_text,
+        )
+        _set_info_tbl(
+            self.bl_info_table,
+            bl_name_country, bl_pp_text, bl_rank_text,
+            bl_acc_text, snap.beatleader_total_play_count, ranked_play_bl_text,
+        )
 
         # AccSaber テーブル（Overall / True / Standard / Tech の Global Rank / Country Rank / PlayCount）
         # Country Rank はスナップショット撮影時点の保存値を使う。
@@ -2141,7 +2215,7 @@ def run() -> None:
         app.setWindowIcon(QIcon(str(_icon_path)))
     window = PlayerWindow()
     # ScoreSaber / BeatLeader / AccSaber と★0〜15が見やすいように、やや横長＋縦広めに取る
-    window.resize(1180, 560)
+    window.resize(1160, 700)
     window.show()
 
     # 起動直後にスナップショットが1つも無い場合は、最初にだけ
