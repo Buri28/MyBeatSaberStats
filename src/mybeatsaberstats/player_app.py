@@ -499,11 +499,15 @@ class ColumnMaxBarDelegate(QStyledItemDelegate):
         bar_width = int(rect.width() * ratio)
         bar_rect = rect.adjusted(0, 0, bar_width - rect.width(), 0)
 
-        # 赤 (ratio=0) → 青 (ratio=1)
-        r = int(255 * (1.0 - ratio) ) 
-        g = 160 + int(255 * ratio / 4)
-        b = int(255 * ratio)
-        color = QColor(r, g, b, 180)
+        # # 赤 (ratio=0) → 青 (ratio=1)
+        # r = int(255 * (1.0 - ratio) ) 
+        # g = 160 + int(255 * ratio / 4)
+        # b = int(255 * ratio)
+        # グラデーションはなし
+        r = 0 
+        g = 160
+        b = 255
+        color = QColor(r, g, b, 160)
 
         painter.fillRect(bar_rect, color)
         painter.restore()
@@ -532,7 +536,8 @@ class PlayerWindow(QMainWindow):
         _player_label.setFixedWidth(_label_width)
         top_row.addWidget(_player_label)
         self.player_combo = QComboBox(self)
-        top_row.addWidget(self.player_combo, 1)
+        self.player_combo.setFixedWidth(250)
+        top_row.addWidget(self.player_combo)
 
         # スナップショット取得ボタン
         self.snapshot_button = QPushButton("Take Snapshot")
@@ -579,7 +584,7 @@ class PlayerWindow(QMainWindow):
         _snapshot_label.setFixedWidth(_label_width)
         snapshot_row.addWidget(_snapshot_label)
         self.snapshot_combo = QComboBox(self)
-        self.snapshot_combo.setMinimumWidth(200)
+        self.snapshot_combo.setFixedWidth(250)
         snapshot_row.addWidget(self.snapshot_combo)
         self.snapshot_latest_button = QPushButton("Latest")
         self.snapshot_latest_button.setFixedWidth(60)
