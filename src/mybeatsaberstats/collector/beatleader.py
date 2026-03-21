@@ -465,6 +465,16 @@ def _get_beatleader_player_scores(
         print(f"BeatLeader fetch_until 指定: {fetch_until.isoformat()} (Unix: {fetch_until_ts})")
     reached_fetch_until = False  # fetch_until の境界に到達したかのフラグ
 
+    def _get_score_pp(src: dict) -> float:
+        """スコアオブジェクトから pp 値を取得する。"""
+        sc = src.get("score") if isinstance(src, dict) else None
+        if not isinstance(sc, dict):
+            sc = src
+        try:
+            return float(sc.get("pp") or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
     while True:
         url = f"{BL_BASE_URL}/player/{player_id}/scores"
         params = {
@@ -536,7 +546,7 @@ def _get_beatleader_player_scores(
 
             lb_id = str(lb_id_raw)
 
-            # 事前キャッシュに存在するか、timeset が更新されているかを判定
+            # 事前キャッシュに存在するか、timeset または pp が更新されているかを判定
             old_item = cached_scores.get(lb_id)
             if old_item is None:
                 # 新規にプレイされた譜面
@@ -546,8 +556,13 @@ def _get_beatleader_player_scores(
                 old_ts = _extract_leaderboard_timeset_from_score_item(old_item)
                 new_ts = _extract_leaderboard_timeset_from_score_item(item)
 
-                if new_ts is not None and (old_ts is None or new_ts > old_ts):
-                    # 譜面側の timeset が更新されている場合は差し替える
+                # PP 再計算による score.pp の変化も差分として検出する
+                old_pp = _get_score_pp(old_item)
+                new_pp = _get_score_pp(item)
+                pp_changed = abs(new_pp - old_pp) > 0.01
+
+                if (new_ts is not None and (old_ts is None or new_ts > old_ts)) or pp_changed:
+                    # 譜面側の timeset が更新、または PP が変わっている場合は差し替える
                     page_has_diff = True
                     scores_by_lb_id[lb_id] = item
                 else:
@@ -758,7 +773,26 @@ def collect_beatleader_star_stats(beatleader_id: str, session: Optional[requests
         lb_id = str(lb_id_raw)
 
         if lb_id not in leaderboard_star_bucket:
-            continue
+            # キャッシュ外のマップでも pp > 0 なら PP 計算には含める
+            # （スコアオブジェクト内の leaderboard.difficulty.stars を利用）
+            score_info_pre = item.get("score") if isinstance(item, dict) else None
+            if not isinstance(score_info_pre, dict):
+                score_info_pre = item if isinstance(item, dict) else None
+            pp_pre = None
+            if isinstance(score_info_pre, dict):
+                try:
+                    pp_pre = float(score_info_pre.get("pp") or 0)
+                except (TypeError, ValueError):
+                    pp_pre = None
+            if not (isinstance(pp_pre, float) and math.isfinite(pp_pre) and pp_pre > 0):
+                continue
+            # diff は上で取得済み
+            try:
+                stars_pre = float(diff.get("stars") or diff.get("difficultyRating") or 0)
+            except (TypeError, ValueError):
+                stars_pre = 0.0
+            star_bucket_pre = max(0, int(stars_pre))
+            leaderboard_star_bucket[lb_id] = star_bucket_pre
 
         star_bucket = leaderboard_star_bucket[lb_id]
 
@@ -783,6 +817,16 @@ def collect_beatleader_star_stats(beatleader_id: str, session: Optional[requests
             state["nf"] = True
         elif is_ss:
             state["ss"] = True
+            # BeatLeader では SS（Slower Song）も PP 対象（score.pp に MOD 補正済みで反映）
+            if isinstance(score_info, dict):
+                try:
+                    pp_val = float(score_info.get("pp") or 0)
+                    if math.isfinite(pp_val) and pp_val > 0:
+                        prev_pp = state.get("best_pp")
+                        if prev_pp is None or pp_val > prev_pp:
+                            state["best_pp"] = pp_val
+                except (TypeError, ValueError):
+                    pass
         else:
             state["clear"] = True
 
@@ -857,7 +901,8 @@ def collect_beatleader_star_stats(beatleader_id: str, session: Optional[requests
     # PP を全スコア降順でソートし、重み 0.965^(rank-1) を掛けて★別に集計
     cleared_pp_entries_bl: list[tuple[int, float]] = []
     for state in per_leaderboard.values():
-        if not bool(state["clear"]):
+        # SS スコアも BeatLeader では PP 対象なので clear と同様に含める
+        if not (bool(state["clear"]) or bool(state["ss"])):
             continue
         pp_val = state.get("best_pp")
         if isinstance(pp_val, (int, float)) and math.isfinite(float(pp_val)) and float(pp_val) > 0:
