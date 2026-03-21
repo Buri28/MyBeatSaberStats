@@ -453,6 +453,64 @@ class PercentageBarDelegate(QStyledItemDelegate):
         super().paint(painter, option, index)
 
 
+class ColumnMaxBarDelegate(QStyledItemDelegate):
+    """列内の最大値を MAX として横棒グラフを描画するデリゲート。
+
+    グラデーションは赤→青。太字・メダル表示は行わない。
+    """
+
+    def _parse_value(self, text) -> Optional[float]:
+        try:
+            return float(str(text)) if text not in (None, "") else None
+        except (ValueError, TypeError):
+            return None
+
+    def _col_max(self, index) -> Optional[float]:
+        model = index.model()
+        if model is None:
+            return None
+        col = index.column()
+        last_row = model.rowCount() - 1
+        max_val: Optional[float] = None
+        for row in range(model.rowCount()):
+            if row == last_row:  # Total行は除外
+                continue
+            v = self._parse_value(model.data(model.index(row, col)))
+            if v is not None and (max_val is None or v > max_val):
+                max_val = v
+        return max_val
+
+    def paint(self, painter, option, index):  # type: ignore[override]
+        # Total行（最終行）はバーなしで通常描画
+        model = index.model()
+        if model is not None and index.row() == model.rowCount() - 1:
+            return super().paint(painter, option, index)
+
+        value = self._parse_value(index.data())
+        col_max = self._col_max(index)
+
+        if value is None or col_max is None or col_max <= 0:
+            return super().paint(painter, option, index)
+
+        ratio = max(0.0, min(1.0, value / col_max))
+
+        painter.save()
+        rect = option.rect.adjusted(1, 1, -1, -1)
+        bar_width = int(rect.width() * ratio)
+        bar_rect = rect.adjusted(0, 0, bar_width - rect.width(), 0)
+
+        # 赤 (ratio=0) → 青 (ratio=1)
+        r = int(255 * (1.0 - ratio) ) 
+        g = 160 + int(255 * ratio / 4)
+        b = int(255 * ratio)
+        color = QColor(r, g, b, 180)
+
+        painter.fillRect(bar_rect, color)
+        painter.restore()
+
+        super().paint(painter, option, index)
+
+
 class PlayerWindow(QMainWindow):
     """steamId 単位のランク情報とスナップショットを表示する専用画面。"""
 
@@ -468,7 +526,11 @@ class PlayerWindow(QMainWindow):
         top_row.setSpacing(2)  # ライトモードの初期間隔
         self._top_row = top_row
 
-        top_row.addWidget(QLabel("Player (from snapshots):"))
+        # SteamID 選択コンボボックス
+        _label_width = 65
+        _player_label = QLabel("Player:")
+        _player_label.setFixedWidth(_label_width)
+        top_row.addWidget(_player_label)
         self.player_combo = QComboBox(self)
         top_row.addWidget(self.player_combo, 1)
 
@@ -509,6 +571,22 @@ class PlayerWindow(QMainWindow):
         top_row.addWidget(self.update_button)
 
         layout.addLayout(top_row)
+
+        # --- スナップショット選択行 ---
+        snapshot_row = QHBoxLayout()
+        snapshot_row.setSpacing(2)
+        _snapshot_label = QLabel("Snapshot:")
+        _snapshot_label.setFixedWidth(_label_width)
+        snapshot_row.addWidget(_snapshot_label)
+        self.snapshot_combo = QComboBox(self)
+        self.snapshot_combo.setMinimumWidth(200)
+        snapshot_row.addWidget(self.snapshot_combo)
+        self.snapshot_latest_button = QPushButton("Latest")
+        self.snapshot_latest_button.setFixedWidth(60)
+        self.snapshot_latest_button.clicked.connect(lambda: self.snapshot_combo.setCurrentIndex(0))
+        snapshot_row.addWidget(self.snapshot_latest_button)
+        snapshot_row.addStretch(1)
+        layout.addLayout(snapshot_row)
 
         # --- キャッシュ情報行: SS/BL player_scores の最終読み込み日時と総スコア数 ---
         cache_info_row = QHBoxLayout()
@@ -663,6 +741,11 @@ class PlayerWindow(QMainWindow):
         self.star_table.horizontalHeader().setSectionsMovable(True)
         self.bl_star_table.horizontalHeader().setSectionsMovable(True)
 
+        # PP 列: 列内最大値を MAX として赤→青グラデーションバーを表示
+        perc_pp = ColumnMaxBarDelegate(self)
+        self.star_table.setItemDelegateForColumn(9, perc_pp)
+        self.bl_star_table.setItemDelegateForColumn(9, perc_pp)
+
         # BL Avg ACC 列の L/R トグル変数
         self._bl_acc_show_lr: bool = False
         self._current_bl_stats: list = []
@@ -717,6 +800,7 @@ class PlayerWindow(QMainWindow):
         self._last_player_id: Optional[str] = self._load_last_player_id()
 
         self.player_combo.currentIndexChanged.connect(self._on_player_changed)
+        self.snapshot_combo.currentIndexChanged.connect(self._on_snapshot_changed)
 
         self.reload_snapshots()
 
@@ -1262,8 +1346,34 @@ class PlayerWindow(QMainWindow):
     def _on_player_changed(self, *args) -> None:  # noqa: ANN002, ARG002
         """コンボボックスの選択変更時にビュー更新と選択プレイヤー保存を行う。"""
 
+        self._populate_snapshot_combo(self._current_player_id())
         self._update_view()
         self._save_last_player_id()
+
+    def _on_snapshot_changed(self, *args) -> None:  # noqa: ANN002, ARG002
+        """スナップショット選択変更時にビューを更新する。"""
+        self._update_view()
+
+    def _populate_snapshot_combo(self, steam_id: Optional[str]) -> None:
+        """指定プレイヤーのスナップショット一覧を snapshot_combo に設定する。先頭が最新。"""
+        self.snapshot_combo.blockSignals(True)
+        self.snapshot_combo.clear()
+        if steam_id:
+            snaps = self._snapshots_by_player.get(steam_id, [])
+            snaps_sorted = sorted(snaps, key=lambda s: s.taken_at, reverse=True)
+            for s in snaps_sorted:
+                try:
+                    t_str = s.taken_at
+                    if t_str.endswith("Z"):
+                        t_str = t_str[:-1]
+                    dt_utc = datetime.fromisoformat(t_str).replace(tzinfo=timezone.utc)
+                    dt_local = dt_utc.astimezone()
+                    label = dt_local.strftime("%Y-%m-%d %H:%M:%S")
+                except Exception:  # noqa: BLE001
+                    label = s.taken_at
+                self.snapshot_combo.addItem(label, s.taken_at)
+        self.snapshot_combo.setCurrentIndex(0)
+        self.snapshot_combo.blockSignals(False)
 
     def _update_view(self) -> None:
         # テーマ変更時に全テーブルのスタイルを更新する
@@ -1289,7 +1399,11 @@ class PlayerWindow(QMainWindow):
             return
 
         snaps.sort(key=lambda s: s.taken_at)
-        snap = snaps[-1]
+        selected_taken_at = self.snapshot_combo.currentData()
+        if selected_taken_at is None:
+            snap = snaps[-1]
+        else:
+            snap = next((s for s in snaps if s.taken_at == selected_taken_at), snaps[-1])
 
         # --- キャッシュ情報ラベル更新 ---
         ss_id = snap.scoresaber_id
@@ -1412,9 +1526,8 @@ class PlayerWindow(QMainWindow):
             snap.beatleader_rank_country,
         )
 
-        # 上段テーブル: Snapshot〜Name/Rank/ACC/Total/Ranked をフル表記で表示する
+        # 上段テーブル: Name/Rank/ACC/Total/Ranked をフル表記で表示する
         metrics = [
-            ("Snapshot Time", taken_text, None),
             ("SteamID", snap.steam_id, None),
             ("Name", ss_name_country, bl_name_country),
             ("PP", ss_pp_text, bl_pp_text),
