@@ -150,6 +150,48 @@ class PercentageBarDelegate(QStyledItemDelegate):
         super().paint(painter, option, index)
 
 
+class ColumnMaxBarDelegate(QStyledItemDelegate):
+    """Compare 画面の PP 列用: 列内最大値を MAX として青色の横棒グラフを描画する。"""
+
+    def _parse_value(self, text) -> Optional[float]:
+        try:
+            return float(str(text)) if text not in (None, "") else None
+        except (ValueError, TypeError):
+            return None
+
+    def _col_max(self, index) -> Optional[float]:
+        model = index.model()
+        if model is None:
+            return None
+        col = index.column()
+        last_row = model.rowCount() - 1
+        max_val: Optional[float] = None
+        for row in range(model.rowCount()):
+            if row == last_row:  # Total行は除外
+                continue
+            v = self._parse_value(model.data(model.index(row, col)))
+            if v is not None and (max_val is None or v > max_val):
+                max_val = v
+        return max_val
+
+    def paint(self, painter, option, index):  # type: ignore[override]
+        model = index.model()
+        if model is not None and index.row() == model.rowCount() - 1:
+            return super().paint(painter, option, index)
+        value = self._parse_value(index.data())
+        col_max = self._col_max(index)
+        if value is None or col_max is None or col_max <= 0:
+            return super().paint(painter, option, index)
+        ratio = max(0.0, min(1.0, value / col_max))
+        painter.save()
+        rect = option.rect.adjusted(1, 1, -1, -1)
+        bar_width = int(rect.width() * ratio)
+        bar_rect = rect.adjusted(0, 0, bar_width - rect.width(), 0)
+        painter.fillRect(bar_rect, QColor(0, 160, 255, 160))
+        painter.restore()
+        super().paint(painter, option, index)
+
+
 class SnapshotCompareDialog(QDialog):
     """2つのスナップショットを選んで、主要指標の差分を一覧表示するダイアログ。"""
 
@@ -257,7 +299,7 @@ class SnapshotCompareDialog(QDialog):
         header.resizeSection(3, 50)
 
         # 中央: ScoreSaber ★別（クリア数 + AvgAcc 比較）
-        self.ss_star_table = QTableWidget(0, 16, self._splitter)
+        self.ss_star_table = QTableWidget(0, 17, self._splitter)
         self.ss_star_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.ss_star_table.setStyleSheet(table_stylesheet())
         self.ss_star_table.verticalHeader().setDefaultSectionSize(14)  # 行の高さを少し詰める
@@ -265,13 +307,14 @@ class SnapshotCompareDialog(QDialog):
             "★",
             "A Clear",
             "B Clear",
-            "dClear",
-            "A AvgAcc",
-            "B AvgAcc",
-            "dAcc",
+            "ΔClear",
             "A FC",
             "B FC",
             "ΔFC",
+            "A AvgAcc",
+            "B AvgAcc",
+            "ΔAcc",
+            "★",
             "A PP",
             "B PP",
             "ΔPP",
@@ -281,44 +324,30 @@ class SnapshotCompareDialog(QDialog):
         ])
         ss_star_header = self.ss_star_table.horizontalHeader()
         ss_star_header.setStretchLastSection(False)
-        # ★と差分列などは内容に合わせて、A/B Clear 列は固定幅で少し広めにする
-        ss_star_header.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
-        ss_star_header.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
-        ss_star_header.setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
-        ss_star_header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
-        ss_star_header.setSectionResizeMode(4, QHeaderView.ResizeMode.Interactive)
-        ss_star_header.setSectionResizeMode(5, QHeaderView.ResizeMode.Interactive)
-        ss_star_header.setSectionResizeMode(6, QHeaderView.ResizeMode.ResizeToContents)
-        ss_star_header.setSectionResizeMode(7, QHeaderView.ResizeMode.Interactive)
-        ss_star_header.setSectionResizeMode(8, QHeaderView.ResizeMode.Interactive)
-        ss_star_header.setSectionResizeMode(9, QHeaderView.ResizeMode.ResizeToContents)
-        ss_star_header.setSectionResizeMode(10, QHeaderView.ResizeMode.Interactive)
-        ss_star_header.setSectionResizeMode(11, QHeaderView.ResizeMode.Interactive)
-        ss_star_header.setSectionResizeMode(12, QHeaderView.ResizeMode.ResizeToContents)
-        ss_star_header.setSectionResizeMode(13, QHeaderView.ResizeMode.Interactive)
-        ss_star_header.setSectionResizeMode(14, QHeaderView.ResizeMode.Interactive)
-        ss_star_header.setSectionResizeMode(15, QHeaderView.ResizeMode.ResizeToContents)
+        for _c in range(17):
+            ss_star_header.setSectionResizeMode(_c, QHeaderView.ResizeMode.Interactive)
+        ss_star_header.setSectionResizeMode(3,  QHeaderView.ResizeMode.ResizeToContents)
+        ss_star_header.setSectionResizeMode(6,  QHeaderView.ResizeMode.ResizeToContents)
+        ss_star_header.setSectionResizeMode(9,  QHeaderView.ResizeMode.ResizeToContents)
+        ss_star_header.setSectionResizeMode(13, QHeaderView.ResizeMode.ResizeToContents)
+        ss_star_header.setSectionResizeMode(16, QHeaderView.ResizeMode.ResizeToContents)
         ss_star_header.resizeSection(0, 35)
-        ss_star_header.resizeSection(1, 85)
-        ss_star_header.resizeSection(2, 85)
-        ss_star_header.resizeSection(3, 70)
-        ss_star_header.resizeSection(4, 85)
-        ss_star_header.resizeSection(5, 85)
-        ss_star_header.resizeSection(6, 70)
+        ss_star_header.resizeSection(1, 80)
+        ss_star_header.resizeSection(2, 80)
+        ss_star_header.resizeSection(4, 60)
+        ss_star_header.resizeSection(5, 60)
         ss_star_header.resizeSection(7, 85)
         ss_star_header.resizeSection(8, 85)
-        ss_star_header.resizeSection(9, 60)
-        ss_star_header.resizeSection(10, 65)
+        ss_star_header.resizeSection(10, 35)
         ss_star_header.resizeSection(11, 65)
         ss_star_header.resizeSection(12, 65)
-        ss_star_header.resizeSection(13, 65)
         ss_star_header.resizeSection(14, 65)
         ss_star_header.resizeSection(15, 65)
         # 下段★テーブルは行番号(No)が紛らわしいので非表示にする
         self.ss_star_table.verticalHeader().setVisible(False)
 
         # 右: BeatLeader ★別（クリア数 + AvgAcc 比較）
-        self.bl_star_table = QTableWidget(0, 16, self._splitter)
+        self.bl_star_table = QTableWidget(0, 17, self._splitter)
         self.bl_star_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.bl_star_table.setStyleSheet(table_stylesheet())
         self.bl_star_table.verticalHeader().setDefaultSectionSize(14)  # 行の高さを少し詰める
@@ -326,13 +355,14 @@ class SnapshotCompareDialog(QDialog):
             "★",
             "A Clear",
             "B Clear",
-            "dClear",
-            "A AvgAcc",
-            "B AvgAcc",
-            "dAcc",
+            "ΔClear",
             "A FC",
             "B FC",
             "ΔFC",
+            "A AvgAcc",
+            "B AvgAcc",
+            "ΔAcc(L / R)",
+            "★",
             "A PP",
             "B PP",
             "ΔPP",
@@ -342,36 +372,23 @@ class SnapshotCompareDialog(QDialog):
         ])
         bl_star_header = self.bl_star_table.horizontalHeader()
         bl_star_header.setStretchLastSection(False)
-        bl_star_header.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
-        bl_star_header.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
-        bl_star_header.setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
-        bl_star_header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
-        bl_star_header.setSectionResizeMode(4, QHeaderView.ResizeMode.Interactive)
-        bl_star_header.setSectionResizeMode(5, QHeaderView.ResizeMode.Interactive)
-        bl_star_header.setSectionResizeMode(6, QHeaderView.ResizeMode.ResizeToContents)
-        bl_star_header.setSectionResizeMode(7, QHeaderView.ResizeMode.Interactive)
-        bl_star_header.setSectionResizeMode(8, QHeaderView.ResizeMode.Interactive)
-        bl_star_header.setSectionResizeMode(9, QHeaderView.ResizeMode.ResizeToContents)
-        bl_star_header.setSectionResizeMode(10, QHeaderView.ResizeMode.Interactive)
-        bl_star_header.setSectionResizeMode(11, QHeaderView.ResizeMode.Interactive)
-        bl_star_header.setSectionResizeMode(12, QHeaderView.ResizeMode.ResizeToContents)
-        bl_star_header.setSectionResizeMode(13, QHeaderView.ResizeMode.Interactive)
-        bl_star_header.setSectionResizeMode(14, QHeaderView.ResizeMode.Interactive)
-        bl_star_header.setSectionResizeMode(15, QHeaderView.ResizeMode.ResizeToContents)
+        for _c in range(17):
+            bl_star_header.setSectionResizeMode(_c, QHeaderView.ResizeMode.Interactive)
+        bl_star_header.setSectionResizeMode(3,  QHeaderView.ResizeMode.ResizeToContents)
+        bl_star_header.setSectionResizeMode(6,  QHeaderView.ResizeMode.ResizeToContents)
+        bl_star_header.setSectionResizeMode(9,  QHeaderView.ResizeMode.ResizeToContents)
+        bl_star_header.setSectionResizeMode(13, QHeaderView.ResizeMode.ResizeToContents)
+        bl_star_header.setSectionResizeMode(16, QHeaderView.ResizeMode.ResizeToContents)
         bl_star_header.resizeSection(0, 35)
-        bl_star_header.resizeSection(1, 85)
-        bl_star_header.resizeSection(2, 85)
-        bl_star_header.resizeSection(3, 70)
-        bl_star_header.resizeSection(4, 85)
-        bl_star_header.resizeSection(5, 85)
-        bl_star_header.resizeSection(6, 70)
+        bl_star_header.resizeSection(1, 80)
+        bl_star_header.resizeSection(2, 80)
+        bl_star_header.resizeSection(4, 60)
+        bl_star_header.resizeSection(5, 60)
         bl_star_header.resizeSection(7, 85)
         bl_star_header.resizeSection(8, 85)
-        bl_star_header.resizeSection(9, 60)
-        bl_star_header.resizeSection(10, 65)
+        bl_star_header.resizeSection(10, 35)
         bl_star_header.resizeSection(11, 65)
         bl_star_header.resizeSection(12, 65)
-        bl_star_header.resizeSection(13, 65)
         bl_star_header.resizeSection(14, 65)
         bl_star_header.resizeSection(15, 65)
         self.bl_star_table.verticalHeader().setVisible(False)
@@ -379,25 +396,29 @@ class SnapshotCompareDialog(QDialog):
         # パーセンテージ列に横棒グラフを表示するデリゲートを適用
         perc_clear = PercentageBarDelegate(self, max_value=100.0, gradient_min=0.0)
         perc_acc = PercentageBarDelegate(self, max_value=100.0, gradient_min=75.0)
+        perc_pp = ColumnMaxBarDelegate(self)
 
+        # 新列順: ★|Clear群|FC群|AvgAcc群|★|PP群|★PP群
         # Clear 列 (A Clear / B Clear) のカッコ内の % と、AvgAcc 列にバーを表示する。
         # ScoreSaber 側
-        self.ss_star_table.setItemDelegateForColumn(1, perc_clear)
-        self.ss_star_table.setItemDelegateForColumn(2, perc_clear)
-        self.ss_star_table.setItemDelegateForColumn(4, perc_acc)
-        self.ss_star_table.setItemDelegateForColumn(5, perc_acc)
+        self.ss_star_table.setItemDelegateForColumn(1, perc_clear)   # A Clear
+        self.ss_star_table.setItemDelegateForColumn(2, perc_clear)   # B Clear
+        self.ss_star_table.setItemDelegateForColumn(4, perc_clear)   # A FC
+        self.ss_star_table.setItemDelegateForColumn(5, perc_clear)   # B FC
+        self.ss_star_table.setItemDelegateForColumn(7, perc_acc)     # A AvgAcc
+        self.ss_star_table.setItemDelegateForColumn(8, perc_acc)     # B AvgAcc
+        self.ss_star_table.setItemDelegateForColumn(11, perc_pp)     # A PP
+        self.ss_star_table.setItemDelegateForColumn(12, perc_pp)     # B PP
 
         # BeatLeader 側
-        self.bl_star_table.setItemDelegateForColumn(1, perc_clear)
-        self.bl_star_table.setItemDelegateForColumn(2, perc_clear)
-        self.bl_star_table.setItemDelegateForColumn(4, perc_acc)
-        self.bl_star_table.setItemDelegateForColumn(5, perc_acc)
-        self.bl_star_table.setItemDelegateForColumn(7, perc_clear)
-        self.bl_star_table.setItemDelegateForColumn(8, perc_clear)
-
-        # ScoreSaber FC 列
-        self.ss_star_table.setItemDelegateForColumn(7, perc_clear)
-        self.ss_star_table.setItemDelegateForColumn(8, perc_clear)
+        self.bl_star_table.setItemDelegateForColumn(1, perc_clear)   # A Clear
+        self.bl_star_table.setItemDelegateForColumn(2, perc_clear)   # B Clear
+        self.bl_star_table.setItemDelegateForColumn(4, perc_clear)   # A FC
+        self.bl_star_table.setItemDelegateForColumn(5, perc_clear)   # B FC
+        self.bl_star_table.setItemDelegateForColumn(7, perc_acc)     # A AvgAcc
+        self.bl_star_table.setItemDelegateForColumn(8, perc_acc)     # B AvgAcc
+        self.bl_star_table.setItemDelegateForColumn(11, perc_pp)     # A PP
+        self.bl_star_table.setItemDelegateForColumn(12, perc_pp)     # B PP
 
         root_layout.addWidget(self._splitter, 1)
         # デフォルトの分割比率
@@ -892,12 +913,13 @@ class SnapshotCompareDialog(QDialog):
             "A Clear",
             "B Clear",
             "ΔClear",
-            "A AvgAcc",
-            "B AvgAcc",
-            "ΔAcc",
             "A FC",
             "B FC",
             "ΔFC",
+            "A AvgAcc",
+            "B AvgAcc",
+            "ΔAcc",
+            "★",
             "A PP",
             "B PP",
             "ΔPP",
@@ -910,12 +932,13 @@ class SnapshotCompareDialog(QDialog):
             "A Clear",
             "B Clear",
             "ΔClear",
-            "A AvgAcc",
-            "B AvgAcc",
-            "ΔAcc(L / R)",
             "A FC",
             "B FC",
             "ΔFC",
+            "A AvgAcc",
+            "B AvgAcc",
+            "ΔAcc(L / R)",
+            "★",
             "A PP",
             "B PP",
             "ΔPP",
@@ -1495,13 +1518,36 @@ class SnapshotCompareDialog(QDialog):
 
             table.setItem(row, 3, diff_clear_item)
 
-            # AvgAcc
+            # FC 列 (新配置: 列4-6)
+            if fc_a is not None or fc_b is not None:
+                a_fc_val, a_fc_text = _normalize_pair(fc_a) if fc_a is not None else (None, "")
+                b_fc_val, b_fc_text = _normalize_pair(fc_b) if fc_b is not None else (None, "")
+                table.setItem(row, 4, QTableWidgetItem(a_fc_text))
+                table.setItem(row, 5, QTableWidgetItem(b_fc_text))
+
+                diff_fc_item = QTableWidgetItem("")
+                diff_fc_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                if isinstance(a_fc_val, (int, float)) and isinstance(b_fc_val, (int, float)):
+                    fc_diff = int(b_fc_val) - int(a_fc_val)
+                    diff_fc_item.setText(f"{fc_diff:+d}")
+                    if fc_diff > 0:
+                        diff_fc_item.setBackground(diff_positive_bg())
+                    elif fc_diff < 0:
+                        diff_fc_item.setBackground(diff_negative_bg())
+                    else:
+                        diff_fc_item.setBackground(diff_neutral_bg())
+                    diff_fc_item.setForeground(diff_text_color())
+                elif a_fc_val is not None or b_fc_val is not None:
+                    diff_fc_item.setText("-")
+                table.setItem(row, 6, diff_fc_item)
+
+            # AvgAcc (新配置: 列7-9)
             if a_avg_text == "":
                 a_avg_text = "0.00"
             if b_avg_text == "":
                 b_avg_text = "0.00"
-            table.setItem(row, 4, QTableWidgetItem(a_avg_text + "%"))
-            table.setItem(row, 5, QTableWidgetItem(b_avg_text + "%"))
+            table.setItem(row, 7, QTableWidgetItem(a_avg_text + "%"))
+            table.setItem(row, 8, QTableWidgetItem(b_avg_text + "%"))
 
             # ΔAcc (L/R 差分を付加する場合は括弧内に表示)
             diff_acc_item = QTableWidgetItem("")
@@ -1538,79 +1584,60 @@ class SnapshotCompareDialog(QDialog):
             elif a_avg_val is not None or b_avg_val is not None:
                 diff_acc_item.setText("-")
 
-            table.setItem(row, 6, diff_acc_item)
+            table.setItem(row, 9, diff_acc_item)
 
-            # FC 列 (列 7/8、ΔFC は列数が 10 以上の場合のみ列 9)
-            if fc_a is not None or fc_b is not None:
-                a_fc_val, a_fc_text = _normalize_pair(fc_a) if fc_a is not None else (None, "")
-                b_fc_val, b_fc_text = _normalize_pair(fc_b) if fc_b is not None else (None, "")
-                table.setItem(row, 7, QTableWidgetItem(a_fc_text))
-                table.setItem(row, 8, QTableWidgetItem(b_fc_text))
+            # ★列(繰り返し) 刔10 - star_item と同じ内容
+            star_repeat = QTableWidgetItem(label)
+            star_repeat.setBackground(label_cell_color())
+            star_repeat.setForeground(label_cell_text_color())
+            star_repeat.setTextAlignment(Qt.AlignmentFlag.AlignRight)
+            table.setItem(row, 10, star_repeat)
 
-                if table.columnCount() >= 10:
-                    diff_fc_item = QTableWidgetItem("")
-                    diff_fc_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-                    if isinstance(a_fc_val, (int, float)) and isinstance(b_fc_val, (int, float)):
-                        fc_diff = int(b_fc_val) - int(a_fc_val)
-                        diff_fc_item.setText(f"{fc_diff:+d}")
-                        if fc_diff > 0:
-                            diff_fc_item.setBackground(diff_positive_bg())
-                        elif fc_diff < 0:
-                            diff_fc_item.setBackground(diff_negative_bg())
-                        else:
-                            diff_fc_item.setBackground(diff_neutral_bg())
-                        diff_fc_item.setForeground(diff_text_color())
-                    elif a_fc_val is not None or b_fc_val is not None:
-                        diff_fc_item.setText("-")
-                    table.setItem(row, 9, diff_fc_item)
-
-            # PP 列 (列 10/11, ΔPP は列 12)
+            # PP 列 (新配置: 刔11-13)
             if pp_a is not None or pp_b is not None:
                 a_pp_val, a_pp_text = _normalize_pair(pp_a) if pp_a is not None else (None, "")
                 b_pp_val, b_pp_text = _normalize_pair(pp_b) if pp_b is not None else (None, "")
-                table.setItem(row, 10, QTableWidgetItem(a_pp_text))
-                table.setItem(row, 11, QTableWidgetItem(b_pp_text))
+                table.setItem(row, 11, QTableWidgetItem(a_pp_text))
+                table.setItem(row, 12, QTableWidgetItem(b_pp_text))
 
-                if table.columnCount() >= 13:
-                    diff_pp_item = QTableWidgetItem("")
-                    diff_pp_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-                    if isinstance(a_pp_val, (int, float)) and isinstance(b_pp_val, (int, float)):
-                        pp_diff = b_pp_val - a_pp_val
-                        diff_pp_item.setText(f"{pp_diff:+.0f}")
-                        if pp_diff > 0:
-                            diff_pp_item.setBackground(diff_positive_bg())
-                        elif pp_diff < 0:
-                            diff_pp_item.setBackground(diff_negative_bg())
-                        else:
-                            diff_pp_item.setBackground(diff_neutral_bg())
-                        diff_pp_item.setForeground(diff_text_color())
-                    elif a_pp_val is not None or b_pp_val is not None:
-                        diff_pp_item.setText("-")
-                    table.setItem(row, 12, diff_pp_item)
+                diff_pp_item = QTableWidgetItem("")
+                diff_pp_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                if isinstance(a_pp_val, (int, float)) and isinstance(b_pp_val, (int, float)):
+                    pp_diff = b_pp_val - a_pp_val
+                    diff_pp_item.setText(f"{pp_diff:+.0f}")
+                    if pp_diff > 0:
+                        diff_pp_item.setBackground(diff_positive_bg())
+                    elif pp_diff < 0:
+                        diff_pp_item.setBackground(diff_negative_bg())
+                    else:
+                        diff_pp_item.setBackground(diff_neutral_bg())
+                    diff_pp_item.setForeground(diff_text_color())
+                elif a_pp_val is not None or b_pp_val is not None:
+                    diff_pp_item.setText("-")
+                table.setItem(row, 13, diff_pp_item)
 
-            # Solo PP 列 (列 13/14, ΔSolo は列 15)
+            # Solo PP 列 (新配置: 刔14-16)
             if pp_solo_a is not None or pp_solo_b is not None:
                 a_sp_val, a_sp_text = _normalize_pair(pp_solo_a) if pp_solo_a is not None else (None, "")
                 b_sp_val, b_sp_text = _normalize_pair(pp_solo_b) if pp_solo_b is not None else (None, "")
-                table.setItem(row, 13, QTableWidgetItem(a_sp_text))
-                table.setItem(row, 14, QTableWidgetItem(b_sp_text))
+                table.setItem(row, 14, QTableWidgetItem(a_sp_text))
+                table.setItem(row, 15, QTableWidgetItem(b_sp_text))
 
-                if table.columnCount() >= 16:
-                    diff_sp_item = QTableWidgetItem("")
-                    diff_sp_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-                    if isinstance(a_sp_val, (int, float)) and isinstance(b_sp_val, (int, float)):
-                        sp_diff = b_sp_val - a_sp_val
-                        diff_sp_item.setText(f"{sp_diff:+.0f}")
-                        if sp_diff > 0:
-                            diff_sp_item.setBackground(diff_positive_bg())
-                        elif sp_diff < 0:
-                            diff_sp_item.setBackground(diff_negative_bg())
-                        else:
-                            diff_sp_item.setBackground(diff_neutral_bg())
-                        diff_sp_item.setForeground(diff_text_color())
-                    elif a_sp_val is not None or b_sp_val is not None:
-                        diff_sp_item.setText("-")
-                    table.setItem(row, 15, diff_sp_item)
+                diff_sp_item = QTableWidgetItem("")
+                diff_sp_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                if isinstance(a_sp_val, (int, float)) and isinstance(b_sp_val, (int, float)):
+                    sp_diff = b_sp_val - a_sp_val
+                    diff_sp_item.setText(f"{sp_diff:+.0f}")
+                    if sp_diff > 0:
+                        diff_sp_item.setBackground(diff_positive_bg())
+                    elif sp_diff < 0:
+                        diff_sp_item.setBackground(diff_negative_bg())
+                    else:
+                        diff_sp_item.setBackground(diff_neutral_bg())
+                    diff_sp_item.setForeground(diff_text_color())
+                elif a_sp_val is not None or b_sp_val is not None:
+                    diff_sp_item.setText("-")
+                table.setItem(row, 16, diff_sp_item)
 
         # ScoreSaber 側テーブル
         stars_ss = sorted({s.star for s in ss_stats_a} | {s.star for s in ss_stats_b})
