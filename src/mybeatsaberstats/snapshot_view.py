@@ -1480,15 +1480,18 @@ class SnapshotCompareDialog(QDialog):
             return None
 
         def _avg_acc_star_value_and_text(stats, star: int):
-            """指定★帯の平均精度(%)を数値＋表示文字列のタプルで返す。"""
+            """指定★帯の平均精度(%)を数値＋表示文字列のタプルで返す。
+
+            stats が空でなければ（=このスナップはデータ取得済み）、
+            ★エントリが存在しない or average_acc が None の場合は (0, "0.00") を返す。
+            stats が空の場合のみ None（データ未取得）を返す。
+            """
 
             for s in stats:
                 if getattr(s, "star", None) == star:
                     avg = getattr(s, "average_acc", None)
-                    if avg is None:
-                        return None
-                    return avg, f"{avg:.2f}"
-            return None
+                    return (avg, f"{avg:.2f}") if avg is not None else (0, "0.00")
+            return (0, "0.00") if stats else None
 
         def _avg_acc_left_star_value_and_text(stats, star: int):
             """指定★帯の左手平均精度(%)を数値＋表示文字列のタプルで返す（BL専用）。"""
@@ -1553,15 +1556,21 @@ class SnapshotCompareDialog(QDialog):
             return avg_acc, f"{avg_acc:.2f}"
 
         def _pp_star_value_and_text(stats, star: int):
-            """指定★帯の pp_contribution を数値＋表示文字列のタプルで返す。"""
+            """指定★帯の pp_contribution を数値＋表示文字列のタプルで返す。
 
+            fc_count が設定済みのエントリがある（新フォーマット = PP 集計済み）場合に限り、
+            ★エントリなし or pp_contribution が None → (0, "0") を返す。
+            旧フォーマット（fc_count がすべて None）なら None を返す。
+            """
+
+            new_fmt = any(getattr(s, "fc_count", None) is not None for s in stats)
             for s in stats:
                 if getattr(s, "star", None) == star:
                     pp = getattr(s, "pp_contribution", None)
                     if pp is None:
-                        return None
+                        return (0, "0") if new_fmt else None
                     return pp, f"{pp:,.0f}"
-            return None
+            return (0, "0") if new_fmt else None
 
         def _pp_total_value_and_text(stats):
             """全★帯合計 pp_contribution を数値＋表示文字列のタプルで返す。"""
@@ -1575,15 +1584,21 @@ class SnapshotCompareDialog(QDialog):
             return total_pp, f"{total_pp:,.0f}"
 
         def _pp_solo_star_value_and_text(stats, star: int):
-            """指定★帯の pp_solo を数値＋表示文字列のタプルで返す。"""
+            """指定★帯の pp_solo を数値＋表示文字列のタプルで返す。
 
+            fc_count が設定済みのエントリがある（新フォーマット = PP 集計済み）場合に限り、
+            ★エントリなし or pp_solo が None → (0, "0") を返す。
+            旧フォーマット（fc_count がすべて None）なら None を返す。
+            """
+
+            new_fmt = any(getattr(s, "fc_count", None) is not None for s in stats)
             for s in stats:
                 if getattr(s, "star", None) == star:
                     pp = getattr(s, "pp_solo", None)
                     if pp is None:
-                        return None
+                        return (0, "0") if new_fmt else None
                     return pp, f"{pp:,.0f}"
-            return None
+            return (0, "0") if new_fmt else None
 
         def _pp_solo_total_value_and_text(stats):
             """全★帯合計 pp_solo を数値＋表示文字列のタプルで返す。"""
@@ -1636,8 +1651,6 @@ class SnapshotCompareDialog(QDialog):
 
             a_clear_val, a_clear_text = _normalize_pair(clear_a)
             b_clear_val, b_clear_text = _normalize_pair(clear_b)
-            a_avg_val, a_avg_text = _normalize_pair(avg_a)
-            b_avg_val, b_avg_text = _normalize_pair(avg_b)
 
             # Clear 数
             table.setItem(row, 1, QTableWidgetItem(a_clear_text))
@@ -1690,47 +1703,50 @@ class SnapshotCompareDialog(QDialog):
                 table.setItem(row, 6, diff_fc_item)
 
             # AvgAcc (新配置: 列7-9)
-            if a_avg_text == "":
-                a_avg_text = "0.00"
-            if b_avg_text == "":
-                b_avg_text = "0.00"
-            table.setItem(row, 7, QTableWidgetItem(a_avg_text + "%"))
-            table.setItem(row, 8, QTableWidgetItem(b_avg_text + "%"))
+            # AvgAcc: 両方 None なら FC 同様にセルを設定しない（空白）
+            if avg_a is not None or avg_b is not None:
+                a_avg_val, a_avg_text = _normalize_pair(avg_a) if avg_a is not None else (None, "")
+                b_avg_val, b_avg_text = _normalize_pair(avg_b) if avg_b is not None else (None, "")
+                a_avg_display = (a_avg_text + "%") if isinstance(a_avg_val, (int, float)) else ""
+                b_avg_display = (b_avg_text + "%") if isinstance(b_avg_val, (int, float)) else ""
+                table.setItem(row, 7, QTableWidgetItem(a_avg_display))
+                table.setItem(row, 8, QTableWidgetItem(b_avg_display))
 
-            # ΔAcc (L/R 差分を付加する場合は括弧内に表示)
-            diff_acc_item = QTableWidgetItem("")
-            diff_acc_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-            a_avg_val_eff = a_avg_val if isinstance(a_avg_val, (int, float)) else 0.0
-            b_avg_val_eff = b_avg_val if isinstance(b_avg_val, (int, float)) else 0.0
-            diff = b_avg_val_eff - a_avg_val_eff
-            diff_text = f"{diff:+.2f}%"
+                # ΔAcc (L/R 差分を付加する場合は括弧内に表示)
+                diff_acc_item = QTableWidgetItem("")
+                diff_acc_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+                if isinstance(a_avg_val, (int, float)) and isinstance(b_avg_val, (int, float)):
+                    diff = b_avg_val - a_avg_val
+                    diff_text = f"{diff:+.2f}%"
 
-            # L/R が渡されている場合は括弧内に付加する
-            a_left_val, _ = _normalize_pair(avg_left_a)
-            b_left_val, _ = _normalize_pair(avg_left_b)
-            a_right_val, _ = _normalize_pair(avg_right_a)
-            b_right_val, _ = _normalize_pair(avg_right_b)
-            if isinstance(a_left_val, (int, float)) and isinstance(b_left_val, (int, float)):
-                al = a_left_val
-                bl_v = b_left_val
-                ar = a_right_val if isinstance(a_right_val, (int, float)) else 0.0
-                br = b_right_val if isinstance(b_right_val, (int, float)) else 0.0
-                ld = bl_v - al
-                rd = br - ar
-                # 両方に L/R データがある場合のみ括弧内に差分を表示する
-                diff_text += f"({ld:+.2f}/{rd:+.2f})"
+                    # L/R が渡されている場合は括弧内に付加する
+                    a_left_val, _ = _normalize_pair(avg_left_a)
+                    b_left_val, _ = _normalize_pair(avg_left_b)
+                    a_right_val, _ = _normalize_pair(avg_right_a)
+                    b_right_val, _ = _normalize_pair(avg_right_b)
+                    if isinstance(a_left_val, (int, float)) and isinstance(b_left_val, (int, float)):
+                        al = a_left_val
+                        bl_v = b_left_val
+                        ar = a_right_val if isinstance(a_right_val, (int, float)) else 0.0
+                        br = b_right_val if isinstance(b_right_val, (int, float)) else 0.0
+                        ld = bl_v - al
+                        rd = br - ar
+                        # 両方に L/R データがある場合のみ括弧内に差分を表示する
+                        diff_text += f"({ld:+.2f}/{rd:+.2f})"
 
-            diff_acc_item.setText(diff_text)
-            if diff > 0:
-                color = diff_positive_bg()
-            elif diff < 0:
-                color = diff_negative_bg()
-            else:
-                color = diff_neutral_bg()
-            diff_acc_item.setBackground(color)
-            diff_acc_item.setForeground(diff_text_color())
+                    diff_acc_item.setText(diff_text)
+                    if diff > 0:
+                        color = diff_positive_bg()
+                    elif diff < 0:
+                        color = diff_negative_bg()
+                    else:
+                        color = diff_neutral_bg()
+                    diff_acc_item.setBackground(color)
+                    diff_acc_item.setForeground(diff_text_color())
+                elif a_avg_val is not None or b_avg_val is not None:
+                    diff_acc_item.setText("-")
 
-            table.setItem(row, 9, diff_acc_item)
+                table.setItem(row, 9, diff_acc_item)
 
             # ★列(繰り返し) 刔10 - star_item と同じ内容
             star_repeat = QTableWidgetItem(label)
@@ -1739,47 +1755,51 @@ class SnapshotCompareDialog(QDialog):
             star_repeat.setTextAlignment(Qt.AlignmentFlag.AlignRight)
             table.setItem(row, 10, star_repeat)
 
-            # PP 列 (新配置: 刔11-13)
-            a_pp_val, a_pp_text = _normalize_pair(pp_a) if pp_a is not None else (0, "0")
-            b_pp_val, b_pp_text = _normalize_pair(pp_b) if pp_b is not None else (0, "0")
-            table.setItem(row, 11, QTableWidgetItem(a_pp_text))
-            table.setItem(row, 12, QTableWidgetItem(b_pp_text))
+            # PP 列 (新配置: 刔11-13) — 両方 None なら FC 同様に空白
+            if pp_a is not None or pp_b is not None:
+                a_pp_val, a_pp_text = _normalize_pair(pp_a) if pp_a is not None else (None, "")
+                b_pp_val, b_pp_text = _normalize_pair(pp_b) if pp_b is not None else (None, "")
+                table.setItem(row, 11, QTableWidgetItem(a_pp_text))
+                table.setItem(row, 12, QTableWidgetItem(b_pp_text))
 
-            diff_pp_item = QTableWidgetItem("")
-            diff_pp_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            a_pp_eff = a_pp_val if isinstance(a_pp_val, (int, float)) else 0
-            b_pp_eff = b_pp_val if isinstance(b_pp_val, (int, float)) else 0
-            pp_diff = b_pp_eff - a_pp_eff
-            diff_pp_item.setText(f"{pp_diff:+.0f}")
-            if pp_diff > 0:
-                diff_pp_item.setBackground(diff_positive_bg())
-            elif pp_diff < 0:
-                diff_pp_item.setBackground(diff_negative_bg())
-            else:
-                diff_pp_item.setBackground(diff_neutral_bg())
-            diff_pp_item.setForeground(diff_text_color())
-            table.setItem(row, 13, diff_pp_item)
+                diff_pp_item = QTableWidgetItem("")
+                diff_pp_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                if isinstance(a_pp_val, (int, float)) and isinstance(b_pp_val, (int, float)):
+                    pp_diff = b_pp_val - a_pp_val
+                    diff_pp_item.setText(f"{pp_diff:+.0f}")
+                    if pp_diff > 0:
+                        diff_pp_item.setBackground(diff_positive_bg())
+                    elif pp_diff < 0:
+                        diff_pp_item.setBackground(diff_negative_bg())
+                    else:
+                        diff_pp_item.setBackground(diff_neutral_bg())
+                    diff_pp_item.setForeground(diff_text_color())
+                elif a_pp_val is not None or b_pp_val is not None:
+                    diff_pp_item.setText("-")
+                table.setItem(row, 13, diff_pp_item)
 
-            # Solo PP 列 (新配置: 刔14-16)
-            a_sp_val, a_sp_text = _normalize_pair(pp_solo_a) if pp_solo_a is not None else (0, "0")
-            b_sp_val, b_sp_text = _normalize_pair(pp_solo_b) if pp_solo_b is not None else (0, "0")
-            table.setItem(row, 14, QTableWidgetItem(a_sp_text))
-            table.setItem(row, 15, QTableWidgetItem(b_sp_text))
+            # Solo PP 列 (新配置: 刔14-16) — 両方 None なら FC 同様に空白
+            if pp_solo_a is not None or pp_solo_b is not None:
+                a_sp_val, a_sp_text = _normalize_pair(pp_solo_a) if pp_solo_a is not None else (None, "")
+                b_sp_val, b_sp_text = _normalize_pair(pp_solo_b) if pp_solo_b is not None else (None, "")
+                table.setItem(row, 14, QTableWidgetItem(a_sp_text))
+                table.setItem(row, 15, QTableWidgetItem(b_sp_text))
 
-            diff_sp_item = QTableWidgetItem("")
-            diff_sp_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            a_sp_eff = a_sp_val if isinstance(a_sp_val, (int, float)) else 0
-            b_sp_eff = b_sp_val if isinstance(b_sp_val, (int, float)) else 0
-            sp_diff = b_sp_eff - a_sp_eff
-            diff_sp_item.setText(f"{sp_diff:+.0f}")
-            if sp_diff > 0:
-                diff_sp_item.setBackground(diff_positive_bg())
-            elif sp_diff < 0:
-                diff_sp_item.setBackground(diff_negative_bg())
-            else:
-                diff_sp_item.setBackground(diff_neutral_bg())
-            diff_sp_item.setForeground(diff_text_color())
-            table.setItem(row, 16, diff_sp_item)
+                diff_sp_item = QTableWidgetItem("")
+                diff_sp_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                if isinstance(a_sp_val, (int, float)) and isinstance(b_sp_val, (int, float)):
+                    sp_diff = b_sp_val - a_sp_val
+                    diff_sp_item.setText(f"{sp_diff:+.0f}")
+                    if sp_diff > 0:
+                        diff_sp_item.setBackground(diff_positive_bg())
+                    elif sp_diff < 0:
+                        diff_sp_item.setBackground(diff_negative_bg())
+                    else:
+                        diff_sp_item.setBackground(diff_neutral_bg())
+                    diff_sp_item.setForeground(diff_text_color())
+                elif a_sp_val is not None or b_sp_val is not None:
+                    diff_sp_item.setText("-")
+                table.setItem(row, 16, diff_sp_item)
 
         # ScoreSaber 側テーブル
         stars_ss = sorted({s.star for s in ss_stats_a} | {s.star for s in ss_stats_b})
