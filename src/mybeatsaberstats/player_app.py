@@ -461,7 +461,9 @@ class ColumnMaxBarDelegate(QStyledItemDelegate):
 
     def _parse_value(self, text) -> Optional[float]:
         try:
-            return float(str(text)) if text not in (None, "") else None
+            if text in (None, ""):
+                return None
+            return float(str(text).replace(",", ""))
         except (ValueError, TypeError):
             return None
 
@@ -1468,13 +1470,13 @@ class PlayerWindow(QMainWindow):
         ss_meta = self._read_score_cache_meta(f"scoresaber_player_scores_{ss_id}.json") if ss_id else None
         bl_meta = self._read_score_cache_meta(f"beatleader_player_scores_{bl_id}.json")
         if ss_meta:
-            self._ss_cache_label.setText(f"SS scores: {ss_meta[1]} maps  (fetched: {ss_meta[0]})")
+            self._ss_cache_label.setText(f"／ SS scores: {ss_meta[1]:,} maps  (fetched: {ss_meta[0]})")
         else:
-            self._ss_cache_label.setText("SS scores: -")
+            self._ss_cache_label.setText("／ SS scores: -")
         if bl_meta:
-            self._bl_cache_label.setText(f"BL scores: {bl_meta[1]} maps  (fetched: {bl_meta[0]})")
+            self._bl_cache_label.setText(f"／ BL scores: {bl_meta[1]:,} maps  (fetched: {bl_meta[0]})")
         else:
-            self._bl_cache_label.setText("BL scores: -")
+            self._bl_cache_label.setText("／ BL scores: -")
 
         # Snapshot の取得時刻をローカル時刻に変換して表示用文字列を作る
         taken_text = snap.taken_at
@@ -1500,8 +1502,8 @@ class PlayerWindow(QMainWindow):
 
         # ScoreSaber / BeatLeader で対になる指標が一目で分かるよう、
         # 同じ行番号に同じ Metric 名を並べる 1 表構成にする。
-        ss_pp_text = f"{snap.scoresaber_pp:.2f}" if snap.scoresaber_pp is not None else None
-        bl_pp_text = f"{snap.beatleader_pp:.2f}" if snap.beatleader_pp is not None else None
+        ss_pp_text = f"{snap.scoresaber_pp:,.2f}" if snap.scoresaber_pp is not None else None
+        bl_pp_text = f"{snap.beatleader_pp:,.2f}" if snap.beatleader_pp is not None else None
 
         ss_acc_text = (
             f"{snap.scoresaber_average_ranked_acc:.2f}"
@@ -1519,9 +1521,9 @@ class PlayerWindow(QMainWindow):
         if snap.scoresaber_ranked_play_count is None:
             ranked_play_ss_text = None
         elif total_ranked_maps > 0:
-            ranked_play_ss_text = f"{snap.scoresaber_ranked_play_count}/{total_ranked_maps}"
+            ranked_play_ss_text = f"{snap.scoresaber_ranked_play_count:,}/{total_ranked_maps:,}"
         else:
-            ranked_play_ss_text = str(snap.scoresaber_ranked_play_count)
+            ranked_play_ss_text = f"{snap.scoresaber_ranked_play_count:,}"
 
         # BeatLeader Ranked Play Count も同様に / で総数を表示する。
         # BeatLeader 側の「総 Ranked 譜面数」は、BeatLeader★統計から算出した
@@ -1530,9 +1532,9 @@ class PlayerWindow(QMainWindow):
         if snap.beatleader_ranked_play_count is None:
             ranked_play_bl_text = None
         elif bl_total_maps_for_ranked > 0:
-            ranked_play_bl_text = f"{snap.beatleader_ranked_play_count}/{bl_total_maps_for_ranked}"
+            ranked_play_bl_text = f"{snap.beatleader_ranked_play_count:,}/{bl_total_maps_for_ranked:,}"
         else:
-            ranked_play_bl_text = str(snap.beatleader_ranked_play_count)
+            ranked_play_bl_text = f"{snap.beatleader_ranked_play_count:,}"
 
         # 国コードから国旗絵文字(🇯🇵など)を生成する
         def _country_flag(code: Optional[str]) -> Optional[str]:
@@ -1563,13 +1565,13 @@ class PlayerWindow(QMainWindow):
 
             parts: list[str] = []
             if global_rank is not None:
-                parts.append(str(global_rank))
+                parts.append(f"{global_rank:,}")
             if country and country_rank is not None:
                 flag = _country_flag(country)
                 if flag:
-                    parts.append(f"({flag} {country_rank})")
+                    parts.append(f"({flag} {country_rank:,})")
                 else:
-                    parts.append(f"({country} {country_rank})")
+                    parts.append(f"({country} {country_rank:,})")
             return " ".join(parts) if parts else None
 
         ss_rank_text = _format_rank(
@@ -1610,7 +1612,7 @@ class PlayerWindow(QMainWindow):
             tbl.setItem(0, 2, _lbl("Rank"))
             tbl.setItem(0, 3, _val(rank_val))
             tbl.setItem(0, 4, _lbl("Total Play Count"))
-            tbl.setItem(0, 5, _val(total_val))
+            tbl.setItem(0, 5, QTableWidgetItem(f"{total_val:,}" if total_val is not None else ""))
             # 行1: ["Name" | Name値 | "Avg ACC" | Avg ACC値 | "Ranked" | Ranked値]
             tbl.setItem(1, 0, _lbl("Name"))
             tbl.setItem(1, 1, _val(name_val))
@@ -1684,8 +1686,8 @@ class PlayerWindow(QMainWindow):
             if plays is None:
                 return None
             if total_maps is not None and total_maps > 0:
-                return f"{plays}/{total_maps}"
-            return str(plays)
+                return f"{plays:,}/{total_maps:,}"
+            return f"{plays:,}"
 
         # Snapshot から AP を取得し、True/Standard/Tech の合計を Overall として表示する。
         true_ap = snap.accsaber_true_ap
@@ -1700,7 +1702,7 @@ class PlayerWindow(QMainWindow):
         def _format_ap(value: Optional[float]) -> Optional[str]:
             if value is None:
                 return None
-            return f"{value:.2f}"
+            return f"{value:,.2f}"
 
         acc_rows = [
             (
@@ -1854,12 +1856,12 @@ class PlayerWindow(QMainWindow):
             star_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
             self.star_table.setItem(row, 0, star_item)
-            self.star_table.setItem(row, 1, QTableWidgetItem(str(s.map_count)))
+            self.star_table.setItem(row, 1, QTableWidgetItem(f"{s.map_count:,}"))
             # 右寄せ
             item1 = self.star_table.item(row, 1)
             if item1 is not None:
                 item1.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            self.star_table.setItem(row, 2, QTableWidgetItem(str(s.clear_count)))
+            self.star_table.setItem(row, 2, QTableWidgetItem(f"{s.clear_count:,}"))
             item2 = self.star_table.item(row, 2)
             if item2 is not None:
                 item2.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
@@ -1867,7 +1869,7 @@ class PlayerWindow(QMainWindow):
             percent_text = f"{s.clear_rate * 100:.1f}" if s.map_count > 0 else ""
             self.star_table.setItem(row, 3, QTableWidgetItem(percent_text))
 
-            fc_item = QTableWidgetItem(str(getattr(s, "fc_count", None) or 0))
+            fc_item = QTableWidgetItem(f"{getattr(s, 'fc_count', None) or 0:,}")
             fc_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             self.star_table.setItem(row, 4, fc_item)
 
@@ -1888,23 +1890,23 @@ class PlayerWindow(QMainWindow):
             avg_acc_text = f"{s.average_acc:.2f}" if getattr(s, "average_acc", None) is not None else ("0.00" if s.map_count > 0 else "")
             self.star_table.setItem(row, 6, QTableWidgetItem(avg_acc_text))
 
-            self.star_table.setItem(row, 7, QTableWidgetItem(str(s.nf_count)))
+            self.star_table.setItem(row, 7, QTableWidgetItem(f"{s.nf_count:,}"))
             item7 = self.star_table.item(row, 7)
             if item7 is not None:
                 item7.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            self.star_table.setItem(row, 8, QTableWidgetItem(str(s.ss_count)))
+            self.star_table.setItem(row, 8, QTableWidgetItem(f"{s.ss_count:,}"))
             item8 = self.star_table.item(row, 8)
             if item8 is not None:
                 item8.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
             pp_val = getattr(s, "pp_contribution", None)
-            pp_text = f"{pp_val:.0f}" if pp_val is not None else ""
+            pp_text = f"{pp_val:,.0f}" if pp_val is not None else "0"
             pp_item = QTableWidgetItem(pp_text)
             pp_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             self.star_table.setItem(row, 9, pp_item)
 
             pp_solo_val = getattr(s, "pp_solo", None)
-            pp_solo_text = f"{pp_solo_val:.0f}" if pp_solo_val is not None else ""
+            pp_solo_text = f"{pp_solo_val:,.0f}" if pp_solo_val is not None else "0"
             pp_solo_item = QTableWidgetItem(pp_solo_text)
             pp_solo_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             self.star_table.setItem(row, 10, pp_solo_item)
@@ -1922,15 +1924,15 @@ class PlayerWindow(QMainWindow):
             total_item.setBackground(label_cell_color())
             total_item.setForeground(label_cell_text_color())
             self.star_table.setItem(total_row, 0, total_item)
-            self.star_table.setItem(total_row, 1, QTableWidgetItem(str(total_maps)))
-            self.star_table.setItem(total_row, 2, QTableWidgetItem(str(total_clears)))
+            self.star_table.setItem(total_row, 1, QTableWidgetItem(f"{total_maps:,}"))
+            self.star_table.setItem(total_row, 2, QTableWidgetItem(f"{total_clears:,}"))
             if total_maps > 0:
                 total_clear_rate = total_clears / total_maps
                 percent_text = f"{total_clear_rate * 100:.1f}"
             else:
                 percent_text = ""
             self.star_table.setItem(total_row, 3, QTableWidgetItem(percent_text))
-            fc_total_item = QTableWidgetItem(str(total_fc))
+            fc_total_item = QTableWidgetItem(f"{total_fc:,}")
             fc_total_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             self.star_table.setItem(total_row, 4, fc_total_item)
 
@@ -1948,20 +1950,20 @@ class PlayerWindow(QMainWindow):
                 total_avg_text = ""
             self.star_table.setItem(total_row, 6, QTableWidgetItem(total_avg_text))
 
-            nf_total_item = QTableWidgetItem(str(total_nf))
+            nf_total_item = QTableWidgetItem(f"{total_nf:,}")
             nf_total_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             self.star_table.setItem(total_row, 7, nf_total_item)
-            ss_total_item = QTableWidgetItem(str(total_ss))
+            ss_total_item = QTableWidgetItem(f"{total_ss:,}")
             ss_total_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             self.star_table.setItem(total_row, 8, ss_total_item)
 
             total_pp: float = sum(s.pp_contribution or 0.0 for s in stats)
-            pp_total_item = QTableWidgetItem(f"{total_pp:.0f}" if total_pp else "")
+            pp_total_item = QTableWidgetItem(f"{total_pp:,.0f}")
             pp_total_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             self.star_table.setItem(total_row, 9, pp_total_item)
 
             total_solo_pp: float = sum(s.pp_solo or 0.0 for s in stats)
-            pp_solo_total_item = QTableWidgetItem(f"{total_solo_pp:.0f}" if total_solo_pp else "")
+            pp_solo_total_item = QTableWidgetItem(f"{total_solo_pp:,.0f}")
             pp_solo_total_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             self.star_table.setItem(total_row, 10, pp_solo_total_item)
 
@@ -1985,11 +1987,11 @@ class PlayerWindow(QMainWindow):
             star_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
             self.bl_star_table.setItem(row, 0, star_item)
-            self.bl_star_table.setItem(row, 1, QTableWidgetItem(str(s.map_count)))
+            self.bl_star_table.setItem(row, 1, QTableWidgetItem(f"{s.map_count:,}"))
             item1 = self.bl_star_table.item(row, 1)
             if item1 is not None:
                 item1.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            self.bl_star_table.setItem(row, 2, QTableWidgetItem(str(s.clear_count)))
+            self.bl_star_table.setItem(row, 2, QTableWidgetItem(f"{s.clear_count:,}"))
             item2 = self.bl_star_table.item(row, 2)
             if item2 is not None:
                 item2.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
@@ -1997,7 +1999,7 @@ class PlayerWindow(QMainWindow):
             percent_text = f"{s.clear_rate * 100:.1f}" if s.map_count > 0 else ""
             self.bl_star_table.setItem(row, 3, QTableWidgetItem(percent_text))
 
-            bl_fc_item = QTableWidgetItem(str(getattr(s, "fc_count", None) or 0))
+            bl_fc_item = QTableWidgetItem(f"{getattr(s, 'fc_count', None) or 0:,}")
             bl_fc_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             self.bl_star_table.setItem(row, 4, bl_fc_item)
 
@@ -2022,23 +2024,23 @@ class PlayerWindow(QMainWindow):
                 acc_item.setData(Qt.ItemDataRole.UserRole, float(avg_acc_val))
             self.bl_star_table.setItem(row, 6, acc_item)
 
-            self.bl_star_table.setItem(row, 7, QTableWidgetItem(str(s.nf_count)))
+            self.bl_star_table.setItem(row, 7, QTableWidgetItem(f"{s.nf_count:,}"))
             item7_bl = self.bl_star_table.item(row, 7)
             if item7_bl is not None:
                 item7_bl.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            self.bl_star_table.setItem(row, 8, QTableWidgetItem(str(s.ss_count)))
+            self.bl_star_table.setItem(row, 8, QTableWidgetItem(f"{s.ss_count:,}"))
             item8_bl = self.bl_star_table.item(row, 8)
             if item8_bl is not None:
                 item8_bl.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
             bl_pp_val = getattr(s, "pp_contribution", None)
-            bl_pp_text = f"{bl_pp_val:.0f}" if bl_pp_val is not None else ""
+            bl_pp_text = f"{bl_pp_val:,.0f}" if bl_pp_val is not None else "0"
             bl_pp_item = QTableWidgetItem(bl_pp_text)
             bl_pp_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             self.bl_star_table.setItem(row, 9, bl_pp_item)
 
             bl_pp_solo_val = getattr(s, "pp_solo", None)
-            bl_pp_solo_text = f"{bl_pp_solo_val:.0f}" if bl_pp_solo_val is not None else ""
+            bl_pp_solo_text = f"{bl_pp_solo_val:,.0f}" if bl_pp_solo_val is not None else "0"
             bl_pp_solo_item = QTableWidgetItem(bl_pp_solo_text)
             bl_pp_solo_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             self.bl_star_table.setItem(row, 10, bl_pp_solo_item)
@@ -2058,12 +2060,12 @@ class PlayerWindow(QMainWindow):
             total_item.setBackground(label_cell_color())
             total_item.setForeground(label_cell_text_color())
             self.bl_star_table.setItem(bl_total_row, 0, total_item)
-            self.bl_star_table.setItem(bl_total_row, 1, QTableWidgetItem(str(bl_total_maps)))
-            self.bl_star_table.setItem(bl_total_row, 2, QTableWidgetItem(str(bl_total_clears)))
+            self.bl_star_table.setItem(bl_total_row, 1, QTableWidgetItem(f"{bl_total_maps:,}"))
+            self.bl_star_table.setItem(bl_total_row, 2, QTableWidgetItem(f"{bl_total_clears:,}"))
             bl_total_clear_rate = bl_total_clears / bl_total_maps
             percent_text = f"{bl_total_clear_rate * 100:.1f}"
             self.bl_star_table.setItem(bl_total_row, 3, QTableWidgetItem(percent_text))
-            bl_fc_total_item = QTableWidgetItem(str(bl_total_fc))
+            bl_fc_total_item = QTableWidgetItem(f"{bl_total_fc:,}")
             bl_fc_total_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             self.bl_star_table.setItem(bl_total_row, 4, bl_fc_total_item)
 
@@ -2083,20 +2085,20 @@ class PlayerWindow(QMainWindow):
                 bl_total_acc_item.setData(Qt.ItemDataRole.UserRole, float(snap.beatleader_average_ranked_acc))
             self.bl_star_table.setItem(bl_total_row, 6, bl_total_acc_item)
 
-            bl_nf_total_item = QTableWidgetItem(str(bl_total_nf))
+            bl_nf_total_item = QTableWidgetItem(f"{bl_total_nf:,}")
             bl_nf_total_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             self.bl_star_table.setItem(bl_total_row, 7, bl_nf_total_item)
-            bl_ss_total_item = QTableWidgetItem(str(bl_total_ss))
+            bl_ss_total_item = QTableWidgetItem(f"{bl_total_ss:,}")
             bl_ss_total_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             self.bl_star_table.setItem(bl_total_row, 8, bl_ss_total_item)
 
             bl_total_pp: float = sum(s.pp_contribution or 0.0 for s in bl_stats)
-            bl_pp_total_item = QTableWidgetItem(f"{bl_total_pp:.0f}" if bl_total_pp else "")
+            bl_pp_total_item = QTableWidgetItem(f"{bl_total_pp:,.0f}")
             bl_pp_total_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             self.bl_star_table.setItem(bl_total_row, 9, bl_pp_total_item)
 
             bl_total_solo_pp: float = sum(s.pp_solo or 0.0 for s in bl_stats)
-            bl_pp_solo_total_item = QTableWidgetItem(f"{bl_total_solo_pp:.0f}" if bl_total_solo_pp else "")
+            bl_pp_solo_total_item = QTableWidgetItem(f"{bl_total_solo_pp:,.0f}")
             bl_pp_solo_total_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             self.bl_star_table.setItem(bl_total_row, 10, bl_pp_solo_total_item)
 

@@ -122,6 +122,29 @@ def table_stylesheet() -> str:
     return _TABLE_STYLE_DARK if _dark_mode else _TABLE_STYLE_LIGHT
 
 
+_TOGGLE_ON_DARK = (
+    "QPushButton { background-color: #2a2a2a; color: #888888; "
+    "border: 1px solid #555555; border-radius: 3px; padding: 2px 8px; } "
+    "QPushButton:checked { background-color: #1e6423; color: #ffffff; "
+    "border: 1px solid #4caf50; font-weight: bold; } "
+    "QPushButton:hover:!checked { background-color: #3a3a3a; } "
+    "QPushButton:hover:checked { background-color: #2a8530; }"
+)
+_TOGGLE_ON_LIGHT = (
+    "QPushButton { background-color: #cccccc; color: #888888; "
+    "border: 1px solid #aaaaaa; border-radius: 3px; padding: 2px 8px; } "
+    "QPushButton:checked { background-color: #2e7d32; color: #ffffff; "
+    "border: 1px solid #43a047; font-weight: bold; } "
+    "QPushButton:hover:!checked { background-color: #bbbbbb; } "
+    "QPushButton:hover:checked { background-color: #388e3c; }"
+)
+
+
+def toggle_button_stylesheet() -> str:
+    """ON/OFF がわかりやすいトグルボタン用スタイルシートを返す。"""
+    return _TOGGLE_ON_DARK if _dark_mode else _TOGGLE_ON_LIGHT
+
+
 # ------------------------------------------------------------------ #
 #  テーマ別カラーヘルパー
 # ------------------------------------------------------------------ #

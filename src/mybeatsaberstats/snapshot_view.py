@@ -16,6 +16,7 @@ from .theme import (
     diff_neutral_bg,
     diff_text_color,
     table_stylesheet,
+    toggle_button_stylesheet,
     is_dark,
 )
 from PySide6.QtWidgets import (
@@ -155,7 +156,9 @@ class ColumnMaxBarDelegate(QStyledItemDelegate):
 
     def _parse_value(self, text) -> Optional[float]:
         try:
-            return float(str(text)) if text not in (None, "") else None
+            if text in (None, ""):
+                return None
+            return float(str(text).replace(",", ""))
         except (ValueError, TypeError):
             return None
 
@@ -202,12 +205,13 @@ class SnapshotCompareDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Snapshot Compare")
-        self.resize(1410, 680)
+        self.resize(1500, 680)
 
         # steam_id ごとにスナップショットを管理する
         self._snapshots_by_player: dict[str, List[Snapshot]] = {}
         # Stats 画面側から渡された「最初に選択しておきたいプレイヤー」
         self._initial_steam_id: Optional[str] = initial_steam_id
+        self._metric_preferred_width: int = 300
 
         root_layout = QVBoxLayout(self)
 
@@ -249,21 +253,31 @@ class SnapshotCompareDialog(QDialog):
         self.button_latest_b.setToolTip("Select latest snapshot for B")
         top_grid.addWidget(self.button_latest_b, 1, 5)
 
-        # SS / BL の表示切り替えトグルボタン
+        # Metric / SS / BL の表示切り替えトグルボタン（左から Metric, SS, BL の順）
         top_grid.addWidget(QLabel("　"), 0, 6)  # スペーサ
+        self.btn_toggle_metric = QPushButton("Metric", self)
+        self.btn_toggle_metric.setCheckable(True)
+        self.btn_toggle_metric.setChecked(True)
+        self.btn_toggle_metric.setFixedWidth(55)
+        self.btn_toggle_metric.setToolTip("Metric 列の表示/非表示")
+        self.btn_toggle_metric.setStyleSheet(toggle_button_stylesheet())
+        top_grid.addWidget(self.btn_toggle_metric, 0, 7)
+
         self.btn_toggle_ss = QPushButton("SS", self)
         self.btn_toggle_ss.setCheckable(True)
         self.btn_toggle_ss.setChecked(True)
         self.btn_toggle_ss.setFixedWidth(45)
         self.btn_toggle_ss.setToolTip("ScoreSaber 列の表示/非表示")
-        top_grid.addWidget(self.btn_toggle_ss, 0, 7)
+        self.btn_toggle_ss.setStyleSheet(toggle_button_stylesheet())
+        top_grid.addWidget(self.btn_toggle_ss, 0, 8)
 
         self.btn_toggle_bl = QPushButton("BL", self)
         self.btn_toggle_bl.setCheckable(True)
         self.btn_toggle_bl.setChecked(True)
         self.btn_toggle_bl.setFixedWidth(45)
         self.btn_toggle_bl.setToolTip("BeatLeader 列の表示/非表示")
-        top_grid.addWidget(self.btn_toggle_bl, 0, 8)
+        self.btn_toggle_bl.setStyleSheet(toggle_button_stylesheet())
+        top_grid.addWidget(self.btn_toggle_bl, 0, 9)
 
         # 左寄せに配置
         root_layout.addLayout(top_grid, Qt.AlignmentFlag.AlignLeft)
@@ -332,17 +346,17 @@ class SnapshotCompareDialog(QDialog):
         ss_star_header.setSectionResizeMode(13, QHeaderView.ResizeMode.ResizeToContents)
         ss_star_header.setSectionResizeMode(16, QHeaderView.ResizeMode.ResizeToContents)
         ss_star_header.resizeSection(0, 35)
-        ss_star_header.resizeSection(1, 80)
-        ss_star_header.resizeSection(2, 80)
-        ss_star_header.resizeSection(4, 60)
-        ss_star_header.resizeSection(5, 60)
+        ss_star_header.resizeSection(1, 85)
+        ss_star_header.resizeSection(2, 85)
+        ss_star_header.resizeSection(4, 85)
+        ss_star_header.resizeSection(5, 85)
         ss_star_header.resizeSection(7, 85)
         ss_star_header.resizeSection(8, 85)
         ss_star_header.resizeSection(10, 35)
-        ss_star_header.resizeSection(11, 65)
-        ss_star_header.resizeSection(12, 65)
-        ss_star_header.resizeSection(14, 65)
-        ss_star_header.resizeSection(15, 65)
+        ss_star_header.resizeSection(11, 45)
+        ss_star_header.resizeSection(12, 45)
+        ss_star_header.resizeSection(14, 50)
+        ss_star_header.resizeSection(15, 50)
         # 下段★テーブルは行番号(No)が紛らわしいので非表示にする
         self.ss_star_table.verticalHeader().setVisible(False)
 
@@ -380,17 +394,17 @@ class SnapshotCompareDialog(QDialog):
         bl_star_header.setSectionResizeMode(13, QHeaderView.ResizeMode.ResizeToContents)
         bl_star_header.setSectionResizeMode(16, QHeaderView.ResizeMode.ResizeToContents)
         bl_star_header.resizeSection(0, 35)
-        bl_star_header.resizeSection(1, 80)
-        bl_star_header.resizeSection(2, 80)
-        bl_star_header.resizeSection(4, 60)
-        bl_star_header.resizeSection(5, 60)
+        bl_star_header.resizeSection(1, 85)
+        bl_star_header.resizeSection(2, 85)
+        bl_star_header.resizeSection(4, 85)
+        bl_star_header.resizeSection(5, 85)
         bl_star_header.resizeSection(7, 85)
         bl_star_header.resizeSection(8, 85)
         bl_star_header.resizeSection(10, 35)
-        bl_star_header.resizeSection(11, 65)
-        bl_star_header.resizeSection(12, 65)
-        bl_star_header.resizeSection(14, 65)
-        bl_star_header.resizeSection(15, 65)
+        bl_star_header.resizeSection(11, 45)
+        bl_star_header.resizeSection(12, 45)
+        bl_star_header.resizeSection(14, 50)
+        bl_star_header.resizeSection(15, 50)
         self.bl_star_table.verticalHeader().setVisible(False)
 
         # パーセンテージ列に横棒グラフを表示するデリゲートを適用
@@ -422,7 +436,7 @@ class SnapshotCompareDialog(QDialog):
 
         root_layout.addWidget(self._splitter, 1)
         # デフォルトの分割比率
-        self._splitter.setSizes([320, 360, 415])
+        self._splitter.setSizes([300, 360, 415])
 
         self._load_snapshots()
         # Stats 画面から steam_id が渡されている場合はそちらを優先し、
@@ -440,6 +454,7 @@ class SnapshotCompareDialog(QDialog):
         self.button_latest_b.clicked.connect(self._on_select_latest_b)
         self.btn_toggle_ss.toggled.connect(self._on_toggle_ss)
         self.btn_toggle_bl.toggled.connect(self._on_toggle_bl)
+        self.btn_toggle_metric.toggled.connect(self._on_toggle_metric)
 
         self._update_view2()
 
@@ -734,6 +749,11 @@ class SnapshotCompareDialog(QDialog):
             self._update_view2()
             self._save_last_selection()
 
+    def _on_toggle_metric(self, checked: bool) -> None:
+        """Metric テーブルの表示/非表示を切り替える。"""
+        self.table.setVisible(checked)
+        self._rebalance_splitter()
+
     def _on_toggle_ss(self, checked: bool) -> None:
         """ScoreSaber ★別テーブルの表示/非表示を切り替える。"""
         # 両方非表示にならないよう、BL が既に非表示なら SS は非表示にできない
@@ -757,22 +777,26 @@ class SnapshotCompareDialog(QDialog):
         self._rebalance_splitter()
 
     def _rebalance_splitter(self) -> None:
-        """SS/BL テーブルの表示状態に応じてスプリッタサイズを再調整する。"""
+        """SS/BL/Metric テーブルの表示状態に応じてスプリッタサイズを再調整する。"""
         sizes = self._splitter.sizes()
         total = sum(sizes)
-        left = sizes[0]
-        remaining = total - left
+        metric_vis = self.table.isVisible()
         ss_vis = self.ss_star_table.isVisible()
         bl_vis = self.bl_star_table.isVisible()
+
+        # Metric は初期幅 (300) を常に使う（現在幅は保存しない）
+        metric_w = self._metric_preferred_width if metric_vis else 0
+
+        remaining = max(0, total - metric_w)
         if ss_vis and bl_vis:
             half = remaining // 2 - 35
-            self._splitter.setSizes([left, half, remaining - half])
+            self._splitter.setSizes([metric_w, max(0, half), max(0, remaining - half + 35)])
         elif ss_vis:
-            self._splitter.setSizes([left, remaining, 0])
+            self._splitter.setSizes([metric_w, remaining, 0])
         elif bl_vis:
-            self._splitter.setSizes([left, 0, remaining])
+            self._splitter.setSizes([metric_w, 0, remaining])
         else:
-            self._splitter.setSizes([left, 0, 0])
+            self._splitter.setSizes([metric_w, 0, 0])
 
     def _current_snapshot(self, combo: QComboBox) -> Optional[Snapshot]:
         # A/B それぞれに対応するプレイヤーコンボから現在のプレイヤーを取得
@@ -838,8 +862,13 @@ class SnapshotCompareDialog(QDialog):
                 numeric, display = value
                 text = "" if display is None else str(display)
                 return numeric, text
-            text = "" if value is None else str(value)
-            return value, text
+            if value is None:
+                return None, ""
+            if isinstance(value, int):
+                return value, f"{value:,}"
+            if isinstance(value, float):
+                return value, f"{value:,.2f}"
+            return value, str(value)
 
         a_numeric, text_a = _extract(a)
         b_numeric, text_b = _extract(b)
@@ -858,9 +887,9 @@ class SnapshotCompareDialog(QDialog):
             if is_rank_metric:
                 diff = -diff
             if isinstance(a_numeric, float) or isinstance(b_numeric, float):
-                diff_item.setText(f"{diff:+.2f}")
+                diff_item.setText(f"{diff:+,.2f}")
             else:
-                diff_item.setText(f"{diff:+d}")
+                diff_item.setText(f"{diff:+,d}")
 
             if diff > 0:
                 color = diff_positive_bg()
@@ -974,16 +1003,16 @@ class SnapshotCompareDialog(QDialog):
                 return None
             parts: list[str] = []
             if global_rank is not None:
-                parts.append(str(global_rank))
+                parts.append(f"{global_rank:,}")
             if country_rank is not None:
                 flag = _country_flag(country_code)
                 if flag:
-                    parts.append(f"({flag} {country_rank})")
+                    parts.append(f"({flag} {country_rank:,})")
                 else:
                     if country_code:
-                        parts.append(f"({country_code} {country_rank})")
+                        parts.append(f"({country_code} {country_rank:,})")
                     else:
-                        parts.append(f"({country_rank})")
+                        parts.append(f"({country_rank:,})")
             return " ".join(parts) if parts else None
 
         def _set_combined_rank_row(
@@ -1010,7 +1039,7 @@ class SnapshotCompareDialog(QDialog):
                 # Rank 系は数値が小さいほど良いので符号を反転
                 diff_global_signed = -diff_global
 
-                diff_text = f"{diff_global_signed:+d}"
+                diff_text = f"{diff_global_signed:+,d}"
 
                 # 国コードが同じ場合のみ、国別ランク差分を表示する
                 if (
@@ -1024,7 +1053,7 @@ class SnapshotCompareDialog(QDialog):
                     diff_jp_signed = -diff_jp
                     flag = _country_flag(str(country_code_a))
                     if flag:
-                        diff_text = f"{diff_text} ({flag}{diff_jp_signed:+d})"
+                        diff_text = f"{diff_text} ({flag}{diff_jp_signed:+,d})"
 
                 diff_item.setText(diff_text)
 
@@ -1252,7 +1281,7 @@ class SnapshotCompareDialog(QDialog):
                 return None
             if total is None:
                 return plays
-            return (plays, f"{plays}/{total}")
+            return (plays, f"{plays:,}/{total:,}")
 
         self._set_row(
             self.table,
@@ -1324,10 +1353,10 @@ class SnapshotCompareDialog(QDialog):
                     maps = s.map_count
                     clears = s.clear_count
                     if maps <= 0:
-                        text = f"{clears} (0.0%)"
+                        text = f"{clears:,} (0.0%)"
                     else:
                         rate = clears / maps * 100.0
-                        text = f"{clears} ({rate:.1f}%)"
+                        text = f"{clears:,} ({rate:.1f}%)"
                     return clears, text
             return None
 
@@ -1374,10 +1403,10 @@ class SnapshotCompareDialog(QDialog):
                         return None  # 未集計
                     maps = s.map_count
                     if maps <= 0:
-                        text = f"{fc} (0.0%)"
+                        text = f"{fc:,} (0.0%)"
                     else:
                         rate = fc / maps * 100.0
-                        text = f"{fc} ({rate:.1f}%)"
+                        text = f"{fc:,} ({rate:.1f}%)"
                     return fc, text
             return None
 
@@ -1391,10 +1420,10 @@ class SnapshotCompareDialog(QDialog):
             total_maps = sum(s.map_count for s in stats)
             total_fc = sum(getattr(s, "fc_count", None) or 0 for s in stats)
             if total_maps <= 0:
-                text = f"{total_fc} (0.0%)"
+                text = f"{total_fc:,} (0.0%)"
             else:
                 rate = total_fc / total_maps * 100.0
-                text = f"{total_fc} ({rate:.1f}%)"
+                text = f"{total_fc:,} ({rate:.1f}%)"
             return total_fc, text
 
         def _avg_acc_total_value_and_text(avg_acc: Optional[float]):
@@ -1412,7 +1441,7 @@ class SnapshotCompareDialog(QDialog):
                     pp = getattr(s, "pp_contribution", None)
                     if pp is None:
                         return None
-                    return pp, f"{pp:.0f}"
+                    return pp, f"{pp:,.0f}"
             return None
 
         def _pp_total_value_and_text(stats):
@@ -1424,7 +1453,7 @@ class SnapshotCompareDialog(QDialog):
             if all(v is None for v in vals):
                 return None
             total_pp = sum(v for v in vals if v is not None)
-            return total_pp, f"{total_pp:.0f}"
+            return total_pp, f"{total_pp:,.0f}"
 
         def _pp_solo_star_value_and_text(stats, star: int):
             """指定★帯の pp_solo を数値＋表示文字列のタプルで返す。"""
@@ -1434,7 +1463,7 @@ class SnapshotCompareDialog(QDialog):
                     pp = getattr(s, "pp_solo", None)
                     if pp is None:
                         return None
-                    return pp, f"{pp:.0f}"
+                    return pp, f"{pp:,.0f}"
             return None
 
         def _pp_solo_total_value_and_text(stats):
@@ -1446,7 +1475,7 @@ class SnapshotCompareDialog(QDialog):
             if all(v is None for v in vals):
                 return None
             total_pp = sum(v for v in vals if v is not None)
-            return total_pp, f"{total_pp:.0f}"
+            return total_pp, f"{total_pp:,.0f}"
 
         def _normalize_pair(value_and_text):
             """(value, text) または None を (numeric, text) 形式に正規化する。"""
@@ -1552,37 +1581,35 @@ class SnapshotCompareDialog(QDialog):
             # ΔAcc (L/R 差分を付加する場合は括弧内に表示)
             diff_acc_item = QTableWidgetItem("")
             diff_acc_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-            if isinstance(a_avg_val, (int, float)) and isinstance(b_avg_val, (int, float)):
-                diff = b_avg_val - a_avg_val
-                diff_text = f"{diff:+.2f}%"
+            a_avg_val_eff = a_avg_val if isinstance(a_avg_val, (int, float)) else 0.0
+            b_avg_val_eff = b_avg_val if isinstance(b_avg_val, (int, float)) else 0.0
+            diff = b_avg_val_eff - a_avg_val_eff
+            diff_text = f"{diff:+.2f}%"
 
-                # L/R が渡されている場合は括弧内に付加する
-                a_left_val, _ = _normalize_pair(avg_left_a)
-                b_left_val, _ = _normalize_pair(avg_left_b)
-                a_right_val, _ = _normalize_pair(avg_right_a)
-                b_right_val, _ = _normalize_pair(avg_right_b)
-                if isinstance(a_left_val, (int, float)) and isinstance(b_left_val, (int, float)):
-                    al = a_left_val
-                    bl_v = b_left_val
-                    ar = a_right_val if isinstance(a_right_val, (int, float)) else 0.0
-                    br = b_right_val if isinstance(b_right_val, (int, float)) else 0.0
-                    ld = bl_v - al
-                    rd = br - ar
-                    # 両方に L/R データがある場合のみ括弧内に差分を表示する
-                    diff_text += f"({ld:+.2f}/{rd:+.2f})"
+            # L/R が渡されている場合は括弧内に付加する
+            a_left_val, _ = _normalize_pair(avg_left_a)
+            b_left_val, _ = _normalize_pair(avg_left_b)
+            a_right_val, _ = _normalize_pair(avg_right_a)
+            b_right_val, _ = _normalize_pair(avg_right_b)
+            if isinstance(a_left_val, (int, float)) and isinstance(b_left_val, (int, float)):
+                al = a_left_val
+                bl_v = b_left_val
+                ar = a_right_val if isinstance(a_right_val, (int, float)) else 0.0
+                br = b_right_val if isinstance(b_right_val, (int, float)) else 0.0
+                ld = bl_v - al
+                rd = br - ar
+                # 両方に L/R データがある場合のみ括弧内に差分を表示する
+                diff_text += f"({ld:+.2f}/{rd:+.2f})"
 
-                diff_acc_item.setText(diff_text)
-
-                if diff > 0:
-                    color = diff_positive_bg()
-                elif diff < 0:
-                    color = diff_negative_bg()
-                else:
-                    color = diff_neutral_bg()
-                diff_acc_item.setBackground(color)
-                diff_acc_item.setForeground(diff_text_color())
-            elif a_avg_val is not None or b_avg_val is not None:
-                diff_acc_item.setText("-")
+            diff_acc_item.setText(diff_text)
+            if diff > 0:
+                color = diff_positive_bg()
+            elif diff < 0:
+                color = diff_negative_bg()
+            else:
+                color = diff_neutral_bg()
+            diff_acc_item.setBackground(color)
+            diff_acc_item.setForeground(diff_text_color())
 
             table.setItem(row, 9, diff_acc_item)
 
@@ -1594,50 +1621,46 @@ class SnapshotCompareDialog(QDialog):
             table.setItem(row, 10, star_repeat)
 
             # PP 列 (新配置: 刔11-13)
-            if pp_a is not None or pp_b is not None:
-                a_pp_val, a_pp_text = _normalize_pair(pp_a) if pp_a is not None else (None, "")
-                b_pp_val, b_pp_text = _normalize_pair(pp_b) if pp_b is not None else (None, "")
-                table.setItem(row, 11, QTableWidgetItem(a_pp_text))
-                table.setItem(row, 12, QTableWidgetItem(b_pp_text))
+            a_pp_val, a_pp_text = _normalize_pair(pp_a) if pp_a is not None else (0, "0")
+            b_pp_val, b_pp_text = _normalize_pair(pp_b) if pp_b is not None else (0, "0")
+            table.setItem(row, 11, QTableWidgetItem(a_pp_text))
+            table.setItem(row, 12, QTableWidgetItem(b_pp_text))
 
-                diff_pp_item = QTableWidgetItem("")
-                diff_pp_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-                if isinstance(a_pp_val, (int, float)) and isinstance(b_pp_val, (int, float)):
-                    pp_diff = b_pp_val - a_pp_val
-                    diff_pp_item.setText(f"{pp_diff:+.0f}")
-                    if pp_diff > 0:
-                        diff_pp_item.setBackground(diff_positive_bg())
-                    elif pp_diff < 0:
-                        diff_pp_item.setBackground(diff_negative_bg())
-                    else:
-                        diff_pp_item.setBackground(diff_neutral_bg())
-                    diff_pp_item.setForeground(diff_text_color())
-                elif a_pp_val is not None or b_pp_val is not None:
-                    diff_pp_item.setText("-")
-                table.setItem(row, 13, diff_pp_item)
+            diff_pp_item = QTableWidgetItem("")
+            diff_pp_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            a_pp_eff = a_pp_val if isinstance(a_pp_val, (int, float)) else 0
+            b_pp_eff = b_pp_val if isinstance(b_pp_val, (int, float)) else 0
+            pp_diff = b_pp_eff - a_pp_eff
+            diff_pp_item.setText(f"{pp_diff:+.0f}")
+            if pp_diff > 0:
+                diff_pp_item.setBackground(diff_positive_bg())
+            elif pp_diff < 0:
+                diff_pp_item.setBackground(diff_negative_bg())
+            else:
+                diff_pp_item.setBackground(diff_neutral_bg())
+            diff_pp_item.setForeground(diff_text_color())
+            table.setItem(row, 13, diff_pp_item)
 
             # Solo PP 列 (新配置: 刔14-16)
-            if pp_solo_a is not None or pp_solo_b is not None:
-                a_sp_val, a_sp_text = _normalize_pair(pp_solo_a) if pp_solo_a is not None else (None, "")
-                b_sp_val, b_sp_text = _normalize_pair(pp_solo_b) if pp_solo_b is not None else (None, "")
-                table.setItem(row, 14, QTableWidgetItem(a_sp_text))
-                table.setItem(row, 15, QTableWidgetItem(b_sp_text))
+            a_sp_val, a_sp_text = _normalize_pair(pp_solo_a) if pp_solo_a is not None else (0, "0")
+            b_sp_val, b_sp_text = _normalize_pair(pp_solo_b) if pp_solo_b is not None else (0, "0")
+            table.setItem(row, 14, QTableWidgetItem(a_sp_text))
+            table.setItem(row, 15, QTableWidgetItem(b_sp_text))
 
-                diff_sp_item = QTableWidgetItem("")
-                diff_sp_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-                if isinstance(a_sp_val, (int, float)) and isinstance(b_sp_val, (int, float)):
-                    sp_diff = b_sp_val - a_sp_val
-                    diff_sp_item.setText(f"{sp_diff:+.0f}")
-                    if sp_diff > 0:
-                        diff_sp_item.setBackground(diff_positive_bg())
-                    elif sp_diff < 0:
-                        diff_sp_item.setBackground(diff_negative_bg())
-                    else:
-                        diff_sp_item.setBackground(diff_neutral_bg())
-                    diff_sp_item.setForeground(diff_text_color())
-                elif a_sp_val is not None or b_sp_val is not None:
-                    diff_sp_item.setText("-")
-                table.setItem(row, 16, diff_sp_item)
+            diff_sp_item = QTableWidgetItem("")
+            diff_sp_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            a_sp_eff = a_sp_val if isinstance(a_sp_val, (int, float)) else 0
+            b_sp_eff = b_sp_val if isinstance(b_sp_val, (int, float)) else 0
+            sp_diff = b_sp_eff - a_sp_eff
+            diff_sp_item.setText(f"{sp_diff:+.0f}")
+            if sp_diff > 0:
+                diff_sp_item.setBackground(diff_positive_bg())
+            elif sp_diff < 0:
+                diff_sp_item.setBackground(diff_negative_bg())
+            else:
+                diff_sp_item.setBackground(diff_neutral_bg())
+            diff_sp_item.setForeground(diff_text_color())
+            table.setItem(row, 16, diff_sp_item)
 
         # ScoreSaber 側テーブル
         stars_ss = sorted({s.star for s in ss_stats_a} | {s.star for s in ss_stats_b})
