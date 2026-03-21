@@ -6,7 +6,7 @@ from typing import List, Optional
 from datetime import datetime, timezone
 import json
 import re
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QColor, QIcon, QPalette
 from .theme import (
     label_cell_color,
@@ -21,9 +21,11 @@ from .theme import (
 )
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QCheckBox,
     QComboBox,
     QDialog,
     QGridLayout,
+    QHBoxLayout,
     QLabel,
     QPushButton,
     QTableWidget,
@@ -205,6 +207,12 @@ class SnapshotCompareDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Snapshot Compare")
+        # 最大化・最小化ボタンを有効にする
+        self.setWindowFlags(
+            self.windowFlags()
+            | Qt.WindowType.WindowMaximizeButtonHint
+            | Qt.WindowType.WindowMinimizeButtonHint
+        )
         self.resize(1500, 680)
 
         # steam_id ごとにスナップショットを管理する
@@ -279,6 +287,36 @@ class SnapshotCompareDialog(QDialog):
         self.btn_toggle_bl.setToolTip("BeatLeader 列の表示/非表示")
         self.btn_toggle_bl.setStyleSheet(toggle_button_stylesheet())
         top_grid.addWidget(self.btn_toggle_bl, 0, 9)
+
+        # SS/BL テーブル列グループ 表示/非表示チェックボックス（SS/BL ボタンの下に配置）
+        _chk_container = QWidget(self)
+        _chk_layout = QHBoxLayout(_chk_container)
+        _chk_layout.setContentsMargins(0, 0, 0, 0)
+        _chk_layout.setSpacing(4)
+        self.chk_col_clear = QCheckBox("Clear", _chk_container)
+        self.chk_col_clear.setChecked(True)
+        self.chk_col_fc = QCheckBox("FC", _chk_container)
+        self.chk_col_fc.setChecked(True)
+        self.chk_col_acc = QCheckBox("Acc", _chk_container)
+        self.chk_col_acc.setChecked(True)
+        self.chk_col_pp = QCheckBox("PP", _chk_container)
+        self.chk_col_pp.setChecked(True)
+        self.chk_col_starpp = QCheckBox("★PP", _chk_container)
+        self.chk_col_starpp.setChecked(True)
+        for _chk in (self.chk_col_clear, self.chk_col_fc, self.chk_col_acc, self.chk_col_pp, self.chk_col_starpp):
+            _chk_layout.addWidget(_chk)
+        # 全選択 / 全解除ボタン
+        btn_chk_all = QPushButton("All", _chk_container)
+        btn_chk_all.setFixedWidth(36)
+        btn_chk_all.setToolTip("全チェック")
+        btn_chk_all.clicked.connect(self._on_chk_all)
+        btn_chk_none = QPushButton("None", _chk_container)
+        btn_chk_none.setFixedWidth(44)
+        btn_chk_none.setToolTip("全解除")
+        btn_chk_none.clicked.connect(self._on_chk_none)
+        _chk_layout.addWidget(btn_chk_all)
+        _chk_layout.addWidget(btn_chk_none)
+        top_grid.addWidget(_chk_container, 1, 7, 1, 5)
 
         # 左寄せに配置
         root_layout.addLayout(top_grid, Qt.AlignmentFlag.AlignLeft)
@@ -437,7 +475,7 @@ class SnapshotCompareDialog(QDialog):
 
         root_layout.addWidget(self._splitter, 1)
         # デフォルトの分割比率
-        self._splitter.setSizes([300, 360, 415])
+        self._splitter.setSizes([300, 380, 485])
 
         self._load_snapshots()
         # Stats 画面から steam_id が渡されている場合はそちらを優先し、
@@ -456,6 +494,11 @@ class SnapshotCompareDialog(QDialog):
         self.btn_toggle_ss.toggled.connect(self._on_toggle_ss)
         self.btn_toggle_bl.toggled.connect(self._on_toggle_bl)
         self.btn_toggle_metric.toggled.connect(self._on_toggle_metric)
+        self.chk_col_clear.toggled.connect(self._apply_star_col_visibility)
+        self.chk_col_fc.toggled.connect(self._apply_star_col_visibility)
+        self.chk_col_acc.toggled.connect(self._apply_star_col_visibility)
+        self.chk_col_pp.toggled.connect(self._apply_star_col_visibility)
+        self.chk_col_starpp.toggled.connect(self._apply_star_col_visibility)
 
         self._update_view2()
 
@@ -566,6 +609,7 @@ class SnapshotCompareDialog(QDialog):
 
         _apply_snapshot_selection(self.combo_a, snap_a_taken_at)
         _apply_snapshot_selection(self.combo_b, snap_b_taken_at)
+        self._restore_ui_state(data)
 
     def _restore_last_selection(self) -> None:
         """前回のプレイヤー/スナップショット選択状態を可能な範囲で復元する。"""
@@ -625,15 +669,43 @@ class SnapshotCompareDialog(QDialog):
 
         _select_player_and_snapshot(self.combo_player_a, self.combo_a, player_a_id, snap_a_taken_at)
         _select_player_and_snapshot(self.combo_player_b, self.combo_b, player_b_id, snap_b_taken_at)
+        self._restore_ui_state(data)
+
+    def _restore_ui_state(self, data: dict) -> None:
+        """JSON data からトグル/チェックボックスの状態を復元する。"""
+        for btn, key in (
+            (self.btn_toggle_metric, "ui_toggle_metric"),
+            (self.btn_toggle_ss,     "ui_toggle_ss"),
+            (self.btn_toggle_bl,     "ui_toggle_bl"),
+        ):
+            if key in data:
+                btn.blockSignals(True)
+                btn.setChecked(bool(data[key]))
+                btn.blockSignals(False)
+        for chk, key in (
+            (self.chk_col_clear,  "ui_col_clear"),
+            (self.chk_col_fc,     "ui_col_fc"),
+            (self.chk_col_acc,    "ui_col_acc"),
+            (self.chk_col_pp,     "ui_col_pp"),
+            (self.chk_col_starpp, "ui_col_starpp"),
+        ):
+            if key in data:
+                chk.blockSignals(True)
+                chk.setChecked(bool(data[key]))
+                chk.blockSignals(False)
+        # 可視性を一括適用
+        self.table.setVisible(self.btn_toggle_metric.isChecked())
+        self.ss_star_table.setVisible(self.btn_toggle_ss.isChecked())
+        self.bl_star_table.setVisible(self.btn_toggle_bl.isChecked())
+        # 描画完了後に _rebalance_splitter() を呼ぶ（未描画時は sizes=[0,0,0] になるため）
+        QTimer.singleShot(0, self._rebalance_splitter)
+        self._apply_star_col_visibility_inner()
 
     def _save_last_selection(self) -> None:
-        """現在のプレイヤー/スナップショット選択状態を設定ファイルに保存する。"""
+        """現在のプレイヤー/スナップショット選択状態と UI 状態を設定ファイルに保存する。"""
 
         snap_a = self._current_snapshot(self.combo_a)
         snap_b = self._current_snapshot(self.combo_b)
-
-        if snap_a is None and snap_b is None:
-            return
 
         path = self._settings_path()
         try:
@@ -644,6 +716,22 @@ class SnapshotCompareDialog(QDialog):
                     data = {}
             else:
                 data = {}
+
+            # UI 状態（トグルボタン・チェックボックス）を常に保存
+            data["ui_toggle_metric"] = self.btn_toggle_metric.isChecked()
+            data["ui_toggle_ss"]     = self.btn_toggle_ss.isChecked()
+            data["ui_toggle_bl"]     = self.btn_toggle_bl.isChecked()
+            data["ui_col_clear"]     = self.chk_col_clear.isChecked()
+            data["ui_col_fc"]        = self.chk_col_fc.isChecked()
+            data["ui_col_acc"]       = self.chk_col_acc.isChecked()
+            data["ui_col_pp"]        = self.chk_col_pp.isChecked()
+            data["ui_col_starpp"]    = self.chk_col_starpp.isChecked()
+
+            # スナップショット未選択の場合は UI 状態のみ保存して終了
+            if snap_a is None and snap_b is None:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+                return
 
             # 互換性のため、従来のトップレベル情報も更新しておく
             if snap_a is not None:
@@ -754,28 +842,58 @@ class SnapshotCompareDialog(QDialog):
         """Metric テーブルの表示/非表示を切り替える。"""
         self.table.setVisible(checked)
         self._rebalance_splitter()
+        self._save_last_selection()
 
     def _on_toggle_ss(self, checked: bool) -> None:
         """ScoreSaber ★別テーブルの表示/非表示を切り替える。"""
-        # 両方非表示にならないよう、BL が既に非表示なら SS は非表示にできない
-        if not checked and not self.btn_toggle_bl.isChecked():
-            self.btn_toggle_ss.blockSignals(True)
-            self.btn_toggle_ss.setChecked(True)
-            self.btn_toggle_ss.blockSignals(False)
-            return
         self.ss_star_table.setVisible(checked)
         self._rebalance_splitter()
+        self._save_last_selection()
 
     def _on_toggle_bl(self, checked: bool) -> None:
         """BeatLeader ★別テーブルの表示/非表示を切り替える。"""
-        # 両方非表示にならないよう、SS が既に非表示なら BL は非表示にできない
-        if not checked and not self.btn_toggle_ss.isChecked():
-            self.btn_toggle_bl.blockSignals(True)
-            self.btn_toggle_bl.setChecked(True)
-            self.btn_toggle_bl.blockSignals(False)
-            return
         self.bl_star_table.setVisible(checked)
         self._rebalance_splitter()
+        self._save_last_selection()
+
+    def _apply_star_col_visibility(self, *_) -> None:
+        """Clear/FC/Acc/PP/★PP 列グループの表示/非表示を SS/BL 両テーブルに適用する。"""
+        self._save_last_selection()
+        self._apply_star_col_visibility_inner()
+
+    def _on_chk_all(self) -> None:
+        """Clear/FC/Acc/PP/★PP すべてをチェックする。"""
+        for chk in (self.chk_col_clear, self.chk_col_fc, self.chk_col_acc, self.chk_col_pp, self.chk_col_starpp):
+            chk.setChecked(True)
+
+    def _on_chk_none(self) -> None:
+        """Clear/FC/Acc/PP/★PP すべてのチェックを外す。"""
+        for chk in (self.chk_col_clear, self.chk_col_fc, self.chk_col_acc, self.chk_col_pp, self.chk_col_starpp):
+            chk.setChecked(False)
+
+    def _apply_star_col_visibility_inner(self) -> None:
+        """Clear/FC/Acc/PP/★PP 列グループの表示/非表示を実際に適用する。"""
+        clear_vis   = self.chk_col_clear.isChecked()
+        fc_vis      = self.chk_col_fc.isChecked()
+        acc_vis     = self.chk_col_acc.isChecked()
+        pp_vis      = self.chk_col_pp.isChecked()
+        starpp_vis  = self.chk_col_starpp.isChecked()
+
+        for table in (self.ss_star_table, self.bl_star_table):
+            # col 0 は Clear/FC/Acc グループ用 ★ — それらが全て非表示なら隠す
+            table.setColumnHidden(0, not (clear_vis or fc_vis or acc_vis))
+            for col in (1, 2, 3):   # A Clear / B Clear / ΔClear
+                table.setColumnHidden(col, not clear_vis)
+            for col in (4, 5, 6):   # A FC / B FC / ΔFC
+                table.setColumnHidden(col, not fc_vis)
+            for col in (7, 8, 9):   # A AvgAcc / B AvgAcc / ΔAcc
+                table.setColumnHidden(col, not acc_vis)
+            # col 10 は ★ 区切り列 — PP または ★PP を表示するときのみ表示
+            table.setColumnHidden(10, not (pp_vis or starpp_vis))
+            for col in (11, 12, 13):  # A PP / B PP / ΔPP
+                table.setColumnHidden(col, not pp_vis)
+            for col in (14, 15, 16):  # A ★PP / B ★PP / Δ★PP
+                table.setColumnHidden(col, not starpp_vis)
 
     def _rebalance_splitter(self) -> None:
         """SS/BL/Metric テーブルの表示状態に応じてスプリッタサイズを再調整する。"""
@@ -1743,3 +1861,5 @@ class SnapshotCompareDialog(QDialog):
             )
 
         self.table.resizeColumnsToContents()
+        # チェックボックスで設定された列の表示/非表示を再適用
+        self._apply_star_col_visibility_inner()
