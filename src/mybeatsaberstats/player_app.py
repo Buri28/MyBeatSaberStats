@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import threading
 from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -8,8 +9,8 @@ from typing import Dict, List, Optional
 import json
 from datetime import datetime, timezone
 
-from PySide6.QtCore import Qt, QDateTime, QTimer
-from PySide6.QtGui import QBrush, QColor, QFont, QIcon, QPalette
+from PySide6.QtCore import Qt, QDateTime, QTimer, Signal, QObject
+from PySide6.QtGui import QBrush, QColor, QFont, QIcon, QPalette, QPixmap, QCursor
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -517,6 +518,102 @@ class ColumnMaxBarDelegate(QStyledItemDelegate):
         super().paint(painter, option, index)
 
 
+class _AvatarFetchSignals(QObject):
+    """非同期アバター取得の完了シグナル。"""
+    fetched = Signal(str, bytes)   # service ("ss" | "bl"), image_bytes
+
+
+class PlayerAvatarWidget(QLabel):
+    """プレイヤーアバターを表示し、クリックで SS/BL を切り替えるウィジェット。"""
+
+    SIZE = 48
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setFixedSize(self.SIZE, self.SIZE)
+        self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.setToolTip("Click to toggle SS / BL avatar")
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setScaledContents(True)
+
+        self._ss_pixmap: Optional[QPixmap] = None
+        self._bl_pixmap: Optional[QPixmap] = None
+        self._showing: str = "ss"   # "ss" or "bl"
+        self._signals = _AvatarFetchSignals()
+        self._signals.fetched.connect(self._on_fetched)
+        self._show_placeholder()
+
+    def set_ids(self, ss_id: Optional[str], bl_id: Optional[str]) -> None:
+        """SS/BL ID を受け取り、アバターを非同期で取得する。"""
+        self._ss_pixmap = None
+        self._bl_pixmap = None
+        self._showing = "ss"
+        self._show_placeholder()
+        if ss_id:
+            threading.Thread(target=self._fetch, args=("ss", ss_id), daemon=True).start()
+        if bl_id:
+            threading.Thread(target=self._fetch, args=("bl", bl_id), daemon=True).start()
+
+    def _fetch(self, service: str, player_id: str) -> None:
+        try:
+            import requests as _requests
+            if service == "ss":
+                url = f"https://scoresaber.com/api/player/{player_id}/basic"
+                r = _requests.get(url, timeout=8)
+                r.raise_for_status()
+                img_url = r.json().get("profilePicture", "")
+            else:
+                url = f"https://api.beatleader.xyz/player/{player_id}"
+                r = _requests.get(url, timeout=8)
+                r.raise_for_status()
+                img_url = r.json().get("avatar", "")
+            if not img_url:
+                return
+            img_r = _requests.get(img_url, timeout=8)
+            img_r.raise_for_status()
+            self._signals.fetched.emit(service, img_r.content)
+        except Exception:
+            pass
+
+    def _on_fetched(self, service: str, data: bytes) -> None:
+        px = QPixmap()
+        if not px.loadFromData(data):
+            return
+        px = px.scaled(self.SIZE, self.SIZE, Qt.AspectRatioMode.KeepAspectRatio,
+                       Qt.TransformationMode.SmoothTransformation)
+        if service == "ss":
+            self._ss_pixmap = px
+        else:
+            self._bl_pixmap = px
+        # 現在表示中のサービスが届いたら即更新
+        if service == self._showing:
+            self.setPixmap(px)
+        # SS がまだなければ取得できた方を表示
+        elif self._showing == "ss" and self._ss_pixmap is None:
+            self.setPixmap(px)
+
+    def _show_placeholder(self) -> None:
+        self.setPixmap(QPixmap())
+        self.setText("👤")
+
+    def mousePressEvent(self, event) -> None:
+        if self._showing == "ss":
+            self._showing = "bl"
+            if self._bl_pixmap:
+                self.setPixmap(self._bl_pixmap)
+                self.setText("")
+            else:
+                self.setText("BL")
+        else:
+            self._showing = "ss"
+            if self._ss_pixmap:
+                self.setPixmap(self._ss_pixmap)
+                self.setText("")
+            else:
+                self.setText("SS")
+        super().mousePressEvent(event)
+
+
 class PlayerWindow(QMainWindow):
     """steamId 単位のランク情報とスナップショットを表示する専用画面。"""
 
@@ -527,13 +624,23 @@ class PlayerWindow(QMainWindow):
         central = QWidget(self)
         layout = QVBoxLayout(central)
 
+        # --- 上部: アバター + [Player行 / Snapshot行] + ボタン群 ---
+        # プレイヤーアバターウィジェット（クリックで SS/BL 切替）
+        self._avatar_widget = PlayerAvatarWidget(self)
+
+        # Player 行 / Snapshot 行を縦に積む
+        _rows_widget = QWidget(self)
+        _rows_layout = QVBoxLayout(_rows_widget)
+        _rows_layout.setContentsMargins(0, 0, 0, 0)
+        _rows_layout.setSpacing(2)
+
         # --- 上部: SteamID 選択 & 操作ボタン ---
         top_row = QHBoxLayout()
         top_row.setSpacing(2)  # ライトモードの初期間隔
         self._top_row = top_row
 
         # SteamID 選択コンボボックス
-        _label_width = 65
+        _label_width = 55
         _player_label = QLabel("Player:")
         _player_label.setFixedWidth(_label_width)
         top_row.addWidget(_player_label)
@@ -577,7 +684,7 @@ class PlayerWindow(QMainWindow):
         self.update_button = QPushButton("🔄 Update")
         top_row.addWidget(self.update_button)
 
-        layout.addLayout(top_row)
+        _rows_layout.addLayout(top_row)
 
         # --- スナップショット選択行 ---
         snapshot_row = QHBoxLayout()
@@ -598,7 +705,16 @@ class PlayerWindow(QMainWindow):
         self._ver_label.setStyleSheet(f"font-size: 12px; color: {_ver_color}; padding-right: 4px;")
         snapshot_row.addStretch(1)
         snapshot_row.addWidget(self._ver_label)
-        layout.addLayout(snapshot_row)
+        _rows_layout.addLayout(snapshot_row)
+
+        # アバター + [Player行 / Snapshot行] を横並びにしてレイアウトに追加
+        _header_row = QHBoxLayout()
+        _header_row.setSpacing(6)
+        _header_row.setContentsMargins(0, 0, 0, 0)
+        _header_row.addWidget(self._avatar_widget)
+        _header_row.addSpacing(8)
+        _header_row.addWidget(_rows_widget, 1)
+        layout.addLayout(_header_row)
 
         # キャッシュ情報ラベル（下部エリアに配置）
         self._ss_cache_label = QLabel("ScoreSaber scores: -", self)
@@ -1477,6 +1593,9 @@ class PlayerWindow(QMainWindow):
             self._bl_cache_label.setText(f"／ BL scores: {bl_meta[1]:,} maps  (fetched: {bl_meta[0]})")
         else:
             self._bl_cache_label.setText("／ BL scores: -")
+
+        # プレイヤーアバターを非同期で取得
+        self._avatar_widget.set_ids(ss_id, bl_id)
 
         # Snapshot の取得時刻をローカル時刻に変換して表示用文字列を作る
         taken_text = snap.taken_at
