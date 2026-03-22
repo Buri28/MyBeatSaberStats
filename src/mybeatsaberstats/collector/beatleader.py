@@ -745,6 +745,7 @@ def collect_beatleader_star_stats(beatleader_id: str, session: Optional[requests
     star_clear_count: dict[int, int] = defaultdict(int)
     star_nf_count: dict[int, int] = defaultdict(int)
     star_ss_count: dict[int, int] = defaultdict(int)
+    star_na_count: dict[int, int] = defaultdict(int)
     star_acc_sum: dict[int, float] = defaultdict(float)
     star_acc_count: dict[int, int] = defaultdict(int)
     star_acc_left_sum: dict[int, float] = defaultdict(float)
@@ -773,32 +774,28 @@ def collect_beatleader_star_stats(beatleader_id: str, session: Optional[requests
         lb_id = str(lb_id_raw)
 
         if lb_id not in leaderboard_star_bucket:
-            # キャッシュ外のマップでも pp > 0 なら PP 計算には含める
-            # （スコアオブジェクト内の leaderboard.difficulty.stars を利用）
-            score_info_pre = item.get("score") if isinstance(item, dict) else None
-            if not isinstance(score_info_pre, dict):
-                score_info_pre = item if isinstance(item, dict) else None
-            pp_pre = None
-            if isinstance(score_info_pre, dict):
-                try:
-                    pp_pre = float(score_info_pre.get("pp") or 0)
-                except (TypeError, ValueError):
-                    pp_pre = None
-            if not (isinstance(pp_pre, float) and math.isfinite(pp_pre) and pp_pre > 0):
+            # キャッシュ外のマップ: pp > 0 のスコアのみ対象（API の rankedPlayCount 定義と合わせる）
+            try:
+                pp_pre = float(item.get("pp") or 0)
+            except (TypeError, ValueError):
+                pp_pre = 0.0
+            if not (math.isfinite(pp_pre) and pp_pre > 0):
                 continue
-            # diff は上で取得済み
             try:
                 stars_pre = float(diff.get("stars") or diff.get("difficultyRating") or 0)
             except (TypeError, ValueError):
                 stars_pre = 0.0
+            if not (math.isfinite(stars_pre) and stars_pre > 0):
+                continue
             star_bucket_pre = max(0, int(stars_pre))
             leaderboard_star_bucket[lb_id] = star_bucket_pre
+            # star_map_count には加算しない（Maps 列はキャッシュ内の Ranked 譜面数のみ）
 
         star_bucket = leaderboard_star_bucket[lb_id]
 
         state = per_leaderboard.get(lb_id)
         if state is None:
-            state = {"star": star_bucket, "clear": False, "nf": False, "ss": False, "best_acc": None, "best_acc_left": None, "best_acc_right": None, "has_fc": False, "best_pp": None}
+            state = {"star": star_bucket, "clear": False, "nf": False, "ss": False, "na": False, "best_acc": None, "best_acc_left": None, "best_acc_right": None, "has_fc": False, "best_pp": None}
             per_leaderboard[lb_id] = state
 
         score_info = item.get("score") if isinstance(item, dict) else None
@@ -812,9 +809,12 @@ def collect_beatleader_star_stats(beatleader_id: str, session: Optional[requests
         mods_upper = modifiers.upper()
         is_nf = "NF" in mods_upper
         is_ss = "SS" in mods_upper
+        is_na = "NA" in mods_upper
 
         if is_nf:
             state["nf"] = True
+        elif is_na:
+            state["na"] = True
         elif is_ss:
             state["ss"] = True
             # BeatLeader では SS（Slower Song）も PP 対象（score.pp に MOD 補正済みで反映）
@@ -897,6 +897,8 @@ def collect_beatleader_star_stats(beatleader_id: str, session: Optional[requests
             star_nf_count[star_bucket] += 1
         elif has_ss:
             star_ss_count[star_bucket] += 1
+        elif bool(state.get("na")):
+            star_na_count[star_bucket] += 1
 
     # PP を全スコア降順でソートし、重み 0.965^(rank-1) を掛けて★別に集計
     cleared_pp_entries_bl: list[tuple[int, float]] = []
@@ -921,11 +923,15 @@ def collect_beatleader_star_stats(beatleader_id: str, session: Optional[requests
         for local_rank, pp_v in enumerate(sorted(pp_vals, reverse=True), start=1):
             star_pp_solo_sum[star_bucket] += pp_v * (0.965 ** (local_rank - 1))
 
+    # キャッシュ内の★帯 + キャッシュ外プレイがある★帯の両方を対象にする
+    all_stars_bl = set(star_map_count.keys()) | set(star_clear_count.keys()) | set(star_nf_count.keys()) | set(star_ss_count.keys()) | set(star_na_count.keys())
     stats: list[StarClearStat] = []
-    for star, map_count in sorted(star_map_count.items(), key=lambda x: x[0]):
+    for star in sorted(all_stars_bl):
+        map_count = star_map_count.get(star, 0)  # 0 = Ranked キャッシュ外(プレイ記録のみある)
         cleared = star_clear_count.get(star, 0)
         nf = star_nf_count.get(star, 0)
         ss = star_ss_count.get(star, 0)
+        na = star_na_count.get(star, 0)
         acc_sum = star_acc_sum.get(star, 0.0)
         acc_count = star_acc_count.get(star, 0)
 
@@ -945,7 +951,7 @@ def collect_beatleader_star_stats(beatleader_id: str, session: Optional[requests
 
         fc_count = star_fc_count_dict.get(star, 0)
 
-        # ScoreSaber 側と同様にクリア率 (0.0-1.0) を計算
+        # クリア率 (0.0-1.0): 全 Ranked 譜面に対する通常クリアの割合
         clear_rate = (cleared / map_count) if map_count > 0 else 0.0
 
         pp_total = star_pp_sum.get(star)
@@ -959,6 +965,7 @@ def collect_beatleader_star_stats(beatleader_id: str, session: Optional[requests
             clear_count=cleared,
             nf_count=nf,
             ss_count=ss,
+            na_count=na,
             clear_rate=clear_rate,
             average_acc=avg_acc,
             fc_count=fc_count,

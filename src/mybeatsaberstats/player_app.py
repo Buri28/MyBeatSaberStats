@@ -9,7 +9,7 @@ from typing import Dict, List, Optional
 import json
 from datetime import datetime, timezone
 
-from PySide6.QtCore import Qt, QDateTime, QTimer, Signal, QObject
+from PySide6.QtCore import QSize, Qt, QDateTime, QTimer, Signal, QObject
 from PySide6.QtGui import QBrush, QColor, QFont, QIcon, QPalette, QPixmap, QCursor
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -441,7 +441,8 @@ class PercentageBarDelegate(QStyledItemDelegate):
 
         # バー色の輝度からテキスト色を決定
         bar_lum = 0.299 * r + 0.587 * g + 0.114 * b
-        use_dark_text = ratio >= 0.4 and bar_lum > 140
+        # 閾値は30%のバー重なりで切り替える。バーが薄いときはテキストを濃く、バーが濃いときはテキストを薄くする。
+        use_dark_text = ratio >= 0.3 and bar_lum > 140
         dark = is_dark()
         text_color_str = (
             self._dark_text_on_bar if dark else self._light_text_on_bar
@@ -766,7 +767,7 @@ class PlayerWindow(QMainWindow):
 
         # SS ★別クリア統計テーブル
         # SS(スローソング) も未クリア扱いとして別カラムで表示するため、NF/SS の 2 列を用意する。
-        self.star_table = QTableWidget(0, 11, self)
+        self.star_table = QTableWidget(0, 12, self)
         self.star_table.verticalHeader().setDefaultSectionSize(14)  # 行の高さを少し詰める
         self.star_table.setStyleSheet(table_stylesheet() + "\nQTableWidget::item { padding: 0px; margin: 0px; }")
         self.star_table.verticalHeader().setMinimumSectionSize(0)
@@ -780,12 +781,13 @@ class PlayerWindow(QMainWindow):
             "Avg ACC (%) ",
             "NF",
             "SS",
+            "NA",
             "PP",
-            "★PP",
+            "SPP",
         ])
 
         # BL ★別クリア統計テーブル
-        self.bl_star_table = QTableWidget(0, 11, self)
+        self.bl_star_table = QTableWidget(0, 12, self)
         self.bl_star_table.verticalHeader().setDefaultSectionSize(14)  # 行の高さを少し詰める
         self.bl_star_table.setStyleSheet(table_stylesheet() + "\nQTableWidget::item { padding: 0px; margin: 0px; }")
         self.bl_star_table.setHorizontalHeaderLabels([
@@ -798,8 +800,9 @@ class PlayerWindow(QMainWindow):
             "Avg ACC (%) ",
             "NF",
             "SS",
+            "NA",
             "PP",
-            "★PP",
+            "SPP",
         ])
 
         # 列幅は内容に合わせて自動調整し、最後の列がレイアウト都合で
@@ -857,15 +860,16 @@ class PlayerWindow(QMainWindow):
         self.bl_star_table.setItemDelegateForColumn(3, perc_clear)
         self.bl_star_table.setItemDelegateForColumn(5, perc_clear)
         self.bl_star_table.setItemDelegateForColumn(6, perc_acc)
+        # PP 列はデリゲート対象のため、列番号が 9→10 にシフトしたことに合わせて後で上書き
 
         # ★テーブルの列をドラッグ&ドロップで並べ替え可能にする
         self.star_table.horizontalHeader().setSectionsMovable(True)
         self.bl_star_table.horizontalHeader().setSectionsMovable(True)
 
-        # PP 列: 列内最大値を MAX として赤→青グラデーションバーを表示
+        # PP 列 (col 10): 列内最大値を MAX として赤→青グラデーションバーを表示
         perc_pp = ColumnMaxBarDelegate(self)
-        self.star_table.setItemDelegateForColumn(9, perc_pp)
-        self.bl_star_table.setItemDelegateForColumn(9, perc_pp)
+        self.star_table.setItemDelegateForColumn(10, perc_pp)
+        self.bl_star_table.setItemDelegateForColumn(10, perc_pp)
 
         # BL Avg ACC 列の L/R トグル変数
         self._bl_acc_show_lr: bool = False
@@ -927,6 +931,7 @@ class PlayerWindow(QMainWindow):
         main_splitter.addWidget(bl_column)
         main_splitter.setStretchFactor(0, 1)
         main_splitter.setStretchFactor(1, 1)
+        main_splitter.setSizes([357, 363])  # 初期サイズ配分の目安
 
         # --- 下部: キャッシュ情報 (左) + AccSaber テーブル (右) を横スプリッタで分割 ---
         left_bottom_widget = QWidget(self)
@@ -945,7 +950,7 @@ class PlayerWindow(QMainWindow):
         bottom_h_splitter.addWidget(left_bottom_widget)
         bottom_h_splitter.setStretchFactor(0, 1)
         bottom_h_splitter.setStretchFactor(1, 1)
-        bottom_h_splitter.setSizes([360, 360])  # 初期サイズ配分の目安
+        bottom_h_splitter.setSizes([357, 363])  # 初期サイズ配分の目安
 
         # 中央エリア (★テーブル) と下部エリアの間に縦スプリッタを設置
         mid_bottom_splitter = QSplitter(Qt.Orientation.Vertical, self)
@@ -1294,6 +1299,7 @@ class PlayerWindow(QMainWindow):
                 initial_steam_id=steam_id,
                 initial_country_code=country_code,
             )
+            # ランキングの画面サイズ
             self._ranking_window.resize(1650, 800)
             # ランキング画面でテーマを切り替えたとき Stats 画面の UI も同期する
             self._ranking_window.dark_mode_button.clicked.connect(self._sync_ui_after_ranking_theme_change)
@@ -1726,7 +1732,11 @@ class PlayerWindow(QMainWindow):
                 return QTableWidgetItem(str(v) if v is not None else "")
 
             # 行0: ["ID" | ID値 | "Rank" | Rank値 | "Total" | Total値]
-            tbl.setItem(0, 0, _lbl("ID"))
+            idLbl = _lbl("ID")
+            # ラベルのサイズを変更
+            idLbl.setSizeHint(QSize(40, 30))
+
+            tbl.setItem(0, 0, idLbl)
             tbl.setItem(0, 1, _val(id_val))
             tbl.setItem(0, 2, _lbl("Rank"))
             tbl.setItem(0, 3, _val(rank_val))
@@ -1963,6 +1973,7 @@ class PlayerWindow(QMainWindow):
         total_clears = 0
         total_nf = 0
         total_ss = 0
+        total_na = 0
         total_fc = 0
         total_clear_rate = 0.0
 
@@ -2017,23 +2028,29 @@ class PlayerWindow(QMainWindow):
             item8 = self.star_table.item(row, 8)
             if item8 is not None:
                 item8.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            na_val = getattr(s, "na_count", 0)
+            self.star_table.setItem(row, 9, QTableWidgetItem(f"{na_val:,}"))
+            item9 = self.star_table.item(row, 9)
+            if item9 is not None:
+                item9.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
             pp_val = getattr(s, "pp_contribution", None)
             pp_text = f"{pp_val:,.0f}" if pp_val is not None else "0"
             pp_item = QTableWidgetItem(pp_text)
             pp_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            self.star_table.setItem(row, 9, pp_item)
+            self.star_table.setItem(row, 10, pp_item)
 
             pp_solo_val = getattr(s, "pp_solo", None)
             pp_solo_text = f"{pp_solo_val:,.0f}" if pp_solo_val is not None else "0"
             pp_solo_item = QTableWidgetItem(pp_solo_text)
             pp_solo_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            self.star_table.setItem(row, 10, pp_solo_item)
+            self.star_table.setItem(row, 11, pp_solo_item)
 
             total_maps += s.map_count
             total_clears += s.clear_count
             total_nf += s.nf_count
             total_ss += s.ss_count
+            total_na += getattr(s, "na_count", 0)
             total_fc += getattr(s, "fc_count", None) or 0
 
         if stats:
@@ -2075,16 +2092,19 @@ class PlayerWindow(QMainWindow):
             ss_total_item = QTableWidgetItem(f"{total_ss:,}")
             ss_total_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             self.star_table.setItem(total_row, 8, ss_total_item)
+            na_total_item = QTableWidgetItem(f"{total_na:,}")
+            na_total_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            self.star_table.setItem(total_row, 9, na_total_item)
 
             total_pp: float = sum(s.pp_contribution or 0.0 for s in stats)
             pp_total_item = QTableWidgetItem(f"{total_pp:,.0f}")
             pp_total_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            self.star_table.setItem(total_row, 9, pp_total_item)
+            self.star_table.setItem(total_row, 10, pp_total_item)
 
             total_solo_pp: float = sum(s.pp_solo or 0.0 for s in stats)
             pp_solo_total_item = QTableWidgetItem(f"{total_solo_pp:,.0f}")
             pp_solo_total_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            self.star_table.setItem(total_row, 10, pp_solo_total_item)
+            self.star_table.setItem(total_row, 11, pp_solo_total_item)
 
         self.star_table.resizeColumnsToContents()
 
@@ -2151,25 +2171,32 @@ class PlayerWindow(QMainWindow):
             item8_bl = self.bl_star_table.item(row, 8)
             if item8_bl is not None:
                 item8_bl.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            bl_na_val = getattr(s, "na_count", 0)
+            self.bl_star_table.setItem(row, 9, QTableWidgetItem(f"{bl_na_val:,}"))
+            item9_bl = self.bl_star_table.item(row, 9)
+            if item9_bl is not None:
+                item9_bl.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
             bl_pp_val = getattr(s, "pp_contribution", None)
             bl_pp_text = f"{bl_pp_val:,.0f}" if bl_pp_val is not None else "0"
             bl_pp_item = QTableWidgetItem(bl_pp_text)
             bl_pp_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            self.bl_star_table.setItem(row, 9, bl_pp_item)
+            self.bl_star_table.setItem(row, 10, bl_pp_item)
 
             bl_pp_solo_val = getattr(s, "pp_solo", None)
             bl_pp_solo_text = f"{bl_pp_solo_val:,.0f}" if bl_pp_solo_val is not None else "0"
             bl_pp_solo_item = QTableWidgetItem(bl_pp_solo_text)
             bl_pp_solo_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            self.bl_star_table.setItem(row, 10, bl_pp_solo_item)
+            self.bl_star_table.setItem(row, 11, bl_pp_solo_item)
 
         # Total 行は bl_stats 全体から集計
+        bl_total_na = 0
         if bl_stats:
             bl_total_maps = sum(s.map_count for s in bl_stats)
             bl_total_clears = sum(s.clear_count for s in bl_stats)
             bl_total_nf = sum(s.nf_count for s in bl_stats)
             bl_total_ss = sum(s.ss_count for s in bl_stats)
+            bl_total_na = sum(getattr(s, "na_count", 0) for s in bl_stats)
             bl_total_fc = sum(getattr(s, "fc_count", None) or 0 for s in bl_stats)
 
         if bl_total_maps > 0:
@@ -2210,16 +2237,19 @@ class PlayerWindow(QMainWindow):
             bl_ss_total_item = QTableWidgetItem(f"{bl_total_ss:,}")
             bl_ss_total_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             self.bl_star_table.setItem(bl_total_row, 8, bl_ss_total_item)
+            bl_na_total_item = QTableWidgetItem(f"{bl_total_na:,}")
+            bl_na_total_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            self.bl_star_table.setItem(bl_total_row, 9, bl_na_total_item)
 
             bl_total_pp: float = sum(s.pp_contribution or 0.0 for s in bl_stats)
             bl_pp_total_item = QTableWidgetItem(f"{bl_total_pp:,.0f}")
             bl_pp_total_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            self.bl_star_table.setItem(bl_total_row, 9, bl_pp_total_item)
+            self.bl_star_table.setItem(bl_total_row, 10, bl_pp_total_item)
 
             bl_total_solo_pp: float = sum(s.pp_solo or 0.0 for s in bl_stats)
             bl_pp_solo_total_item = QTableWidgetItem(f"{bl_total_solo_pp:,.0f}")
             bl_pp_solo_total_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            self.bl_star_table.setItem(bl_total_row, 10, bl_pp_solo_total_item)
+            self.bl_star_table.setItem(bl_total_row, 11, bl_pp_solo_total_item)
 
         self.bl_star_table.resizeColumnsToContents()
 
@@ -2338,7 +2368,8 @@ def run() -> None:
         app.setWindowIcon(QIcon(str(_icon_path)))
     window = PlayerWindow()
     # ScoreSaber / BeatLeader / AccSaber と★0〜15が見やすいように、やや横長＋縦広めに取る
-    window.resize(1160, 720)
+    # stats画面のサイズ指定
+    window.resize(1220, 720)
     window.show()
 
     # 起動直後にスナップショットが1つも無い場合は、最初にだけ
