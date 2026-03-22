@@ -999,6 +999,7 @@ def _collect_star_stats_from_scoresaber(scoresaber_id: str, session: requests.Se
     star_clear_count: dict[int, int] = defaultdict(int)
     star_nf_count: dict[int, int] = defaultdict(int)
     star_ss_count: dict[int, int] = defaultdict(int)
+    star_na_count: dict[int, int] = defaultdict(int)
     star_fc_count: dict[int, int] = defaultdict(int)
     # ★別の平均精度算出用
     star_acc_sum: dict[int, float] = defaultdict(float)
@@ -1012,6 +1013,7 @@ def _collect_star_stats_from_scoresaber(scoresaber_id: str, session: requests.Se
         clear: bool
         nf: bool
         ss: bool
+        na: bool
         best_acc: Optional[float]
         has_fc: bool
         best_pp: Optional[float]
@@ -1040,7 +1042,8 @@ def _collect_star_stats_from_scoresaber(scoresaber_id: str, session: requests.Se
             continue
         lb_id = str(lb_id_raw)
 
-        # ranked_maps から構築した leaderboard_star_bucket を参照する（player_scores の stars は古い場合があるため）
+        # ranked_maps から構築した leaderboard_star_bucket を参照する
+        # キャッシュ外のマップ（アンランク or 以前ランクだったが現在アンランク）はスキップ
         if lb_id not in leaderboard_star_bucket:
             continue
 
@@ -1048,7 +1051,7 @@ def _collect_star_stats_from_scoresaber(scoresaber_id: str, session: requests.Se
 
         state = per_leaderboard.get(lb_id)
         if state is None:
-            state = _PerLeaderboardState(star=star_bucket, clear=False, nf=False, ss=False, best_acc=None, has_fc=False, best_pp=None)
+            state = _PerLeaderboardState(star=star_bucket, clear=False, nf=False, ss=False, na=False, best_acc=None, has_fc=False, best_pp=None)
             per_leaderboard[lb_id] = state
 
         modifiers = ""
@@ -1058,11 +1061,14 @@ def _collect_star_stats_from_scoresaber(scoresaber_id: str, session: requests.Se
         mods_upper = modifiers.upper()
         is_nf = "NF" in mods_upper
         is_ss = "SS" in mods_upper
+        is_na = "NA" in mods_upper
 
         if is_nf:
             state["nf"] = True
         elif is_ss:
             state["ss"] = True
+        elif is_na:
+            state["na"] = True
         else:
             state["clear"] = True
 
@@ -1112,6 +1118,7 @@ def _collect_star_stats_from_scoresaber(scoresaber_id: str, session: requests.Se
         has_clear = bool(state["clear"])
         has_nf = bool(state["nf"])
         has_ss = bool(state["ss"])
+        has_na = bool(state["na"])
 
         if has_clear:
             # print(f"クリア済み leaderboard (星 {star_bucket}){state.get("best_acc")=}")
@@ -1131,6 +1138,9 @@ def _collect_star_stats_from_scoresaber(scoresaber_id: str, session: requests.Se
             # クリアはしていないが SS(スローソング)でのプレイはある譜面
             # print(f"SS leaderboard (星 {star_bucket})")
             star_ss_count[star_bucket] += 1
+        elif has_na:
+            # NA(ノーアロー)でのプレイはある譜面
+            star_na_count[star_bucket] += 1
 
     # PP を全スコア降順でソートし、重み 0.965^(rank-1) を掛けて★別に集計
     cleared_pp_entries: list[tuple[int, float]] = []
@@ -1155,13 +1165,16 @@ def _collect_star_stats_from_scoresaber(scoresaber_id: str, session: requests.Se
             star_pp_solo_sum[star_bucket] += pp_v * (0.965 ** (local_rank - 1))
 
     # 3) StarClearStat へ変換
+    # キャッシュ内の★帯 + キャッシュ外プレイがある★帯の両方を対象にする
+    all_stars = set(star_map_count.keys()) | set(star_clear_count.keys()) | set(star_nf_count.keys()) | set(star_ss_count.keys()) | set(star_na_count.keys())
     stats: list[StarClearStat] = []
 
-    for star in sorted(star_map_count.keys()):
-        map_count = star_map_count[star]
+    for star in sorted(all_stars):
+        map_count = star_map_count.get(star, 0)  # 0 = Ranked キャッシュ外(プレイ記録のみある)
         clear_count = star_clear_count.get(star, 0)
         nf_count = star_nf_count.get(star, 0)
         ss_count = star_ss_count.get(star, 0)
+        na_count = star_na_count.get(star, 0)
         clear_rate = (clear_count / map_count) if map_count > 0 else 0.0
 
         avg_acc: float | None
@@ -1183,6 +1196,7 @@ def _collect_star_stats_from_scoresaber(scoresaber_id: str, session: requests.Se
                 clear_count=clear_count,
                 nf_count=nf_count,
                 ss_count=ss_count,
+                na_count=na_count,
                 clear_rate=clear_rate,
                 average_acc=avg_acc,
                 fc_count=star_fc_count.get(star, 0),

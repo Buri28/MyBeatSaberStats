@@ -119,7 +119,8 @@ class PercentageBarDelegate(QStyledItemDelegate):
 
         # バー輝度に応じてテキスト色を決定（super() が setForeground 色で上書いた後に再設定）
         bar_lum = 0.299 * r + 0.587 * g + 0.114 * b
-        use_dark_text = ratio >= 0.4 and bar_lum > 140
+        # バーが薄いときはテキストを濃く、バーが濃いときはテキストを薄くする。閾値は30%のバー重なりで切り替える。
+        use_dark_text = ratio >= 0.3 and bar_lum > 140
         dark = is_dark()
         text_color_str = (
             self._dark_text_on_bar if dark else self._light_text_on_bar
@@ -301,7 +302,7 @@ class SnapshotCompareDialog(QDialog):
         self.chk_col_acc.setChecked(True)
         self.chk_col_pp = QCheckBox("PP", _chk_container)
         self.chk_col_pp.setChecked(True)
-        self.chk_col_starpp = QCheckBox("★PP", _chk_container)
+        self.chk_col_starpp = QCheckBox("SPP", _chk_container)
         self.chk_col_starpp.setChecked(True)
         for _chk in (self.chk_col_clear, self.chk_col_fc, self.chk_col_acc, self.chk_col_pp, self.chk_col_starpp):
             _chk_layout.addWidget(_chk)
@@ -371,9 +372,9 @@ class SnapshotCompareDialog(QDialog):
             "A PP",
             "B PP",
             "ΔPP",
-            "A ★PP",
-            "B ★PP",
-            "Δ★PP",
+            "A SPP",
+            "B SPP",
+            "ΔSPP",
         ])
         ss_star_header = self.ss_star_table.horizontalHeader()
         ss_star_header.setStretchLastSection(False)
@@ -419,9 +420,9 @@ class SnapshotCompareDialog(QDialog):
             "A PP",
             "B PP",
             "ΔPP",
-            "A ★PP",
-            "B ★PP",
-            "Δ★PP",
+            "A SPP",
+            "B SPP",
+            "ΔSPP",
         ])
         bl_star_header = self.bl_star_table.horizontalHeader()
         bl_star_header.setStretchLastSection(False)
@@ -451,7 +452,7 @@ class SnapshotCompareDialog(QDialog):
         perc_acc = PercentageBarDelegate(self, max_value=100.0, gradient_min=75.0)
         perc_pp = ColumnMaxBarDelegate(self)
 
-        # 新列順: ★|Clear群|FC群|AvgAcc群|★|PP群|★PP群
+        # 新列順: ★|Clear群|FC群|AvgAcc群|★|PP群|SPP群
         # Clear 列 (A Clear / B Clear) のカッコ内の % と、AvgAcc 列にバーを表示する。
         # ScoreSaber 側
         self.ss_star_table.setItemDelegateForColumn(1, perc_clear)   # A Clear
@@ -857,22 +858,22 @@ class SnapshotCompareDialog(QDialog):
         self._save_last_selection()
 
     def _apply_star_col_visibility(self, *_) -> None:
-        """Clear/FC/Acc/PP/★PP 列グループの表示/非表示を SS/BL 両テーブルに適用する。"""
+        """Clear/FC/Acc/PP/SPP 列グループの表示/非表示を SS/BL 両テーブルに適用する。"""
         self._save_last_selection()
         self._apply_star_col_visibility_inner()
 
     def _on_chk_all(self) -> None:
-        """Clear/FC/Acc/PP/★PP すべてをチェックする。"""
+        """Clear/FC/Acc/PP/SPP すべてをチェックする。"""
         for chk in (self.chk_col_clear, self.chk_col_fc, self.chk_col_acc, self.chk_col_pp, self.chk_col_starpp):
             chk.setChecked(True)
 
     def _on_chk_none(self) -> None:
-        """Clear/FC/Acc/PP/★PP すべてのチェックを外す。"""
+        """Clear/FC/Acc/PP/SPP すべてのチェックを外す。"""
         for chk in (self.chk_col_clear, self.chk_col_fc, self.chk_col_acc, self.chk_col_pp, self.chk_col_starpp):
             chk.setChecked(False)
 
     def _apply_star_col_visibility_inner(self) -> None:
-        """Clear/FC/Acc/PP/★PP 列グループの表示/非表示を実際に適用する。"""
+        """Clear/FC/Acc/PP/SPP 列グループの表示/非表示を実際に適用する。"""
         clear_vis   = self.chk_col_clear.isChecked()
         fc_vis      = self.chk_col_fc.isChecked()
         acc_vis     = self.chk_col_acc.isChecked()
@@ -888,11 +889,11 @@ class SnapshotCompareDialog(QDialog):
                 table.setColumnHidden(col, not fc_vis)
             for col in (7, 8, 9):   # A AvgAcc / B AvgAcc / ΔAcc
                 table.setColumnHidden(col, not acc_vis)
-            # col 10 は ★ 区切り列 — PP または ★PP を表示するときのみ表示
+            # col 10 は ★ 区切り列 — PP または SPP を表示するときのみ表示
             table.setColumnHidden(10, not (pp_vis or starpp_vis))
             for col in (11, 12, 13):  # A PP / B PP / ΔPP
                 table.setColumnHidden(col, not pp_vis)
-            for col in (14, 15, 16):  # A ★PP / B ★PP / Δ★PP
+            for col in (14, 15, 16):  # A SPP / B SPP / ΔSPP
                 table.setColumnHidden(col, not starpp_vis)
 
     def _rebalance_splitter(self) -> None:
@@ -1071,9 +1072,9 @@ class SnapshotCompareDialog(QDialog):
             "A PP",
             "B PP",
             "ΔPP",
-            "A ★PP",
-            "B ★PP",
-            "Δ★PP",
+            "A SPP",
+            "B SPP",
+            "ΔSPP",
         ])
         self.bl_star_table.setHorizontalHeaderLabels([
             "★",
@@ -1090,9 +1091,9 @@ class SnapshotCompareDialog(QDialog):
             "A PP",
             "B PP",
             "ΔPP",
-            "A ★PP",
-            "B ★PP",
-            "Δ★PP",
+            "A SPP",
+            "B SPP",
+            "ΔSPP",
         ])
 
         # ★列ヘッダにサービスアイコンを設定

@@ -63,10 +63,11 @@ class StarClearStat:
     """★ごとのクリア状況を表す統計。
 
     - star: ★帯（0, 1, 2, ...）
-    - map_count: その★帯のマップ数（ScoreSaber にスコアがある譜面数）
-    - clear_count: NF/SS なしでクリアしたマップ数
-    - nf_count: NF 付きでのみクリアしたマップ数
-    - ss_count: SS(スローソング)を使ってのみクリアしたマップ数
+    - map_count: その★帯の全 Ranked 譜面数（ゲーム内に存在する譜面数）
+    - clear_count: NF/SS/NA なしでクリアしたマップ数
+    - nf_count: NF 付きでのみクリアしたマップ数（NF なしのクリアがない譜面）
+    - ss_count: SS(スローソング)を使ってのみクリアしたマップ数（SS なしのクリアがない譜面）
+    - na_count: NA(ノーアロー)を使ってのみクリアしたマップ数（NA なしのクリアがない譜面）
     - clear_rate: map_count に対する clear_count の割合 (0.0 - 1.0)
     - average_acc: その★帯での平均精度 (0.0 - 100.0)
     """
@@ -76,6 +77,7 @@ class StarClearStat:
     clear_count: int
     nf_count: int
     ss_count: int = 0
+    na_count: int = 0
     clear_rate: float = 0.0  # 0.0 - 1.0
     average_acc: float | None = None  # 0.0 - 100.0, None は未集計
     fc_count: int | None = None  # フルコンボ数（None は未集計、0 は集計済みで 0 件）
@@ -206,11 +208,13 @@ class Snapshot:
                 continue
 
             if "map_count" in s or "clear_count" in s or "nf_count" in s:
-                # 新しい形式（ss_count / fc_count が無い古い保存分も 0 扱いで受け入れる）
+                # 新しい形式（ss_count / na_count / fc_count が無い古い保存分も 0 扱いで受け入れる）
                 try:
+                    s = dict(s)
                     if "ss_count" not in s:
-                        s = dict(s)
                         s["ss_count"] = 0
+                    if "na_count" not in s:
+                        s["na_count"] = 0
                     converted.append(StarClearStat(**s))
                     continue
                 except TypeError:
@@ -242,9 +246,11 @@ class Snapshot:
             if not isinstance(s, dict):
                 continue
             try:
+                s = dict(s)
                 if "ss_count" not in s:
-                    s = dict(s)
                     s["ss_count"] = 0
+                if "na_count" not in s:
+                    s["na_count"] = 0
                 bl_converted.append(StarClearStat(**s))
             except TypeError:
                 continue
