@@ -138,17 +138,47 @@ if ($Target -eq "ranking" -or $Target -eq "all") {
 }
 if ($Target -eq "patcher") {
     Write-Host ""
-    Write-Host "[BUILD] MyBeatSaberPatcher.spec (--onefile) ..." -ForegroundColor Cyan
-    & $Python -m PyInstaller MyBeatSaberPatcher.spec --noconfirm
-    if ($LASTEXITCODE -ne 0) {
-        Write-Error "PyInstaller が失敗しました (exit code $LASTEXITCODE)"
-        exit $LASTEXITCODE
+    Write-Host "[BUILD] apply_patch.cs を csc.exe でビルド中..." -ForegroundColor Cyan
+
+    # .NET Framework 4.x の csc.exe を検索（64bit → 32bit の順）
+    $csc = $null
+    foreach ($candidate in @(
+        "${env:WINDIR}\Microsoft.NET\Framework64\v4.0.30319\csc.exe",
+        "${env:WINDIR}\Microsoft.NET\Framework\v4.0.30319\csc.exe"
+    )) {
+        if (Test-Path $candidate) { $csc = $candidate; break }
     }
-    # --onefile なので dist\ に直接 apply_patch.exe が生成される
+    if (-not $csc) {
+        Write-Error "csc.exe が見つかりません。.NET Framework 4.x がインストールされているか確認してください。"
+        exit 1
+    }
+    Write-Host "  csc: $csc"
+
     $patcherReleaseDir = Join-Path $ReleaseDir "MyBeatSaberPatcher"
     New-Item $patcherReleaseDir -ItemType Directory -Force | Out-Null
-    Copy-Item "$ScriptDir\dist\apply_patch.exe" "$patcherReleaseDir\apply_patch.exe" -Force
-    Write-Host "  → $patcherReleaseDir\apply_patch.exe" -ForegroundColor Green
+
+    $outExe  = Join-Path $patcherReleaseDir "apply_patch.exe"
+    $srcCs   = Join-Path $ScriptDir "apply_patch.cs"
+    $iconIco = Join-Path $ScriptDir "resources\app_icon.ico"
+
+    $cscArgs = @(
+        "/nologo",
+        "/target:winexe",
+        "/out:`"$outExe`"",
+        "/reference:System.Windows.Forms.dll",
+        "/reference:System.Drawing.dll",
+        "`"$srcCs`""
+    )
+    if (Test-Path $iconIco) {
+        $cscArgs = @("/win32icon:`"$iconIco`"") + $cscArgs
+    }
+
+    & $csc @cscArgs
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "csc.exe が失敗しました (exit code $LASTEXITCODE)"
+        exit $LASTEXITCODE
+    }
+    Write-Host "  → $outExe" -ForegroundColor Green
 }
 
 # ─────────────────────────────────────────────
@@ -200,20 +230,13 @@ if ($Target -eq "ranking" -or $Target -eq "all") {
     Copy-CommonFiles "MyBeatSaberRanking"
 }
 
-# patcher ターゲット: apply_patch.exe + patch/ フォルダを生成
+# patcher ターゲット: patch/ フォルダを生成
 if ($Target -eq "patcher") {
     Write-Host "  パッチフォルダを生成中..." -ForegroundColor Yellow
 
     $patcherReleaseDir = Join-Path $ReleaseDir "MyBeatSaberPatcher"
     $patchContentDir   = Join-Path $patcherReleaseDir "patch"
     $patchLibDir       = Join-Path $patchContentDir "lib\mybeatsaberstats"
-
-    # apply_patch.exe（--onefile なので dist に直接生成される）を release へコピー
-    $patcherExe = Join-Path $ScriptDir "dist\apply_patch.exe"
-    if (Test-Path $patcherExe) {
-        Copy-Item $patcherExe $patcherReleaseDir -Force
-        Write-Host "  apply_patch.exe → $patcherReleaseDir"
-    }
 
     # patch/lib/mybeatsaberstats/ に src/mybeatsaberstats/ をコピー
     New-Item $patchLibDir -ItemType Directory -Force | Out-Null
