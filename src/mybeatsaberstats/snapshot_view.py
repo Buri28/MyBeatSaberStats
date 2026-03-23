@@ -38,7 +38,7 @@ from PySide6.QtWidgets import (
 )
 
 from .snapshot import Snapshot, SNAPSHOT_DIR, BASE_DIR, RESOURCES_DIR
-from .accsaber import get_accsaber_playlist_map_counts
+from .accsaber import get_accsaber_playlist_map_counts_from_cache
 
 
 class PercentageBarDelegate(QStyledItemDelegate):
@@ -1386,7 +1386,7 @@ class SnapshotCompareDialog(QDialog):
 
         # AccSaber プレイリスト総譜面数（xxx/yyy 表示用）
         try:
-            _acc_playlist = get_accsaber_playlist_map_counts()
+            _acc_playlist, _, _ = get_accsaber_playlist_map_counts_from_cache()
         except Exception:  # noqa: BLE001
             _acc_playlist = {}
         _cmp_true_total: Optional[int] = _acc_playlist.get("true")

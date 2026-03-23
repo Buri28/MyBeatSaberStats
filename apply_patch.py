@@ -6,12 +6,15 @@
   ├── apply_patch.exe        ← このプログラム
   ├── _internal/             ← メインアプリの _internal（更新対象）
   │   ├── lib/mybeatsaberstats/
+  │   ├── resources/
   │   └── version.json
   └── patch/                 ← パッチ内容（同フォルダに展開しておく）
       ├── lib/
       │   └── mybeatsaberstats/
       │       ├── *.py
       │       └── collector/*.py
+      ├── resources/          ← アイコン等（存在する場合のみ適用）
+      │   └── *.ico, *.png, ...
       └── version.json
 
 使い方:
@@ -77,6 +80,8 @@ class _ApplyThread(QThread):
             internal_dir = _internal_dir()
             lib_src      = patch_dir    / "lib"
             lib_dest     = internal_dir / "lib"
+            res_src      = patch_dir    / "resources"
+            res_dest     = internal_dir / "resources"
             ver_src      = patch_dir    / "version.json"
             ver_dest     = internal_dir / "version.json"
 
@@ -89,7 +94,14 @@ class _ApplyThread(QThread):
             self.progress.emit("新しい lib フォルダをコピー中...")
             shutil.copytree(lib_src, lib_dest)
 
-            # 3. version.json を上書き
+            # 3. patch/resources を _internal/resources にコピー (存在する場合のみ)
+            if res_src.exists():
+                self.progress.emit("resources フォルダを更新中...")
+                if res_dest.exists():
+                    shutil.rmtree(res_dest)
+                shutil.copytree(res_src, res_dest)
+
+            # 4. version.json を上書き
             self.progress.emit("version.json を更新中...")
             shutil.copy2(ver_src, ver_dest)
 

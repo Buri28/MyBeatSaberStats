@@ -3,7 +3,7 @@
 コア機能:
   - GitHub Releases API で最新リリース (latest) のタグを取得
   - ローカルの version.json のバージョンと比較 (v1.0.0 形式)
-  - 新しいリリースがあれば src/mybeatsaberstats/*.py を全ファイルダウンロード
+  - 新しいリリースがあれば src/mybeatsaberstats/*.py および resources/* を全ファイルダウンロード
   - PySide6 ダイアログで詳細・進捗表示
 
 バージョン管理ルール:
@@ -15,7 +15,7 @@
   ├── MyBeatSaberStatsPlayer.exe   (ランチャー: Python+PySide6 同梱)
   └── _internal/
       ├── lib/mybeatsaberstats/    (差分更新対象の .py ファイル群)
-      ├── resources/
+      ├── resources/               (差分更新対象のリソースファイル群)
       └── version.json             (現在インストール済みのバージョン)
 
 GitHub リリース手順:
@@ -47,7 +47,8 @@ GITHUB_OWNER = "Buri28"
 GITHUB_REPO  = "MyBeatSaberStats"
 
 # GitHub リポジトリ上でのソースコードの場所
-_SOURCE_PREFIX = "src/mybeatsaberstats/"
+_SOURCE_PREFIX    = "src/mybeatsaberstats/"
+_RESOURCES_PREFIX = "resources/"
 
 _API_BASE = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}"
 
@@ -86,6 +87,11 @@ def _lib_dir() -> Path:
     if getattr(sys, "frozen", False):
         return root / "lib" / "mybeatsaberstats"
     return root / "src" / "mybeatsaberstats"
+
+
+def _resources_dir() -> Path:
+    """更新対象の resources ディレクトリを返す。"""
+    return _internal_dir() / "resources"
 
 
 def _version_file() -> Path:
@@ -169,28 +175,38 @@ def check_for_updates() -> UpdateInfo:
 
 
 def _list_source_files_at_tag(tag: str) -> list[str]:
-    """指定タグの src/mybeatsaberstats/ 以下の .py ファイル一覧を返す。"""
+    """指定タグの src/mybeatsaberstats/ 以下の .py ファイルおよび
+    resources/ 以下の全ファイル一覧を返す。"""
     resp = requests.get(
         f"{_API_BASE}/git/trees/{tag}?recursive=1", timeout=15
     )
     resp.raise_for_status()
-    return [
+    tree = resp.json().get("tree", [])
+    src_files = [
         item["path"]
-        for item in resp.json().get("tree", [])
+        for item in tree
         if item["path"].startswith(_SOURCE_PREFIX)
         and item["path"].endswith(".py")
         and item["type"] == "blob"
     ]
+    res_files = [
+        item["path"]
+        for item in tree
+        if item["path"].startswith(_RESOURCES_PREFIX)
+        and item["type"] == "blob"
+    ]
+    return src_files + res_files
 
 
 def apply_update(
     info: UpdateInfo,
     progress: Callable[[str, int, int], None] | None = None,
 ) -> None:
-    """指定タグの .py ファイルを全ダウンロードして lib_dir に保存する。
+    """指定タグの .py ファイルおよびリソースファイルを全ダウンロードして保存する。
     progress(message, current, total) で進捗を通知する。
     """
     lib   = _lib_dir()
+    res   = _resources_dir()
     files = info.files
     total = len(files)
     raw_base = (
@@ -199,25 +215,32 @@ def apply_update(
     )
 
     for i, repo_path in enumerate(files):
-        # src/mybeatsaberstats/ を除いたサブパスを維持する
-        # 例: src/mybeatsaberstats/collector/beatleader.py → collector/beatleader.py
-        rel_path = Path(repo_path).relative_to(_SOURCE_PREFIX)
+        if repo_path.startswith(_SOURCE_PREFIX):
+            # src/mybeatsaberstats/ を除いたサブパスを維持する
+            # 例: src/mybeatsaberstats/collector/beatleader.py → collector/beatleader.py
+            rel_path = Path(repo_path).relative_to(_SOURCE_PREFIX)
+            dest = lib / rel_path
+        else:
+            # resources/ を除いたサブパスを維持する
+            # 例: resources/app_icon.ico → app_icon.ico
+            rel_path = Path(repo_path).relative_to(_RESOURCES_PREFIX)
+            dest = res / rel_path
+
         if progress:
-            progress(f"ダウンロード中: {rel_path}", i + 1, total)
+            progress(f"ダウンロード中: {repo_path}", i + 1, total)
 
         raw_url = f"{raw_base}/{repo_path}"
         resp = requests.get(raw_url, timeout=30)
         resp.raise_for_status()
 
         content = resp.content
-        # UTF-8 BOM を除去
-        if content.startswith(b"\xef\xbb\xbf"):
-            content = content[3:]
-        # 改行コードを CRLF に統一 (まず LF に正規化してから CRLF へ変換)
-        content = content.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
-        content = content.replace(b"\n", b"\r\n")
+        if repo_path.startswith(_SOURCE_PREFIX):
+            # .py ファイルのみ: UTF-8 BOM 除去・改行コード CRLF 統一
+            if content.startswith(b"\xef\xbb\xbf"):
+                content = content[3:]
+            content = content.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+            content = content.replace(b"\n", b"\r\n")
 
-        dest = lib / rel_path
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(content)
 
