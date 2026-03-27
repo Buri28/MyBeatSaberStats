@@ -17,6 +17,7 @@ from .theme import (
     diff_text_color,
     table_stylesheet,
     toggle_button_stylesheet,
+    radio_toggle_stylesheet,
     is_dark,
 )
 from PySide6.QtWidgets import (
@@ -276,25 +277,27 @@ class SnapshotCompareDialog(QDialog):
         self.btn_toggle_metric.setStyleSheet(toggle_button_stylesheet())
         top_grid.addWidget(self.btn_toggle_metric, 0, 7)
 
-        self.btn_toggle_ss = QPushButton("SS", self)
+        self.btn_toggle_ss = QPushButton("ScoreSaber", self)
         self.btn_toggle_ss.setCheckable(True)
         self.btn_toggle_ss.setChecked(True)
-        self.btn_toggle_ss.setFixedWidth(45)
+        self.btn_toggle_ss.setFixedWidth(100)
         self.btn_toggle_ss.setToolTip("ScoreSaber 列の表示/非表示")
         self.btn_toggle_ss.setIcon(self._icon_scoresaber)
         self.btn_toggle_ss.setIconSize(QSize(14, 14))
         self.btn_toggle_ss.setStyleSheet(toggle_button_stylesheet())
         top_grid.addWidget(self.btn_toggle_ss, 0, 8)
 
-        self.btn_toggle_bl = QPushButton("BL", self)
+        self.btn_toggle_bl = QPushButton("BeatLeader", self)
         self.btn_toggle_bl.setCheckable(True)
         self.btn_toggle_bl.setChecked(True)
-        self.btn_toggle_bl.setFixedWidth(45)
+        self.btn_toggle_bl.setFixedWidth(100)
         self.btn_toggle_bl.setToolTip("BeatLeader 列の表示/非表示")
         self.btn_toggle_bl.setIcon(self._icon_beatleader)
         self.btn_toggle_bl.setIconSize(QSize(14, 14))
         self.btn_toggle_bl.setStyleSheet(toggle_button_stylesheet())
         top_grid.addWidget(self.btn_toggle_bl, 0, 9)
+
+        top_grid.addWidget(QLabel("  "), 0, 10)  # BL と AccSaber の間のスペーサ
 
         # AccSaber モード切り替えボタン (AccSaber / AccSaber Reloaded) — Metric/SS/BL の右隣
         self._acc_mode: str = "AS"  # "AS" or "RL"
@@ -305,8 +308,8 @@ class SnapshotCompareDialog(QDialog):
         self.btn_acc_as.setToolTip("AccSaberを表示")
         self.btn_acc_as.setIcon(self._icon_accsaber)
         self.btn_acc_as.setIconSize(QSize(14, 14))
-        self.btn_acc_as.setStyleSheet(toggle_button_stylesheet())
-        top_grid.addWidget(self.btn_acc_as, 0, 10)
+        self.btn_acc_as.setStyleSheet(radio_toggle_stylesheet())
+        top_grid.addWidget(self.btn_acc_as, 0, 11)
 
         self.btn_acc_rl = QPushButton("AccSaber RL", self)
         self.btn_acc_rl.setCheckable(True)
@@ -315,14 +318,14 @@ class SnapshotCompareDialog(QDialog):
         self.btn_acc_rl.setToolTip("AccSaber Reloadedを表示")
         self.btn_acc_rl.setIcon(self._icon_accsaber_rl)
         self.btn_acc_rl.setIconSize(QSize(14, 14))
-        self.btn_acc_rl.setStyleSheet(toggle_button_stylesheet())
-        top_grid.addWidget(self.btn_acc_rl, 0, 11)
+        self.btn_acc_rl.setStyleSheet(radio_toggle_stylesheet())
+        top_grid.addWidget(self.btn_acc_rl, 0, 12)
 
         # SS/BL テーブル列グループ 表示/非表示チェックボックス（SS/BL ボタンの下に配置）
         _chk_container = QWidget(self)
         _chk_layout = QHBoxLayout(_chk_container)
         _chk_layout.setContentsMargins(0, 0, 0, 0)
-        _chk_layout.setSpacing(4)
+        _chk_layout.setSpacing(6)
         self.chk_col_clear = QCheckBox("Clear", _chk_container)
         self.chk_col_clear.setChecked(True)
         self.chk_col_fc = QCheckBox("FC", _chk_container)
@@ -346,7 +349,8 @@ class SnapshotCompareDialog(QDialog):
         btn_chk_none.clicked.connect(self._on_chk_none)
         _chk_layout.addWidget(btn_chk_all)
         _chk_layout.addWidget(btn_chk_none)
-        top_grid.addWidget(_chk_container, 1, 7, 1, 5)
+        _chk_layout.addStretch(1)
+        top_grid.addWidget(_chk_container, 1, 7, 1, 6)
 
         # 左寄せに配置
         root_layout.addLayout(top_grid, Qt.AlignmentFlag.AlignLeft)

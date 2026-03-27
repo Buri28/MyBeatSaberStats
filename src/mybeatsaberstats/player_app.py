@@ -1024,17 +1024,6 @@ class PlayerWindow(QMainWindow):
         main_splitter.setStretchFactor(1, 1)
         main_splitter.setSizes([357, 363])  # 初期サイズ配分の目安
 
-        # --- 下部: キャッシュ情報 (左) + AccSaber テーブル (右) を横スプリッタで分割 ---
-        left_bottom_widget = QWidget(self)
-        left_bottom_layout = QVBoxLayout(left_bottom_widget)
-        left_bottom_layout.setContentsMargins(2, 2, 2, 2)
-        left_bottom_layout.setSpacing(2)
-        self._acc_warning_label = QLabel("", self)
-        self._acc_warning_label.setStyleSheet("color: orange; font-size: 11px;")
-        self._acc_warning_label.setVisible(False)
-        left_bottom_layout.addWidget(self._acc_warning_label)
-        left_bottom_layout.addStretch(1)
-
         # AccSaber テーブルをタイトル付きコンテナに包む (左下)
         left_acc_widget = QWidget(self)
         left_acc_layout = QVBoxLayout(left_acc_widget)
@@ -1059,7 +1048,7 @@ class PlayerWindow(QMainWindow):
         _acc_rl_title.setStyleSheet("font-weight: bold; font-size: 11px; padding: 0px 2px;")
         self._acc_rl_xp_label = QLabel("", self)
         self._acc_rl_xp_label.setStyleSheet("font-size: 11px; font-weight: 600; color: #3d90CC; padding: 0px 2px;")
-        self._btn_rl_unplayed = QPushButton("💾Unplayed", self)
+        self._btn_rl_unplayed = QPushButton("💾Unplayed Playlist", self)
         self._btn_rl_unplayed.setToolTip("BeatLeader 未プレイの AccSaber Reloaded 譜面を bplist ファイルに出力する")
         self._btn_rl_unplayed.setFixedHeight(20)
         self._btn_rl_unplayed.setStyleSheet("font-size: 11px; padding: 1px 6px;")
@@ -1071,15 +1060,13 @@ class PlayerWindow(QMainWindow):
         right_bottom_layout.addWidget(_acc_rl_header)
         right_bottom_layout.addWidget(self.acc_rl_table, 1)
 
-        # 下部: 横スプリッタ [AccSaber (タイトル+テーブル) | 警告ラベル | AccSaber Reloaded テーブル]
+        # 下部: 横スプリッタ [AccSaber テーブル | AccSaber Reloaded テーブル]
         bottom_h_splitter = QSplitter(Qt.Orientation.Horizontal, self)
         bottom_h_splitter.addWidget(left_acc_widget)
-        bottom_h_splitter.addWidget(left_bottom_widget)
         bottom_h_splitter.addWidget(right_bottom_widget)
         bottom_h_splitter.setStretchFactor(0, 1)
-        bottom_h_splitter.setStretchFactor(1, 0)
-        bottom_h_splitter.setStretchFactor(2, 1)
-        bottom_h_splitter.setSizes([357, 0, 363])  # 初期サイズ配分の目安
+        bottom_h_splitter.setStretchFactor(1, 1)
+        bottom_h_splitter.setSizes([357, 363])  # 初期サイズ配分の目安
 
         # 中央エリア (★テーブル) と下部エリアの間に縦スプリッタを設置
         mid_bottom_splitter = QSplitter(Qt.Orientation.Vertical, self)
@@ -2423,11 +2410,7 @@ class PlayerWindow(QMainWindow):
             _pl_fat = playlist_fetched_ats.get(_cat_key)
             _warn_lines.append(f"Playlist ({_cat_label}): using cached count as of {_fmt_date(_pl_fat)}")
 
-        if _warn_lines:
-            self._acc_warning_label.setText("⚠ " + "\n⚠ ".join(_warn_lines))
-            self._acc_warning_label.setVisible(True)
-        else:
-            self._acc_warning_label.setVisible(False)
+        pass  # _warn_lines は警告ラベル廃止により未使用
 
 
         # ★別統計（ScoreSaber ベース）と Total 行

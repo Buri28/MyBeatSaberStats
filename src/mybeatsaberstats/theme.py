@@ -139,10 +139,33 @@ _TOGGLE_ON_LIGHT = (
     "QPushButton:hover:checked { background-color: #388e3c; }"
 )
 
+# 排他選択（ラジオボタン的）のトグルボタン—青系で緿のトグルと区別する
+_RADIO_TOGGLE_DARK = (
+    "QPushButton { background-color: #2a2a2a; color: #888888; "
+    "border: 1px solid #555555; border-radius: 3px; padding: 2px 8px; } "
+    "QPushButton:checked { background-color: #1a4a7a; color: #ffffff; "
+    "border: 1px solid #4a9edd; font-weight: bold; } "
+    "QPushButton:hover:!checked { background-color: #3a3a3a; } "
+    "QPushButton:hover:checked { background-color: #1e5c9a; }"
+)
+_RADIO_TOGGLE_LIGHT = (
+    "QPushButton { background-color: #cccccc; color: #888888; "
+    "border: 1px solid #aaaaaa; border-radius: 3px; padding: 2px 8px; } "
+    "QPushButton:checked { background-color: #1565c0; color: #ffffff; "
+    "border: 1px solid #42a5f5; font-weight: bold; } "
+    "QPushButton:hover:!checked { background-color: #bbbbbb; } "
+    "QPushButton:hover:checked { background-color: #1976d2; }"
+)
+
 
 def toggle_button_stylesheet() -> str:
     """ON/OFF がわかりやすいトグルボタン用スタイルシートを返す。"""
     return _TOGGLE_ON_DARK if _dark_mode else _TOGGLE_ON_LIGHT
+
+
+def radio_toggle_stylesheet() -> str:
+    """排他的選択（ラジオボタン的）なトグルボタン用スタイルシートを返す。青系で通常トグルと区別する。"""
+    return _RADIO_TOGGLE_DARK if _dark_mode else _RADIO_TOGGLE_LIGHT
 
 
 # ------------------------------------------------------------------ #
