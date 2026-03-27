@@ -46,6 +46,7 @@ from .accsaber_reloaded import get_reloaded_map_counts_from_cache as _get_reload
 from .accsaber_reloaded import fetch_all_maps_full as _rl_fetch_all_maps
 from .accsaber_reloaded import build_unplayed_bplist as _rl_build_unplayed_bplist
 from .accsaber_reloaded import fetch_player_all_categories as _rl_fetch_player
+from .accsaber_reloaded import fetch_player_scored_diff_ids as _rl_fetch_scored_diff_ids
 from .accsaber_reloaded import CATEGORY_IDS as _RL_CATEGORY_IDS
 from .snapshot_view import SnapshotCompareDialog
 from .snapshot_graph import SnapshotGraphDialog
@@ -1242,6 +1243,11 @@ class PlayerWindow(QMainWindow):
 
         ss_id, bl_id = _get_player_ids_from_index(steam_id)
 
+        # AccSaber Reloaded で無効なモディファイア（これらを含むスコアはプレイ済みと見なさない）
+        # 出典: PlatformScoreMapper.java BANNED_MODIFIER_CODES
+        # NO=No Obstacles, NB=No Bombs, SS=Slower Song, SC=Super Cut, SN=Small Notes
+        _rl_invalid_mods = frozenset({"NO", "NB", "SS", "SC", "SN"})
+
         # BeatLeader スコアキャッシュから played_set / played_bl_ids を収集
         played_set: set = set()
         played_bl_ids: set = set()
@@ -1250,6 +1256,9 @@ class PlayerWindow(QMainWindow):
             try:
                 bl_data = json.loads(bl_scores_path.read_text(encoding="utf-8"))
                 for score_val in (bl_data.get("scores") or {}).values():
+                    mods = str((score_val.get("score") or {}).get("modifiers") or "")
+                    if mods and frozenset(t.strip().upper() for t in mods.split(",")) & _rl_invalid_mods:
+                        continue
                     lb = score_val.get("leaderboard") or {}
                     lb_id_val = lb.get("id")
                     if lb_id_val:
@@ -1276,6 +1285,9 @@ class PlayerWindow(QMainWindow):
             try:
                 ss_data = json.loads(ss_scores_path.read_text(encoding="utf-8"))
                 for score_val in (ss_data.get("scores") or {}).values():
+                    mods = str((score_val.get("score") or {}).get("modifiers") or "")
+                    if mods and frozenset(t.strip().upper() for t in mods.split(",")) & _rl_invalid_mods:
+                        continue
                     lb = score_val.get("leaderboard") or {}
                     ss_lb_id = lb.get("id")
                     if ss_lb_id:
@@ -1339,7 +1351,7 @@ class PlayerWindow(QMainWindow):
 
         # 保存処理中の体感フリーズを避けるため進捗を表示する
         save_cancelled = {"value": False}
-        save_progress = QProgressDialog("Preparing unplayed map export...", "Cancel", 0, 7, self)
+        save_progress = QProgressDialog("Preparing unplayed map export...", "Cancel", 0, 8, self)
         save_progress.setWindowTitle("AccSaber Reloaded Unplayed")
         save_progress.setWindowModality(Qt.WindowModality.WindowModal)
         save_progress.canceled.connect(lambda: save_cancelled.__setitem__("value", True))
@@ -1367,7 +1379,15 @@ class PlayerWindow(QMainWindow):
                     _cat = _rl_cat_uuid_to_name.get(_diff.get("categoryId", ""))
                     if _cat:
                         total_rl_diffs_per_cat[_cat] += 1
-            _set_save_step(1, "Collecting ranked plays info...")
+            _set_save_step(1, "Fetching AccSaber Reloaded player scores...")
+
+            # RL スコア API からプレイ済み難易度 UUID を取得（BL/SS キャッシュより高精度）
+            try:
+                rl_scored_diff_ids = _rl_fetch_scored_diff_ids(bl_id or "", session)
+            except Exception:  # noqa: BLE001
+                rl_scored_diff_ids = {}
+
+            _set_save_step(2, "Collecting ranked plays info...")
 
             # AccSaber RL のプレイヤー rankedPlays を取得（国別フィルターで高速化）
             country = self._ss_country_by_id.get(ss_id or "")
@@ -1378,11 +1398,12 @@ class PlayerWindow(QMainWindow):
 
             bplist_by_cat: Dict[str, list] = {}
             ndiffs_by_cat: Dict[str, int] = {}
-            for idx, cat in enumerate(("true", "standard", "tech"), start=2):
+            for idx, cat in enumerate(("true", "standard", "tech"), start=3):
                 if save_cancelled["value"]:
                     return
                 _set_save_step(idx, f"Building {cat} unplayed list...")
-                bplist = _rl_build_unplayed_bplist(all_maps, played_set, cat, played_bl_ids, played_ss_ids)
+                _rl_ids = rl_scored_diff_ids.get(cat) if rl_scored_diff_ids else None
+                bplist = _rl_build_unplayed_bplist(all_maps, played_set, cat, played_bl_ids, played_ss_ids, _rl_ids)
                 songs = bplist.get("songs", [])
                 bplist_by_cat[cat] = songs
                 n_diffs = sum(len(s.get("difficulties", [])) for s in songs)
@@ -1394,7 +1415,7 @@ class PlayerWindow(QMainWindow):
                 _set_save_step(idx, f"Saving {filename}...")
                 out_path.write_text(_format_bplist(bplist), encoding="utf-8")
                 saved_files.append(f"{filename}  ({n_diffs} difficulties in {len(songs)} songs)")
-            _set_save_step(6, "Finalizing...")
+            _set_save_step(7, "Finalizing...")
 
             # rankedPlays 比較ノートを作成（AccSaber RL の diff 数と bplist の diff 数を比較）
             for cat in ("true", "standard", "tech"):

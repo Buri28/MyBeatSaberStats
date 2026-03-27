@@ -348,15 +348,67 @@ def fetch_all_maps_full(
     return all_maps
 
 
+def fetch_player_scored_diff_ids(
+    player_id: str,
+    session: Optional[requests.Session] = None,
+) -> Dict[str, set]:
+    """AccSaber Reloaded でプレイヤーがスコアを持つ難易度 UUID をカテゴリ別に取得する。
+
+    Returns:
+        {"true": {uuid, ...}, "standard": {uuid, ...}, "tech": {uuid, ...}}
+    空のセットも含む辞書を返す。API エラー時も同様に空辞書を返す。
+    """
+    if not player_id:
+        return {}
+
+    if session is None:
+        session = requests.Session()
+
+    _uuid_to_cat = {v: k for k, v in CATEGORY_IDS.items()}
+    result: Dict[str, set] = {"true": set(), "standard": set(), "tech": set()}
+
+    page = 0
+    while True:
+        try:
+            resp = session.get(
+                f"{BASE_URL}/users/{player_id}/scores",
+                params={"page": page, "size": _PAGE_SIZE},
+                timeout=30,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception:  # noqa: BLE001
+            break
+
+        content = data.get("content", [])
+        if not content:
+            break
+
+        for score in content:
+            diff_id = score.get("mapDifficultyId")
+            cat = _uuid_to_cat.get(score.get("categoryId", ""))
+            if diff_id and cat and cat in result:
+                result[cat].add(diff_id)
+
+        if data.get("last", True):
+            break
+        page += 1
+
+    return result
+
+
 def build_unplayed_bplist(
     all_maps: List[Dict],
     played_set: set,
     category: str,
     played_bl_ids: Optional[set] = None,
     played_ss_ids: Optional[set] = None,
+    played_rl_diff_ids: Optional[set] = None,
 ) -> Dict:
     """プレイ済み譜面を除いた AccSaber Reloaded カテゴリのプレイリスト (bplist) を構築する。
 
+    played_rl_diff_ids: RL スコア API から取得した difficulty UUID の集合（最高精度）。
+      指定時はこれのみでプレイ済み判定し、BL/SS 照合は行わない。
     played_set: {(hash_lower, characteristic, difficulty_bs_name)} の集合。
     played_bl_ids: BeatLeader leaderboard.id の集合（blLeaderboardId と照合）。
     played_ss_ids: ScoreSaber leaderboard.id の集合（ssLeaderboardId と照合）。
@@ -390,16 +442,23 @@ def build_unplayed_bplist(
             if not bs_diff:
                 continue
 
-            # 照合優先度: blLeaderboardId > ssLeaderboardId > (hash, char, diff)
-            # blLeaderboardId / ssLeaderboardId であればリパブリッシュ後のハッシュ変更にも対応できる
-            bl_lb_id = diff.get("blLeaderboardId", "")
-            if bl_lb_id and played_bl_ids and bl_lb_id in played_bl_ids:
-                continue
-            ss_lb_id = str(diff.get("ssLeaderboardId", "") or "")
-            if ss_lb_id and played_ss_ids and ss_lb_id in played_ss_ids:
-                continue
-            if (song_hash, characteristic, bs_diff) in played_set:
-                continue
+            if played_rl_diff_ids is not None:
+                # RL スコア API によるプレイ済み判定（最高精度: BL/SS 照合より優先）
+                rl_diff_id = diff.get("id", "")
+                if rl_diff_id and rl_diff_id in played_rl_diff_ids:
+                    continue
+            else:
+                # フォールバック: BL/SS キャッシュによるプレイ済み推定
+                # 照合優先度: blLeaderboardId > ssLeaderboardId > (hash, char, diff)
+                # blLeaderboardId / ssLeaderboardId であればリパブリッシュ後のハッシュ変更にも対応できる
+                bl_lb_id = diff.get("blLeaderboardId", "")
+                if bl_lb_id and played_bl_ids and bl_lb_id in played_bl_ids:
+                    continue
+                ss_lb_id = str(diff.get("ssLeaderboardId", "") or "")
+                if ss_lb_id and played_ss_ids and ss_lb_id in played_ss_ids:
+                    continue
+                if (song_hash, characteristic, bs_diff) in played_set:
+                    continue
 
             if song_hash not in songs_dict:
                 songs_dict[song_hash] = {
