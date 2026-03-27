@@ -716,28 +716,28 @@ class PlayerWindow(QMainWindow):
         top_row.addWidget(self.player_combo)
 
         # スナップショット取得ボタン
-        self.snapshot_button = QPushButton("Take Snapshot")
+        self.snapshot_button = QPushButton("📷 Snapshot")
         self.snapshot_button.clicked.connect(self._take_snapshot_for_current_player)
         top_row.addWidget(self.snapshot_button)
 
         # スナップショット比較 / グラフ表示
-        self.compare_button = QPushButton("Snapshot Compare")
+        self.compare_button = QPushButton("🔍 Compare")
         self.compare_button.clicked.connect(self.open_compare)
         top_row.addWidget(self.compare_button)
 
-        self.graph_button = QPushButton("Snapshot Graph")
+        self.graph_button = QPushButton("📈 Graph")
         self.graph_button.clicked.connect(self.open_graph)
         top_row.addWidget(self.graph_button)
 
         top_row.addStretch(1)
 
         # ランキング表示ボタン（キャッシュされたランキングJSONから統合ランキングを表示）
-        self.ranking_button = QPushButton("Ranking")
+        self.ranking_button = QPushButton("🏆 Ranking")
         self.ranking_button.clicked.connect(self.open_ranking)
         top_row.addWidget(self.ranking_button)
 
         # ランク情報キャッシュを取得/更新するボタン
-        self.fetch_ranking_button = QPushButton("Fetch Ranking Data")
+        self.fetch_ranking_button = QPushButton("⬇️ Ranking Data")
         self.fetch_ranking_button.clicked.connect(self._fetch_ranking_data)
         top_row.addWidget(self.fetch_ranking_button)
 
