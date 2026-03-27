@@ -216,14 +216,14 @@ class SnapshotCompareDialog(QDialog):
             | Qt.WindowType.WindowMaximizeButtonHint
             | Qt.WindowType.WindowMinimizeButtonHint
         )
-        self.resize(1500, 720)
+        self.resize(1520, 720)
 
         # steam_id ごとにスナップショットを管理する
         self._snapshots_by_player: dict[str, List[Snapshot]] = {}
         # Stats 画面側から渡された「最初に選択しておきたいプレイヤー」
         self._initial_steam_id: Optional[str] = initial_steam_id
-        # Metric 列の幅の非表示から復帰用
-        self._metric_preferred_width: int = 415
+        # Metric 列の幅の非表示から復帰用(ここで左端の Metric 列の幅を固定値で保持しておく)
+        self._metric_preferred_width: int = 425
 
         root_layout = QVBoxLayout(self)
 
@@ -1431,11 +1431,25 @@ class SnapshotCompareDialog(QDialog):
                 snap_a.accsaber_reloaded_tech_rank, snap_a.scoresaber_country, snap_a.accsaber_reloaded_tech_rank_country,
                 snap_b.accsaber_reloaded_tech_rank, snap_b.scoresaber_country, snap_b.accsaber_reloaded_tech_rank_country,
             )
+            _xp_lv_a = snap_a.accsaber_reloaded_xp_level
+            _xp_lv_b = snap_b.accsaber_reloaded_xp_level
+            def _xp_val(xp, lv):
+                if xp is None:
+                    return None
+                v = int(round(xp))
+                if lv is not None:
+                    return (v, f"{v:,} (Lv.{lv})")
+                return v
             self._set_row(
                 self.table, row_main, "[RL] XP",
-                int(round(snap_a.accsaber_reloaded_xp)) if snap_a.accsaber_reloaded_xp is not None else None,
-                int(round(snap_b.accsaber_reloaded_xp)) if snap_b.accsaber_reloaded_xp is not None else None,
+                _xp_val(snap_a.accsaber_reloaded_xp, _xp_lv_a),
+                _xp_val(snap_b.accsaber_reloaded_xp, _xp_lv_b),
             )
+            if _xp_lv_a is not None and _xp_lv_b is not None:
+                _lv_diff = _xp_lv_b - _xp_lv_a
+                _diff_item = self.table.item(row_main, 3)
+                if _diff_item is not None:
+                    _diff_item.setText(_diff_item.text() + f" (Lv{_lv_diff:+d})")
             row_main += 1
             row_main = _set_combined_rank_row(
                 row_main, "[RL] XP Rank",
