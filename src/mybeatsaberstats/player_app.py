@@ -42,6 +42,11 @@ from .snapshot import Snapshot, SNAPSHOT_DIR, BASE_DIR, RESOURCES_DIR, StarClear
 from .theme import table_stylesheet, toggle as _toggle_theme, is_dark, label_cell_color, label_cell_text_color, init_theme as _init_theme, button_label as _theme_button_label
 from .updater import StartupUpdateChecker, get_current_version
 from .accsaber import AccSaberPlayer, get_accsaber_playlist_map_counts_with_meta, get_accsaber_playlist_map_counts_from_cache
+from .accsaber_reloaded import get_reloaded_map_counts_from_cache as _get_reloaded_map_counts_from_cache
+from .accsaber_reloaded import fetch_all_maps_full as _rl_fetch_all_maps
+from .accsaber_reloaded import build_unplayed_bplist as _rl_build_unplayed_bplist
+from .accsaber_reloaded import fetch_player_all_categories as _rl_fetch_player
+from .accsaber_reloaded import CATEGORY_IDS as _RL_CATEGORY_IDS
 from .snapshot_view import SnapshotCompareDialog
 from .snapshot_graph import SnapshotGraphDialog
 from .app import MainWindow as RankingWindow
@@ -53,6 +58,40 @@ from .collector.collector import (
     _read_cache_fetched_at,
 )
 from mybeatsaberstats.collector.map_store import MapStore
+
+
+def _format_bplist(bplist: dict) -> str:
+    """bplist を人間が読みやすいフォーマットに整形する。
+
+    トップレベルのキーはインデント付き、songs 配列の各エントリは1行にまとめる。
+    例:
+      {"hash": "abc...", "songName": "...", "difficulties": [{"characteristic": "Standard", "name": "ExpertPlus"}]}
+    """
+    songs = bplist.get("songs", [])
+    song_lines = []
+    for s in songs:
+        diffs = json.dumps(s.get("difficulties", []), ensure_ascii=False, separators=(", ", ": "))
+        # separators でコンパクトに、でも key: value の間はスペースあり
+        diffs = diffs.replace('{"characteristic":', '{"characteristic":').replace('"name":', '"name":')
+        entry = json.dumps(
+            {"hash": s.get("hash", ""), "songName": s.get("songName", ""), "difficulties": s.get("difficulties", [])},
+            ensure_ascii=False,
+            separators=(",", ": "),
+        )
+        song_lines.append(f"    {entry}")
+
+    header = {k: v for k, v in bplist.items() if k != "songs"}
+    lines = []
+    lines.append("{")
+    for k, v in header.items():
+        lines.append(f'  {json.dumps(k, ensure_ascii=False)}: {json.dumps(v, ensure_ascii=False)},')
+    lines.append(f'  "songs": [')
+    for i, sl in enumerate(song_lines):
+        comma = "," if i < len(song_lines) - 1 else ""
+        lines.append(f"{sl}{comma}")
+    lines.append("  ]")
+    lines.append("}")
+    return "\n".join(lines)
 
 
 def _get_player_ids_from_index(steam_id: str):
@@ -119,6 +158,7 @@ class TakeSnapshotDialog(QDialog):
         self._cb_scoresaber     = QCheckBox("ScoreSaber (Player Info / Scores / Stats)", self)
         self._cb_beatleader     = QCheckBox("BeatLeader (Player Info / Scores / Stats)", self)
         self._cb_accsaber       = QCheckBox("AccSaber (Rank)", self)
+        self._cb_accsaber_rl    = QCheckBox("AccSaber Reloaded (Rank)", self)
 
         _cache_dir = BASE_DIR / "cache"
 
@@ -146,37 +186,61 @@ class TakeSnapshotDialog(QDialog):
                 pass
             return "Never fetched"
 
+        def _fmt_rl_map_counts_fetched_with_name(category: str) -> str:
+            try:
+                data = json.loads((_cache_dir / "accsaber_reloaded_map_counts.json").read_text(encoding="utf-8"))
+                if not isinstance(data, dict):
+                    return "Never fetched"
+                fat = data.get("fetched_at")
+                entry = data.get(category, {})
+                count = entry.get("count") if isinstance(entry, dict) else None
+                if fat and isinstance(fat, str):
+                    dt = datetime.fromisoformat(fat.rstrip("Z"))
+                    dt_local = dt.replace(tzinfo=timezone.utc).astimezone()
+                    date_str = dt_local.strftime("%Y-%m-%d %H:%M")
+                    count_str = f" ({count}maps)" if count is not None else ""
+                    return f"{date_str} <accsaber_reloaded_map_counts.json>{count_str}"
+            except Exception:  # noqa: BLE001
+                pass
+            return "Never fetched"
+
         _ss_id, _bl_id = _get_player_ids_from_index(default_steam_id)
 
+        # (checkbox, label_text, [extra_info_rows])
         _fetch_rows = [
-            (self._cb_ss_ranked_maps, _fmt_fetched_with_name(_cache_dir / "scoresaber_ranked_maps.json")),
-            (self._cb_bl_ranked_maps, _fmt_fetched_with_name(_cache_dir / "beatleader_ranked_maps.json")),
-            (self._cb_scoresaber,     _fmt_fetched_with_name(_cache_dir / f"scoresaber_player_scores_{_ss_id}.json") if _ss_id else "N/A"),
-            (self._cb_beatleader,     _fmt_fetched_with_name(_cache_dir / f"beatleader_player_scores_{_bl_id}.json") if _bl_id else "N/A"),
-            (self._cb_accsaber,       _fmt_fetched_with_name(_cache_dir / "accsaber_ranking.json")),
+            (self._cb_ss_ranked_maps, _fmt_fetched_with_name(_cache_dir / "scoresaber_ranked_maps.json"), []),
+            (self._cb_bl_ranked_maps, _fmt_fetched_with_name(_cache_dir / "beatleader_ranked_maps.json"), []),
+            (self._cb_scoresaber,     _fmt_fetched_with_name(_cache_dir / f"scoresaber_player_scores_{_ss_id}.json") if _ss_id else "N/A", []),
+            (self._cb_beatleader,     _fmt_fetched_with_name(_cache_dir / f"beatleader_player_scores_{_bl_id}.json") if _bl_id else "N/A", []),
+            (self._cb_accsaber,       _fmt_fetched_with_name(_cache_dir / "accsaber_ranking.json"), [
+                ("　　Ranking Data(players index):", _fmt_fetched_with_name(_cache_dir / "players_index.json")),
+                ("　　True Playlist:",     _fmt_playlist_fetched_with_name("true")),
+                ("　　Standard Playlist:", _fmt_playlist_fetched_with_name("standard")),
+                ("　　Tech Playlist:",     _fmt_playlist_fetched_with_name("tech")),
+            ]),
+            (self._cb_accsaber_rl,    _fmt_fetched_with_name(_cache_dir / "accsaber_reloaded_map_counts.json"), [
+                ("　　[RL] True Maps:",     _fmt_rl_map_counts_fetched_with_name("true")),
+                ("　　[RL] Standard Maps:", _fmt_rl_map_counts_fetched_with_name("standard")),
+                ("　　[RL] Tech Maps:",     _fmt_rl_map_counts_fetched_with_name("tech")),
+            ]),
         ]
 
-        for _row_idx, (cb, _label_text) in enumerate(_fetch_rows):
+        _grid_row = 0
+        for (cb, _label_text, _extra) in _fetch_rows:
             cb.setChecked(True)
-            group_layout.addWidget(cb, _row_idx, 0)
+            group_layout.addWidget(cb, _grid_row, 0)
             _lbl = QLabel(_label_text, self)
             _lbl.setStyleSheet("color: gray; font-size: 11px;")
-            group_layout.addWidget(_lbl, _row_idx, 1)
-
-        # AccSaber が参照する players_index.json / プレイリスト取得日時を追加表示
-        _extra_info_rows = [
-            ("　　Ranking Data(players index):", _fmt_fetched_with_name(_cache_dir / "players_index.json")),
-            ("　　True Playlist:",     _fmt_playlist_fetched_with_name("true")),
-            ("　　Standard Playlist:", _fmt_playlist_fetched_with_name("standard")),
-            ("　　Tech Playlist:",     _fmt_playlist_fetched_with_name("tech")),
-        ]
-        for _ei, (_ek_text, _ev_text) in enumerate(_extra_info_rows, start=len(_fetch_rows)):
-            _ek = QLabel(_ek_text, self)
-            _ek.setStyleSheet("color: gray; font-size: 11px;")
-            _ev = QLabel(_ev_text, self)
-            _ev.setStyleSheet("color: gray; font-size: 11px;")
-            group_layout.addWidget(_ek, _ei, 0)
-            group_layout.addWidget(_ev, _ei, 1)
+            group_layout.addWidget(_lbl, _grid_row, 1)
+            _grid_row += 1
+            for (_ek_text, _ev_text) in _extra:
+                _ek = QLabel(_ek_text, self)
+                _ek.setStyleSheet("color: gray; font-size: 11px;")
+                _ev = QLabel(_ev_text, self)
+                _ev.setStyleSheet("color: gray; font-size: 11px;")
+                group_layout.addWidget(_ek, _grid_row, 0)
+                group_layout.addWidget(_ev, _grid_row, 1)
+                _grid_row += 1
 
         layout.addWidget(group)
 
@@ -317,6 +381,7 @@ class TakeSnapshotDialog(QDialog):
             fetch_scoresaber=self._cb_scoresaber.isChecked(),
             fetch_beatleader=self._cb_beatleader.isChecked(),
             fetch_accsaber=self._cb_accsaber.isChecked(),
+            fetch_accsaber_reloaded=self._cb_accsaber_rl.isChecked(),
             fetch_ss_star_stats=True,
             fetch_bl_star_stats=True,
             ss_fetch_until=ss_until,
@@ -765,6 +830,21 @@ class PlayerWindow(QMainWindow):
             "Tech",
         ])
 
+        # AccSaber Reloaded 用の指標テーブル
+        self.acc_rl_table = QTableWidget(0, 5, self)
+        self.acc_rl_table.setStyleSheet(table_stylesheet())
+        self.acc_rl_table.verticalHeader().setDefaultSectionSize(14)
+        self.acc_rl_table.verticalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.acc_rl_table.verticalHeader().setMinimumSectionSize(0)
+        self.acc_rl_table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
+        self.acc_rl_table.setHorizontalHeaderLabels([
+            "Metric",
+            "Overall",
+            "True",
+            "Standard",
+            "Tech",
+        ])
+
         # SS ★別クリア統計テーブル
         # SS(スローソング) も未クリア扱いとして別カラムで表示するため、NF/SS の 2 列を用意する。
         self.star_table = QTableWidget(0, 12, self)
@@ -807,7 +887,7 @@ class PlayerWindow(QMainWindow):
 
         # 列幅は内容に合わせて自動調整し、最後の列がレイアウト都合で
         # 不自然に広がらないように stretchLastSection は無効にする
-        for table in (self.acc_table, self.star_table, self.bl_star_table):
+        for table in (self.acc_table, self.acc_rl_table, self.star_table, self.bl_star_table):
             header = table.horizontalHeader()
             header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
             header.setStretchLastSection(False)
@@ -818,6 +898,8 @@ class PlayerWindow(QMainWindow):
         icon_scoresaber = QIcon(str(resources_dir / "scoresaber_logo.svg"))
         icon_beatleader = QIcon(str(resources_dir / "beatleader_logo.jpg"))
         icon_accsaber = QIcon(str(resources_dir / "asssaber_logo.webp"))
+        _rl_logo_path = resources_dir / "accsaberreloaded_logo.png"
+        icon_accsaber_rl = QIcon(str(_rl_logo_path)) if _rl_logo_path.exists() else icon_accsaber
         # _update_view から参照できるようインスタンス属性として保存
         self._icon_scoresaber = icon_scoresaber
         self._icon_beatleader = icon_beatleader
@@ -828,6 +910,14 @@ class PlayerWindow(QMainWindow):
             item.setIcon(icon_accsaber)
             item.setToolTip("AccSaber")
             self.acc_table.setHorizontalHeaderItem(col, item)
+
+        # AccSaber Reloaded テーブル: データ列に AccSaber Reloaded アイコンを付与・行番号非表示
+        for col in range(1, 5):
+            item = self.acc_rl_table.horizontalHeaderItem(col) or QTableWidgetItem("")
+            item.setIcon(icon_accsaber_rl)
+            item.setToolTip("AccSaber Reloaded")
+            self.acc_rl_table.setHorizontalHeaderItem(col, item)
+        self.acc_rl_table.verticalHeader().setVisible(False)
 
         # ★テーブル: 先頭列ヘッダにサービスアイコン＋★を表示
         ss_star_header = self.star_table.horizontalHeaderItem(0) or QTableWidgetItem("★")
@@ -944,13 +1034,51 @@ class PlayerWindow(QMainWindow):
         left_bottom_layout.addWidget(self._acc_warning_label)
         left_bottom_layout.addStretch(1)
 
-        # 下部: 横スプリッタ [キャッシュ情報 | AccSaber テーブル]
+        # AccSaber テーブルをタイトル付きコンテナに包む (左下)
+        left_acc_widget = QWidget(self)
+        left_acc_layout = QVBoxLayout(left_acc_widget)
+        left_acc_layout.setContentsMargins(2, 2, 2, 2)
+        left_acc_layout.setSpacing(2)
+        _acc_title = QLabel("AccSaber", self)
+        _acc_title.setStyleSheet("font-weight: bold; font-size: 11px; padding: 0px 2px;")
+        left_acc_layout.addWidget(_acc_title)
+        left_acc_layout.addWidget(self.acc_table, 1)
+
+        # AccSaber Reloaded テーブルを右下に表示するウィジェット
+        right_bottom_widget = QWidget(self)
+        right_bottom_layout = QVBoxLayout(right_bottom_widget)
+        right_bottom_layout.setContentsMargins(2, 2, 2, 2)
+        right_bottom_layout.setSpacing(2)
+        # タイトル行: ラベル + 未プレイ抽出ボタン
+        _acc_rl_header = QWidget(self)
+        _acc_rl_header_layout = QHBoxLayout(_acc_rl_header)
+        _acc_rl_header_layout.setContentsMargins(0, 0, 0, 0)
+        _acc_rl_header_layout.setSpacing(4)
+        _acc_rl_title = QLabel("AccSaber Reloaded", self)
+        _acc_rl_title.setStyleSheet("font-weight: bold; font-size: 11px; padding: 0px 2px;")
+        self._acc_rl_xp_label = QLabel("", self)
+        self._acc_rl_xp_label.setStyleSheet("font-size: 11px; font-weight: 600; color: #3d90CC; padding: 0px 2px;")
+        self._btn_rl_unplayed = QPushButton("💾Unplayed", self)
+        self._btn_rl_unplayed.setToolTip("BeatLeader 未プレイの AccSaber Reloaded 譜面を bplist ファイルに出力する")
+        self._btn_rl_unplayed.setFixedHeight(20)
+        self._btn_rl_unplayed.setStyleSheet("font-size: 11px; padding: 1px 6px;")
+        self._btn_rl_unplayed.clicked.connect(self._on_export_rl_unplayed)
+        _acc_rl_header_layout.addWidget(_acc_rl_title)
+        _acc_rl_header_layout.addWidget(self._acc_rl_xp_label)
+        _acc_rl_header_layout.addStretch()
+        _acc_rl_header_layout.addWidget(self._btn_rl_unplayed)
+        right_bottom_layout.addWidget(_acc_rl_header)
+        right_bottom_layout.addWidget(self.acc_rl_table, 1)
+
+        # 下部: 横スプリッタ [AccSaber (タイトル+テーブル) | 警告ラベル | AccSaber Reloaded テーブル]
         bottom_h_splitter = QSplitter(Qt.Orientation.Horizontal, self)
-        bottom_h_splitter.addWidget(self.acc_table)
+        bottom_h_splitter.addWidget(left_acc_widget)
         bottom_h_splitter.addWidget(left_bottom_widget)
+        bottom_h_splitter.addWidget(right_bottom_widget)
         bottom_h_splitter.setStretchFactor(0, 1)
-        bottom_h_splitter.setStretchFactor(1, 1)
-        bottom_h_splitter.setSizes([357, 363])  # 初期サイズ配分の目安
+        bottom_h_splitter.setStretchFactor(1, 0)
+        bottom_h_splitter.setStretchFactor(2, 1)
+        bottom_h_splitter.setSizes([357, 0, 363])  # 初期サイズ配分の目安
 
         # 中央エリア (★テーブル) と下部エリアの間に縦スプリッタを設置
         mid_bottom_splitter = QSplitter(Qt.Orientation.Vertical, self)
@@ -958,7 +1086,7 @@ class PlayerWindow(QMainWindow):
         mid_bottom_splitter.addWidget(bottom_h_splitter)
         mid_bottom_splitter.setStretchFactor(0, 1)
         mid_bottom_splitter.setStretchFactor(1, 0)
-        mid_bottom_splitter.setSizes([600, 110])  # 初期サイズ配分の目安
+        mid_bottom_splitter.setSizes([600, 140])  # 初期サイズ配分の目安
 
         layout.addWidget(mid_bottom_splitter, 1)
 
@@ -1037,6 +1165,24 @@ class PlayerWindow(QMainWindow):
             return s or None
         return None
 
+    def _load_last_rl_unplayed_dir(self) -> Optional[str]:
+        """Unplayed 出力で最後に使ったフォルダを読み込む。"""
+
+        path = self._settings_path()
+        if not path.exists():
+            return None
+
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            return None
+
+        value = data.get("rl_unplayed_last_dir")
+        if isinstance(value, str):
+            s = value.strip()
+            return s or None
+        return None
+
     def _save_last_player_id(self) -> None:
         """現在選択中のプレイヤーIDをキャッシュに保存する。"""
 
@@ -1047,11 +1193,244 @@ class PlayerWindow(QMainWindow):
         path = self._settings_path()
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            payload = {"last_steam_id": steam_id}
+            payload = {}
+            if path.exists():
+                try:
+                    raw = json.loads(path.read_text(encoding="utf-8"))
+                    if isinstance(raw, dict):
+                        payload = raw
+                except Exception:  # noqa: BLE001
+                    payload = {}
+            payload["last_steam_id"] = steam_id
             path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         except Exception:  # noqa: BLE001
             # 設定保存に失敗しても画面の動作には影響させない
             return
+
+    def _save_last_rl_unplayed_dir(self, out_dir: str) -> None:
+        """Unplayed 出力で使ったフォルダを保存する。"""
+
+        out_dir = (out_dir or "").strip()
+        if not out_dir:
+            return
+
+        path = self._settings_path()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {}
+            if path.exists():
+                try:
+                    raw = json.loads(path.read_text(encoding="utf-8"))
+                    if isinstance(raw, dict):
+                        payload = raw
+                except Exception:  # noqa: BLE001
+                    payload = {}
+            payload["rl_unplayed_last_dir"] = out_dir
+            path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:  # noqa: BLE001
+            return
+
+    def _on_export_rl_unplayed(self) -> None:
+        """BeatLeader/ScoreSaber スコアを参照し、未プレイの AccSaber Reloaded 譜面を bplist ファイルに出力する。"""
+        import requests as _requests
+        from PySide6.QtWidgets import QFileDialog
+
+        steam_id = self._current_player_id()
+        if not steam_id:
+            QMessageBox.warning(self, "AccSaber Reloaded", "No player selected.")
+            return
+
+        ss_id, bl_id = _get_player_ids_from_index(steam_id)
+
+        # BeatLeader スコアキャッシュから played_set / played_bl_ids を収集
+        played_set: set = set()
+        played_bl_ids: set = set()
+        bl_scores_path = BASE_DIR / "cache" / f"beatleader_player_scores_{bl_id}.json"
+        if bl_scores_path.exists():
+            try:
+                bl_data = json.loads(bl_scores_path.read_text(encoding="utf-8"))
+                for score_val in (bl_data.get("scores") or {}).values():
+                    lb = score_val.get("leaderboard") or {}
+                    lb_id_val = lb.get("id")
+                    if lb_id_val:
+                        played_bl_ids.add(str(lb_id_val))
+                    song_hash = (lb.get("song") or {}).get("hash", "").lower()
+                    diff_obj = lb.get("difficulty") or {}
+                    mode = diff_obj.get("modeName", "Standard")
+                    diff_name = diff_obj.get("difficultyName", "")
+                    if song_hash and diff_name:
+                        played_set.add((song_hash, mode, diff_name))
+            except Exception:  # noqa: BLE001
+                pass
+
+        # ScoreSaber スコアキャッシュから played_set / played_ss_ids を収集
+        _ss_diff_map = {1: "Easy", 3: "Normal", 5: "Hard", 7: "Expert", 9: "ExpertPlus"}
+        _ss_mode_to_char = {
+            "SoloStandard": "Standard", "SoloOneSaber": "OneSaber",
+            "SoloNoArrows": "NoArrows", "SoloLightShow": "Lightshow",
+            "Solo360Degree": "360Degree", "Solo90Degree": "90Degree",
+        }
+        played_ss_ids: set = set()
+        ss_scores_path = BASE_DIR / "cache" / f"scoresaber_player_scores_{ss_id}.json"
+        if ss_scores_path.exists():
+            try:
+                ss_data = json.loads(ss_scores_path.read_text(encoding="utf-8"))
+                for score_val in (ss_data.get("scores") or {}).values():
+                    lb = score_val.get("leaderboard") or {}
+                    ss_lb_id = lb.get("id")
+                    if ss_lb_id:
+                        played_ss_ids.add(str(ss_lb_id))
+                    song_hash = lb.get("songHash", "").lower()
+                    diff_obj = lb.get("difficulty") or {}
+                    diff_num = diff_obj.get("difficulty")
+                    game_mode = diff_obj.get("gameMode", "SoloStandard")
+                    diff_name = _ss_diff_map.get(int(diff_num)) if diff_num is not None else None
+                    char = _ss_mode_to_char.get(game_mode, game_mode.replace("Solo", ""))
+                    if song_hash and diff_name:
+                        played_set.add((song_hash, char, diff_name))
+            except Exception:  # noqa: BLE001
+                pass
+
+        # API から全マップを取得
+        cancelled = {"value": False}
+        progress = QProgressDialog("Fetching AccSaber Reloaded map list...", "Cancel", 0, 100, self)
+        progress.setWindowTitle("AccSaber Reloaded Unplayed")
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.canceled.connect(lambda: cancelled.__setitem__("value", True))
+        progress.show()
+
+        try:
+            session = _requests.Session()
+
+            def _on_page(current: int, total: int) -> None:
+                if cancelled["value"]:
+                    raise RuntimeError("CANCELLED")
+                progress.setLabelText(
+                    f"Fetching AccSaber Reloaded map list... ({current}/{total} pages)"
+                )
+                progress.setValue(int(current / max(total, 1) * 100))
+                QApplication.processEvents()
+
+            all_maps = _rl_fetch_all_maps(session=session, on_progress=_on_page)
+        except RuntimeError:
+            progress.close()
+            return
+        except Exception as exc:  # noqa: BLE001
+            progress.close()
+            QMessageBox.warning(self, "AccSaber Reloaded", f"Failed to fetch map list:\n{exc}")
+            return
+        finally:
+            progress.close()
+
+        # 保存先フォルダを選択（前回の保存先を初期表示）
+        _last_dir = self._load_last_rl_unplayed_dir()
+        _initial_dir = Path(_last_dir) if _last_dir else Path.home()
+        if not _initial_dir.exists() or not _initial_dir.is_dir():
+            _initial_dir = Path.home()
+        save_dir = QFileDialog.getExistingDirectory(
+            self, "Select output folder", str(_initial_dir),
+        )
+        if not save_dir:
+            return
+
+        self._save_last_rl_unplayed_dir(save_dir)
+
+        save_dir_path = Path(save_dir)
+
+        # 保存処理中の体感フリーズを避けるため進捗を表示する
+        save_cancelled = {"value": False}
+        save_progress = QProgressDialog("Preparing unplayed map export...", "Cancel", 0, 7, self)
+        save_progress.setWindowTitle("AccSaber Reloaded Unplayed")
+        save_progress.setWindowModality(Qt.WindowModality.WindowModal)
+        save_progress.canceled.connect(lambda: save_cancelled.__setitem__("value", True))
+        save_progress.show()
+
+        def _set_save_step(step: int, text: str) -> None:
+            save_progress.setLabelText(text)
+            save_progress.setValue(step)
+            QApplication.processEvents()
+
+        _set_save_step(0, "Preparing unplayed map export...")
+        saved_files: list[str] = []
+        hint_lines: list[str] = []
+
+        try:
+            # AccSaber RL の総難易度数 (all_maps から集計) と rankedPlays を比較するための準備
+            _rl_cat_uuid_to_name = {v: k for k, v in _RL_CATEGORY_IDS.items() if k in ("true", "standard", "tech")}
+            total_rl_diffs_per_cat: Dict[str, int] = {"true": 0, "standard": 0, "tech": 0}
+            for _song in all_maps:
+                if save_cancelled["value"]:
+                    return
+                for _diff in _song.get("difficulties", []):
+                    if not _diff.get("active", False):
+                        continue
+                    _cat = _rl_cat_uuid_to_name.get(_diff.get("categoryId", ""))
+                    if _cat:
+                        total_rl_diffs_per_cat[_cat] += 1
+            _set_save_step(1, "Collecting ranked plays info...")
+
+            # AccSaber RL のプレイヤー rankedPlays を取得（国別フィルターで高速化）
+            country = self._ss_country_by_id.get(ss_id or "")
+            try:
+                rl_player_cats = _rl_fetch_player(bl_id or "", country, session)
+            except Exception:  # noqa: BLE001
+                rl_player_cats = {}
+
+            bplist_by_cat: Dict[str, list] = {}
+            ndiffs_by_cat: Dict[str, int] = {}
+            for idx, cat in enumerate(("true", "standard", "tech"), start=2):
+                if save_cancelled["value"]:
+                    return
+                _set_save_step(idx, f"Building {cat} unplayed list...")
+                bplist = _rl_build_unplayed_bplist(all_maps, played_set, cat, played_bl_ids, played_ss_ids)
+                songs = bplist.get("songs", [])
+                bplist_by_cat[cat] = songs
+                n_diffs = sum(len(s.get("difficulties", [])) for s in songs)
+                ndiffs_by_cat[cat] = n_diffs
+                if not songs:
+                    continue
+                filename = f"accsaber_reloaded_unplayed_{cat}.bplist"
+                out_path = save_dir_path / filename
+                _set_save_step(idx, f"Saving {filename}...")
+                out_path.write_text(_format_bplist(bplist), encoding="utf-8")
+                saved_files.append(f"{filename}  ({n_diffs} difficulties in {len(songs)} songs)")
+            _set_save_step(6, "Finalizing...")
+
+            # rankedPlays 比較ノートを作成（AccSaber RL の diff 数と bplist の diff 数を比較）
+            for cat in ("true", "standard", "tech"):
+                cat_entry = rl_player_cats.get(cat)
+                if cat_entry is None:
+                    continue
+                ranked_plays = cat_entry.ranked_plays
+                total = total_rl_diffs_per_cat.get(cat, 0)
+                if total <= 0:
+                    continue
+                expected_unplayed = total - ranked_plays
+                actual_unplayed_diffs = ndiffs_by_cat.get(cat, 0)
+                label = cat.capitalize()
+                if expected_unplayed != actual_unplayed_diffs:
+                    hint_lines.append(
+                        f"  [{label}] AccSaber RL: {ranked_plays}/{total} played "
+                        f"→ expected {expected_unplayed} unplayed diffs, got {actual_unplayed_diffs}"
+                    )
+
+            _set_save_step(7, "Done")
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "AccSaber Reloaded Unplayed", f"Failed to save unplayed maps:\n{exc}")
+            return
+        finally:
+            save_progress.close()
+
+        if saved_files:
+            msg = "Saved the following files:\n" + "\n".join(saved_files)
+            if hint_lines:
+                msg += "\n\nNote (AccSaber RL sync may be pending):\n" + "\n".join(hint_lines)
+            QMessageBox.information(self, "AccSaber Reloaded Unplayed", msg)
+        else:
+            QMessageBox.information(
+                self, "AccSaber Reloaded Unplayed",
+                "No unplayed maps found.",
+            )
 
     def _take_snapshot_for_current_player(self) -> bool:
         """Snapshot 取得時に任意の SteamID と取得オプションを選択できるダイアログを表示する。
@@ -1560,11 +1939,14 @@ class PlayerWindow(QMainWindow):
         self.ss_info_table.setStyleSheet(table_stylesheet())
         self.bl_info_table.setStyleSheet(table_stylesheet())
         self.acc_table.setStyleSheet(table_stylesheet())
+        self.acc_rl_table.setStyleSheet(table_stylesheet())
         self.ss_info_table.clearContents()
         self.bl_info_table.clearContents()
         self._ss_id_label.setText("")
         self._bl_id_label.setText("")
+        self._acc_rl_xp_label.setText("")
         self.acc_table.setRowCount(0)
+        self.acc_rl_table.setRowCount(0)
         self.star_table.setRowCount(0)
         self.bl_star_table.setRowCount(0)
         steam_id = self._current_player_id()
@@ -1925,6 +2307,65 @@ class PlayerWindow(QMainWindow):
                 self.acc_table.setItem(row, _col, _item)
 
         self.acc_table.resizeColumnsToContents()
+
+        # --- AccSaber Reloaded テーブルの更新 ---
+        rl_ap_overall = snap.accsaber_reloaded_overall_ap
+        rl_ap_true    = snap.accsaber_reloaded_true_ap
+        rl_ap_std     = snap.accsaber_reloaded_standard_ap
+        rl_ap_tech    = snap.accsaber_reloaded_tech_ap
+
+        # AccSaber Reloaded 総譜面数をキャッシュから取得
+        try:
+            _rl_map_counts = _get_reloaded_map_counts_from_cache()
+        except Exception:  # noqa: BLE001
+            _rl_map_counts = {}
+
+        def _rl_play_fmt(plays: int | None, cat: str) -> str:
+            if plays is None:
+                return ""
+            total = _rl_map_counts.get(cat)
+            if total:
+                return f"{plays:,}/{total:,}"
+            return f"{plays:,}"
+
+        acc_rl_rows = [
+            ("AP",
+             _format_ap(rl_ap_overall), _format_ap(rl_ap_true),
+             _format_ap(rl_ap_std), _format_ap(rl_ap_tech)),
+            ("Rank",
+             _format_acc_rank(snap.accsaber_reloaded_overall_rank, snap.accsaber_reloaded_overall_rank_country, acc_country_code),
+             _format_acc_rank(snap.accsaber_reloaded_true_rank,    snap.accsaber_reloaded_true_rank_country,    acc_country_code),
+             _format_acc_rank(snap.accsaber_reloaded_standard_rank, snap.accsaber_reloaded_standard_rank_country, acc_country_code),
+             _format_acc_rank(snap.accsaber_reloaded_tech_rank,    snap.accsaber_reloaded_tech_rank_country,    acc_country_code)),
+            ("Play Count",
+             _rl_play_fmt(snap.accsaber_reloaded_overall_ranked_plays,  "overall"),
+             _rl_play_fmt(snap.accsaber_reloaded_true_ranked_plays,     "true"),
+             _rl_play_fmt(snap.accsaber_reloaded_standard_ranked_plays, "standard"),
+             _rl_play_fmt(snap.accsaber_reloaded_tech_ranked_plays,     "tech")),
+        ]
+        _xp = snap.accsaber_reloaded_xp
+        _xp_level = snap.accsaber_reloaded_xp_level
+        _xp_str = None
+        if _xp is not None:
+            _xp_str = f"{_xp:,.0f}" + (f" (Lv.{_xp_level})" if _xp_level else "")
+        _xp_rank_str = _format_acc_rank(snap.accsaber_reloaded_xp_rank, snap.accsaber_reloaded_xp_rank_country, acc_country_code)
+        _xp_parts: list[str] = []
+        if _xp_str is not None:
+            _xp_parts.append(f"XP {_xp_str}")
+        if _xp_rank_str is not None:
+            _xp_parts.append(f"XP Rank {_xp_rank_str}")
+        self._acc_rl_xp_label.setText(" / ".join(_xp_parts))
+        for row, (label, overall, true, standard, tech) in enumerate(acc_rl_rows):
+            self.acc_rl_table.insertRow(row)
+            metric_item = QTableWidgetItem(label)
+            metric_item.setBackground(label_cell_color())
+            metric_item.setForeground(label_cell_text_color())
+            self.acc_rl_table.setItem(row, 0, metric_item)
+            self.acc_rl_table.setItem(row, 1, QTableWidgetItem("" if overall  is None else str(overall)))
+            self.acc_rl_table.setItem(row, 2, QTableWidgetItem("" if true     is None else str(true)))
+            self.acc_rl_table.setItem(row, 3, QTableWidgetItem("" if standard is None else str(standard)))
+            self.acc_rl_table.setItem(row, 4, QTableWidgetItem("" if tech     is None else str(tech)))
+        self.acc_rl_table.resizeColumnsToContents()
 
         # --- 警告メッセージをスナップショット保存済みフィールドから構築して表示 ---
         _warn_lines: list[str] = []
@@ -2369,7 +2810,7 @@ def run() -> None:
     window = PlayerWindow()
     # ScoreSaber / BeatLeader / AccSaber と★0〜15が見やすいように、やや横長＋縦広めに取る
     # stats画面のサイズ指定
-    window.resize(1220, 720)
+    window.resize(1220, 740)
     window.show()
 
     # 起動直後にスナップショットが1つも無い場合は、最初にだけ

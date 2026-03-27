@@ -46,6 +46,9 @@ from .accsaber import (
     _find_accsaber_for_scoresaber_id,
     _find_accsaber_skill_for_scoresaber_id,
 )
+from ..accsaber_reloaded import fetch_player_all_categories as _fetch_accsaber_reloaded
+from ..accsaber_reloaded import fetch_player_xp as _fetch_accsaber_reloaded_xp
+from ..accsaber_reloaded import fetch_reloaded_map_counts as _fetch_reloaded_map_counts
 
 # キャッシュディレクトリ(app.py と同じ BASE_DIR / "cache" を利用)
 CACHE_DIR = BASE_DIR / "cache"
@@ -66,6 +69,7 @@ class SnapshotOptions:
     fetch_scoresaber: bool = True        # ScoreSaber プレイヤー情報・スコア・統計
     fetch_beatleader: bool = True        # BeatLeader プレイヤー情報・スコア・統計
     fetch_accsaber: bool = True          # AccSaber ランク情報
+    fetch_accsaber_reloaded: bool = True # AccSaber Reloaded ランク情報
     fetch_ss_star_stats: bool = True     # ScoreSaber ★別クリア統計
     fetch_bl_star_stats: bool = True     # BeatLeader ★別クリア統計
     ss_fetch_until: Optional[datetime] = None  # ScoreSaber スコア取得の遡り期限 (None=自動)
@@ -582,6 +586,12 @@ def ensure_global_rank_caches(
     # AccSaber プレイリスト総譜面数を更新する（accsaber_playlist_counts.json）
     try:
         get_accsaber_playlist_map_counts_with_meta(session=session)
+    except Exception:  # noqa: BLE001
+        pass
+
+    # AccSaber Reloaded 総譜面数を更新する（accsaber_reloaded_map_counts.json）
+    try:
+        _fetch_reloaded_map_counts(session=session)
     except Exception:  # noqa: BLE001
         pass
 
@@ -1631,6 +1641,11 @@ def create_snapshot_for_steam_id(
             get_accsaber_playlist_map_counts_with_meta(session=session)
         except Exception:  # noqa: BLE001
             pass
+        # AccSaber Reloaded 総譜面数を更新する（accsaber_reloaded_map_counts.json）
+        try:
+            _fetch_reloaded_map_counts(session=session)
+        except Exception:  # noqa: BLE001
+            pass
     else:
         print("9. AccSaber 取得スキップ（オプションが無効）")
         _step(0.60, "Skipping AccSaber data...")
@@ -1638,6 +1653,84 @@ def create_snapshot_for_steam_id(
     # Overall AP は True / Standard / Tech の AP を合算した値とする
     if any(v is not None for v in (acc_true_ap, acc_standard_ap, acc_tech_ap)):
         acc_overall_ap = (acc_true_ap or 0.0) + (acc_standard_ap or 0.0) + (acc_tech_ap or 0.0)
+
+    # AccSaber Reloaded ランク情報を取得する
+    accsaber_reloaded_overall_rank:          Optional[int]   = None
+    accsaber_reloaded_overall_rank_country:  Optional[int]   = None
+    accsaber_reloaded_overall_ap:            Optional[float] = None
+    accsaber_reloaded_overall_ranked_plays:  Optional[int]   = None
+    accsaber_reloaded_true_rank:             Optional[int]   = None
+    accsaber_reloaded_true_rank_country:     Optional[int]   = None
+    accsaber_reloaded_true_ap:               Optional[float] = None
+    accsaber_reloaded_true_ranked_plays:     Optional[int]   = None
+    accsaber_reloaded_standard_rank:         Optional[int]   = None
+    accsaber_reloaded_standard_rank_country: Optional[int]   = None
+    accsaber_reloaded_standard_ap:           Optional[float] = None
+    accsaber_reloaded_standard_ranked_plays: Optional[int]   = None
+    accsaber_reloaded_tech_rank:             Optional[int]   = None
+    accsaber_reloaded_tech_rank_country:     Optional[int]   = None
+    accsaber_reloaded_tech_ap:               Optional[float] = None
+    accsaber_reloaded_tech_ranked_plays:     Optional[int]   = None
+    accsaber_reloaded_xp:                    Optional[float] = None
+    accsaber_reloaded_xp_level:              Optional[int]   = None
+    accsaber_reloaded_xp_rank:               Optional[int]   = None
+    accsaber_reloaded_xp_rank_country:       Optional[int]   = None
+
+    if options.fetch_accsaber_reloaded and scoresaber_id:
+        print("9.4R AccSaber Reloaded プレイヤーステータス取得...")
+        _step(0.62, "Fetching AccSaber Reloaded ranks...")
+        _rl_country = (scoresaber_country or "").upper() or None
+        try:
+            _rl_result = _fetch_accsaber_reloaded(scoresaber_id, country=_rl_country, session=session)
+        except Exception as exc:  # noqa: BLE001
+            _rethrow_if_cancelled(exc)
+            _rl_result = {}
+
+        def _pick(cat: str, attr: str, conv):
+            p = _rl_result.get(cat)
+            if p is None:
+                return None
+            v = getattr(p, attr, None)
+            if v is None:
+                return None
+            try:
+                return conv(v)
+            except (TypeError, ValueError):
+                return None
+
+        accsaber_reloaded_overall_rank          = _pick("overall",  "rank_global",   int)
+        accsaber_reloaded_overall_rank_country  = _pick("overall",  "rank_country",  int)
+        accsaber_reloaded_overall_ap            = _pick("overall",  "ap",            float)
+        accsaber_reloaded_overall_ranked_plays  = _pick("overall",  "ranked_plays",  int)
+        accsaber_reloaded_true_rank             = _pick("true",     "rank_global",   int)
+        accsaber_reloaded_true_rank_country     = _pick("true",     "rank_country",  int)
+        accsaber_reloaded_true_ap               = _pick("true",     "ap",            float)
+        accsaber_reloaded_true_ranked_plays     = _pick("true",     "ranked_plays",  int)
+        accsaber_reloaded_standard_rank         = _pick("standard", "rank_global",   int)
+        accsaber_reloaded_standard_rank_country = _pick("standard", "rank_country",  int)
+        accsaber_reloaded_standard_ap           = _pick("standard", "ap",            float)
+        accsaber_reloaded_standard_ranked_plays = _pick("standard", "ranked_plays",  int)
+        accsaber_reloaded_tech_rank             = _pick("tech",     "rank_global",   int)
+        accsaber_reloaded_tech_rank_country     = _pick("tech",     "rank_country",  int)
+        accsaber_reloaded_tech_ap               = _pick("tech",     "ap",            float)
+        accsaber_reloaded_tech_ranked_plays     = _pick("tech",     "ranked_plays",  int)
+
+        # XP ランク
+        try:
+            _rl_xp_result = _fetch_accsaber_reloaded_xp(scoresaber_id, country=_rl_country, session=session)
+        except Exception as exc:  # noqa: BLE001
+            _rethrow_if_cancelled(exc)
+            _rl_xp_result = None
+        if _rl_xp_result is not None:
+            accsaber_reloaded_xp            = _rl_xp_result.xp
+            accsaber_reloaded_xp_level      = _rl_xp_result.level
+            accsaber_reloaded_xp_rank       = _rl_xp_result.rank_global
+            accsaber_reloaded_xp_rank_country = _rl_xp_result.rank_country
+
+        print("9.4R AccSaber Reloaded プレイヤーステータス取得完了。")
+    else:
+        if not options.fetch_accsaber_reloaded:
+            print("9.4R AccSaber Reloaded 取得スキップ（オプションが無効）")
 
     # ScoreSaber / BeatLeader のスコア一覧から★別統計を集計する（失敗した場合は空リスト）。
     if options.fetch_ss_star_stats:
@@ -1719,6 +1812,27 @@ def create_snapshot_for_steam_id(
         accsaber_true_data_as_of=accsaber_true_data_as_of,
         accsaber_standard_data_as_of=accsaber_standard_data_as_of,
         accsaber_tech_data_as_of=accsaber_tech_data_as_of,
+        # AccSaber Reloaded ランク
+        accsaber_reloaded_overall_rank=accsaber_reloaded_overall_rank,
+        accsaber_reloaded_overall_rank_country=accsaber_reloaded_overall_rank_country,
+        accsaber_reloaded_overall_ap=accsaber_reloaded_overall_ap,
+        accsaber_reloaded_overall_ranked_plays=accsaber_reloaded_overall_ranked_plays,
+        accsaber_reloaded_true_rank=accsaber_reloaded_true_rank,
+        accsaber_reloaded_true_rank_country=accsaber_reloaded_true_rank_country,
+        accsaber_reloaded_true_ap=accsaber_reloaded_true_ap,
+        accsaber_reloaded_true_ranked_plays=accsaber_reloaded_true_ranked_plays,
+        accsaber_reloaded_standard_rank=accsaber_reloaded_standard_rank,
+        accsaber_reloaded_standard_rank_country=accsaber_reloaded_standard_rank_country,
+        accsaber_reloaded_standard_ap=accsaber_reloaded_standard_ap,
+        accsaber_reloaded_standard_ranked_plays=accsaber_reloaded_standard_ranked_plays,
+        accsaber_reloaded_tech_rank=accsaber_reloaded_tech_rank,
+        accsaber_reloaded_tech_rank_country=accsaber_reloaded_tech_rank_country,
+        accsaber_reloaded_tech_ap=accsaber_reloaded_tech_ap,
+        accsaber_reloaded_tech_ranked_plays=accsaber_reloaded_tech_ranked_plays,
+        accsaber_reloaded_xp=accsaber_reloaded_xp,
+        accsaber_reloaded_xp_level=accsaber_reloaded_xp_level,
+        accsaber_reloaded_xp_rank=accsaber_reloaded_xp_rank,
+        accsaber_reloaded_xp_rank_country=accsaber_reloaded_xp_rank_country,
         star_stats=star_stats,
         beatleader_star_stats=beatleader_star_stats,
     )
