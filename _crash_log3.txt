@@ -1,0 +1,2 @@
+C:\work\tool\MyBeatSaberStats\src\mybeatsaberstats\updater.py:434: RuntimeWarning: Failed to disconnect (None) from signal "clicked()".
+  self._button.clicked.disconnect()

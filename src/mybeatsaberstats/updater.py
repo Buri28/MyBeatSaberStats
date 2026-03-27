@@ -30,11 +30,13 @@ from __future__ import annotations
 import json
 import shutil
 import sys
+import threading
 from pathlib import Path
 from typing import Callable, NamedTuple
 
 import requests
-from PySide6.QtCore import QThread, Signal, Qt
+from PySide6.QtCore import QObject, QThread, Signal, Qt
+from PySide6.QtWidgets import QApplication
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QProgressBar, QTextEdit, QMessageBox,
@@ -152,13 +154,15 @@ def check_for_updates() -> UpdateInfo:
     current = get_current_version()
 
     if current is not None and not _version_gt(latest, current):
+        # 同バージョンでもリソース再取得のためにファイル一覧を取得する
+        files = _list_source_files_at_tag(tag)
         return UpdateInfo(
             has_update=False,
             current_version=current,
             latest_version=latest,
             latest_tag=tag,
             release_notes=notes,
-            files=[],
+            files=files,
         )
 
     # ダウンロード対象ファイル一覧をリリースタグの Git tree から取得
@@ -255,6 +259,10 @@ def apply_update(
 #  バックグラウンドスレッド
 # ------------------------------------------------------------------ #
 
+class _StartupCheckSignals(QObject):
+    finished = Signal(object)  # UpdateInfo
+    error = Signal(str)
+
 class _CheckThread(QThread):
     finished = Signal(object)  # UpdateInfo
     error    = Signal(str)
@@ -299,7 +307,21 @@ class UpdateDialog(QDialog):
         self._download_thread: _DownloadThread | None = None
 
         cur = info.current_version or "不明"
-        self.setWindowTitle(f"アップデート v{cur} → v{info.latest_version}")
+        if info.has_update:
+            self.setWindowTitle(f"アップデート v{cur} → v{info.latest_version}")
+            _header_text = (
+                f"<b>新しいバージョンが利用可能です</b><br>"
+                f"現在のバージョン: <b>v{cur}</b> &nbsp;→&nbsp; "
+                f"最新バージョン: <b>v{info.latest_version}</b>"
+            )
+            _update_btn_text = "今すぐアップデート"
+        else:
+            self.setWindowTitle(f"リソースを再取得 (v{info.latest_version})")
+            _header_text = (
+                f"<b>現在のバージョンは最新です (v{cur})</b><br>"
+                f"リソースファイルのみ再取得します。"
+            )
+            _update_btn_text = "リソースを再取得"
         self.setMinimumWidth(500)
         self.setWindowFlags(
             self.windowFlags() & ~Qt.WindowType.WindowContextHelpButtonHint
@@ -308,11 +330,7 @@ class UpdateDialog(QDialog):
         layout = QVBoxLayout(self)
 
         # バージョン表示
-        layout.addWidget(QLabel(
-            f"<b>新しいバージョンが利用可能です</b><br>"
-            f"現在のバージョン: <b>v{cur}</b> &nbsp;→&nbsp; "
-            f"最新バージョン: <b>v{info.latest_version}</b>"
-        ))
+        layout.addWidget(QLabel(_header_text))
 
         # リリースノート
         if info.release_notes.strip():
@@ -333,7 +351,7 @@ class UpdateDialog(QDialog):
 
         # ボタン
         btn_row = QHBoxLayout()
-        self._update_btn = QPushButton("今すぐアップデート")
+        self._update_btn = QPushButton(_update_btn_text)
         self._skip_btn   = QPushButton("スキップ")
         self._update_btn.clicked.connect(self._start_update)
         self._skip_btn.clicked.connect(self.reject)
@@ -345,13 +363,21 @@ class UpdateDialog(QDialog):
     def _start_update(self) -> None:
         self._update_btn.setEnabled(False)
         self._skip_btn.setEnabled(False)
-        n = len(self._info.files)
+
+        # 同バージョン時はリソースファイルのみ再取得する
+        if self._info.has_update:
+            info = self._info
+        else:
+            res_files = [f for f in self._info.files if f.startswith(_RESOURCES_PREFIX)]
+            info = self._info._replace(files=res_files)
+
+        n = len(info.files)
         self._progress_bar.setMaximum(n)
         self._progress_bar.setValue(0)
         self._progress_bar.show()
         self._progress_label.show()
 
-        self._download_thread = _DownloadThread(self._info)
+        self._download_thread = _DownloadThread(info)
         self._download_thread.progress.connect(self._on_progress)
         self._download_thread.finished.connect(self._on_finished)
         self._download_thread.error.connect(self._on_error)
@@ -396,35 +422,79 @@ class StartupUpdateChecker:
     def __init__(self, button: QPushButton, parent_widget=None) -> None:
         self._button = button
         self._parent = parent_widget
-        self._thread: _CheckThread | None = None
+        self._thread: threading.Thread | None = None
+        self._info: UpdateInfo | None = None
+        self._last_error: str | None = None
+        self._manual_retry_requested = False
+        self._signals = _StartupCheckSignals()
+        self._signals.finished.connect(self._on_checked)
+        self._signals.error.connect(self._on_error)
+        self._button.clicked.connect(self._on_button_clicked)
+        if parent_widget is not None and hasattr(parent_widget, "destroyed"):
+            parent_widget.destroyed.connect(self._on_parent_destroyed)
+        app = QApplication.instance()
+        if app is not None:
+            app.aboutToQuit.connect(self._on_parent_destroyed)
 
-    def start(self) -> None:
+    def start(self, *, manual: bool = False) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._info = None
+        self._last_error = None
+        self._manual_retry_requested = manual
         self._button.setEnabled(False)
         self._button.setText("🔄 確認中…")
+        self._button.setToolTip("GitHub Releases を確認しています")
         # テキスト変更後にボタン幅を固定し、以降の文字列変化でレイアウトがズレないようにする
         self._button.setMinimumWidth(self._button.sizeHint().width())
-        self._thread = _CheckThread()
-        self._thread.finished.connect(self._on_checked)
-        self._thread.error.connect(self._on_error)
+
+        def _worker() -> None:
+            try:
+                self._signals.finished.emit(check_for_updates())
+            except Exception as exc:  # noqa: BLE001
+                self._signals.error.emit(str(exc))
+
+        self._thread = threading.Thread(target=_worker, name="StartupUpdateChecker", daemon=True)
         self._thread.start()
 
     def _on_checked(self, info: UpdateInfo) -> None:
+        self._info = info
+        self._last_error = None
+        self._manual_retry_requested = False
         if info.has_update:
             self._button.setText(f"🆕 v{info.latest_version}")
             self._button.setEnabled(True)
-            # 多重接続を避けるため一度切断してから再接続
-            try:
-                self._button.clicked.disconnect()
-            except RuntimeError:
-                pass
-            self._button.clicked.connect(lambda: self._show_dialog(info))
+            self._button.setToolTip(f"v{info.latest_version} への更新があります")
         else:
             self._button.setText(f"✅ v{info.latest_version}")
             self._button.setEnabled(True)
+            if info.files:
+                self._button.setToolTip("最新版です。クリックでリソースを再取得できます")
+            else:
+                self._button.setToolTip("最新版です")
+        self._thread = None
 
     def _on_error(self, _msg: str) -> None:
-        self._button.setText("🔄 Update")
+        self._info = None
+        self._last_error = _msg
+        self._button.setText("⚠ Retry Update")
         self._button.setEnabled(True)
+        self._button.setToolTip(_msg)
+        self._thread = None
+        if self._manual_retry_requested:
+            QMessageBox.warning(self._parent, "Update", f"更新チェックに失敗しました:\n{_msg}")
+        self._manual_retry_requested = False
+
+    def _on_button_clicked(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            return
+        if self._info is not None and (self._info.has_update or self._info.files):
+            self._show_dialog(self._info)
+            return
+        self.start(manual=True)
+
+    def _on_parent_destroyed(self, *_args) -> None:
+        self._thread = None
 
     def _show_dialog(self, info: UpdateInfo) -> None:
         dlg = UpdateDialog(info, self._parent)

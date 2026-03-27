@@ -160,6 +160,32 @@ class Snapshot:
     accsaber_standard_data_as_of: str | None = None
     accsaber_tech_data_as_of: str | None = None
 
+    # AccSaber Reloaded ランキング（グローバル / 国別）
+    accsaber_reloaded_overall_rank: int | None = None
+    accsaber_reloaded_overall_rank_country: int | None = None
+    accsaber_reloaded_overall_ap: float | None = None
+    accsaber_reloaded_overall_ranked_plays: int | None = None
+
+    accsaber_reloaded_true_rank: int | None = None
+    accsaber_reloaded_true_rank_country: int | None = None
+    accsaber_reloaded_true_ap: float | None = None
+    accsaber_reloaded_true_ranked_plays: int | None = None
+
+    accsaber_reloaded_standard_rank: int | None = None
+    accsaber_reloaded_standard_rank_country: int | None = None
+    accsaber_reloaded_standard_ap: float | None = None
+    accsaber_reloaded_standard_ranked_plays: int | None = None
+
+    accsaber_reloaded_tech_rank: int | None = None
+    accsaber_reloaded_tech_rank_country: int | None = None
+    accsaber_reloaded_tech_ap: float | None = None
+    accsaber_reloaded_tech_ranked_plays: int | None = None
+
+    accsaber_reloaded_xp: float | None = None
+    accsaber_reloaded_xp_level: int | None = None
+    accsaber_reloaded_xp_rank: int | None = None
+    accsaber_reloaded_xp_rank_country: int | None = None
+
     # 実行時の警告メッセージ（保存しない）
     warnings: list = field(default_factory=list)
 

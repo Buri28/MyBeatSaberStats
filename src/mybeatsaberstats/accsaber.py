@@ -10,12 +10,12 @@ import requests
 
 from .snapshot import BASE_DIR
 
-BASE_URL = "https://api.accsaber.com/categories"
+BASE_URL = "https://accsaber.com/api/categories"
 
 _PLAYLIST_URLS: Dict[str, str] = {
-    "true": "https://api.accsaber.com/playlists/true",
-    "standard": "https://api.accsaber.com/playlists/standard",
-    "tech": "https://api.accsaber.com/playlists/tech",
+    "true": "https://accsaber.com/api/playlists/true",
+    "standard": "https://accsaber.com/api/playlists/standard",
+    "tech": "https://accsaber.com/api/playlists/tech",
 }
 
 # in-memory cache: Optional[Tuple[counts, fetched_ats, from_cache_flags]]
@@ -153,7 +153,7 @@ def _filter_by_country(
 ) -> List[AccSaberPlayer]:
     """国別ランキングを取得する（api.accsaber.com/countries/{country}/categories/{category}/standings）。"""
 
-    url = f"https://api.accsaber.com/countries/{country.lower()}/categories/{category}/standings"
+    url = f"https://accsaber.com/api/countries/{country.lower()}/categories/{category}/standings"
 
     try:
         resp = session.get(url, timeout=30)

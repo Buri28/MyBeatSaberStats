@@ -6,7 +6,7 @@ from typing import List, Optional
 from datetime import datetime, timezone
 import json
 import re
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, QSize
 from PySide6.QtGui import QColor, QIcon, QPalette
 from .theme import (
     label_cell_color,
@@ -39,6 +39,7 @@ from PySide6.QtWidgets import (
 
 from .snapshot import Snapshot, SNAPSHOT_DIR, BASE_DIR, RESOURCES_DIR
 from .accsaber import get_accsaber_playlist_map_counts_from_cache
+from .accsaber_reloaded import get_reloaded_map_counts_from_cache as _get_reloaded_map_counts_from_cache
 
 
 class PercentageBarDelegate(QStyledItemDelegate):
@@ -214,7 +215,7 @@ class SnapshotCompareDialog(QDialog):
             | Qt.WindowType.WindowMaximizeButtonHint
             | Qt.WindowType.WindowMinimizeButtonHint
         )
-        self.resize(1500, 680)
+        self.resize(1500, 720)
 
         # steam_id ごとにスナップショットを管理する
         self._snapshots_by_player: dict[str, List[Snapshot]] = {}
@@ -230,6 +231,8 @@ class SnapshotCompareDialog(QDialog):
         self._icon_scoresaber = QIcon(str(resources_dir / "scoresaber_logo.svg"))
         self._icon_beatleader = QIcon(str(resources_dir / "beatleader_logo.jpg"))
         self._icon_accsaber = QIcon(str(resources_dir / "asssaber_logo.webp"))
+        _rl_logo_path = resources_dir / "accsaberreloaded_logo.png"
+        self._icon_accsaber_rl = QIcon(str(_rl_logo_path)) if _rl_logo_path.exists() else self._icon_accsaber
 
         # 上部: 左右プレイヤー選択 + それぞれのスナップショット日時選択
         top_grid = QGridLayout()
@@ -278,6 +281,8 @@ class SnapshotCompareDialog(QDialog):
         self.btn_toggle_ss.setChecked(True)
         self.btn_toggle_ss.setFixedWidth(45)
         self.btn_toggle_ss.setToolTip("ScoreSaber 列の表示/非表示")
+        self.btn_toggle_ss.setIcon(self._icon_scoresaber)
+        self.btn_toggle_ss.setIconSize(QSize(14, 14))
         self.btn_toggle_ss.setStyleSheet(toggle_button_stylesheet())
         top_grid.addWidget(self.btn_toggle_ss, 0, 8)
 
@@ -286,8 +291,32 @@ class SnapshotCompareDialog(QDialog):
         self.btn_toggle_bl.setChecked(True)
         self.btn_toggle_bl.setFixedWidth(45)
         self.btn_toggle_bl.setToolTip("BeatLeader 列の表示/非表示")
+        self.btn_toggle_bl.setIcon(self._icon_beatleader)
+        self.btn_toggle_bl.setIconSize(QSize(14, 14))
         self.btn_toggle_bl.setStyleSheet(toggle_button_stylesheet())
         top_grid.addWidget(self.btn_toggle_bl, 0, 9)
+
+        # AccSaber モード切り替えボタン (AccSaber / AccSaber Reloaded) — Metric/SS/BL の右隣
+        self._acc_mode: str = "AS"  # "AS" or "RL"
+        self.btn_acc_as = QPushButton("AccSaber", self)
+        self.btn_acc_as.setCheckable(True)
+        self.btn_acc_as.setChecked(True)
+        self.btn_acc_as.setFixedWidth(100)
+        self.btn_acc_as.setToolTip("AccSaberを表示")
+        self.btn_acc_as.setIcon(self._icon_accsaber)
+        self.btn_acc_as.setIconSize(QSize(14, 14))
+        self.btn_acc_as.setStyleSheet(toggle_button_stylesheet())
+        top_grid.addWidget(self.btn_acc_as, 0, 10)
+
+        self.btn_acc_rl = QPushButton("AccSaber RL", self)
+        self.btn_acc_rl.setCheckable(True)
+        self.btn_acc_rl.setChecked(False)
+        self.btn_acc_rl.setFixedWidth(100)
+        self.btn_acc_rl.setToolTip("AccSaber Reloadedを表示")
+        self.btn_acc_rl.setIcon(self._icon_accsaber_rl)
+        self.btn_acc_rl.setIconSize(QSize(14, 14))
+        self.btn_acc_rl.setStyleSheet(toggle_button_stylesheet())
+        top_grid.addWidget(self.btn_acc_rl, 0, 11)
 
         # SS/BL テーブル列グループ 表示/非表示チェックボックス（SS/BL ボタンの下に配置）
         _chk_container = QWidget(self)
@@ -308,11 +337,11 @@ class SnapshotCompareDialog(QDialog):
             _chk_layout.addWidget(_chk)
         # 全選択 / 全解除ボタン
         btn_chk_all = QPushButton("All", _chk_container)
-        btn_chk_all.setFixedWidth(36)
+        btn_chk_all.setFixedWidth(60)
         btn_chk_all.setToolTip("全チェック")
         btn_chk_all.clicked.connect(self._on_chk_all)
         btn_chk_none = QPushButton("None", _chk_container)
-        btn_chk_none.setFixedWidth(44)
+        btn_chk_none.setFixedWidth(60)
         btn_chk_none.setToolTip("全解除")
         btn_chk_none.clicked.connect(self._on_chk_none)
         _chk_layout.addWidget(btn_chk_all)
@@ -448,31 +477,36 @@ class SnapshotCompareDialog(QDialog):
         self.bl_star_table.verticalHeader().setVisible(False)
 
         # パーセンテージ列に横棒グラフを表示するデリゲートを適用
-        perc_clear = PercentageBarDelegate(self, max_value=100.0, gradient_min=0.0)
-        perc_acc = PercentageBarDelegate(self, max_value=100.0, gradient_min=75.0)
-        perc_pp = ColumnMaxBarDelegate(self)
+        # NOTE:
+        # delegate の所有関係を明確にするため parent は dialog(self) に統一し、
+        # 参照を self 側で保持する。
+        self._table_delegates: list[QStyledItemDelegate] = []
+
+        def _bind_delegate(table: QTableWidget, column: int, delegate: QStyledItemDelegate) -> None:
+            self._table_delegates.append(delegate)
+            table.setItemDelegateForColumn(column, delegate)
 
         # 新列順: ★|Clear群|FC群|AvgAcc群|★|PP群|SPP群
         # Clear 列 (A Clear / B Clear) のカッコ内の % と、AvgAcc 列にバーを表示する。
         # ScoreSaber 側
-        self.ss_star_table.setItemDelegateForColumn(1, perc_clear)   # A Clear
-        self.ss_star_table.setItemDelegateForColumn(2, perc_clear)   # B Clear
-        self.ss_star_table.setItemDelegateForColumn(4, perc_clear)   # A FC
-        self.ss_star_table.setItemDelegateForColumn(5, perc_clear)   # B FC
-        self.ss_star_table.setItemDelegateForColumn(7, perc_acc)     # A AvgAcc
-        self.ss_star_table.setItemDelegateForColumn(8, perc_acc)     # B AvgAcc
-        self.ss_star_table.setItemDelegateForColumn(11, perc_pp)     # A PP
-        self.ss_star_table.setItemDelegateForColumn(12, perc_pp)     # B PP
+        _bind_delegate(self.ss_star_table, 1, PercentageBarDelegate(self, max_value=100.0, gradient_min=0.0))   # A Clear
+        _bind_delegate(self.ss_star_table, 2, PercentageBarDelegate(self, max_value=100.0, gradient_min=0.0))   # B Clear
+        _bind_delegate(self.ss_star_table, 4, PercentageBarDelegate(self, max_value=100.0, gradient_min=0.0))   # A FC
+        _bind_delegate(self.ss_star_table, 5, PercentageBarDelegate(self, max_value=100.0, gradient_min=0.0))   # B FC
+        _bind_delegate(self.ss_star_table, 7, PercentageBarDelegate(self, max_value=100.0, gradient_min=75.0))  # A AvgAcc
+        _bind_delegate(self.ss_star_table, 8, PercentageBarDelegate(self, max_value=100.0, gradient_min=75.0))  # B AvgAcc
+        _bind_delegate(self.ss_star_table, 11, ColumnMaxBarDelegate(self))                                       # A PP
+        _bind_delegate(self.ss_star_table, 12, ColumnMaxBarDelegate(self))                                       # B PP
 
         # BeatLeader 側
-        self.bl_star_table.setItemDelegateForColumn(1, perc_clear)   # A Clear
-        self.bl_star_table.setItemDelegateForColumn(2, perc_clear)   # B Clear
-        self.bl_star_table.setItemDelegateForColumn(4, perc_clear)   # A FC
-        self.bl_star_table.setItemDelegateForColumn(5, perc_clear)   # B FC
-        self.bl_star_table.setItemDelegateForColumn(7, perc_acc)     # A AvgAcc
-        self.bl_star_table.setItemDelegateForColumn(8, perc_acc)     # B AvgAcc
-        self.bl_star_table.setItemDelegateForColumn(11, perc_pp)     # A PP
-        self.bl_star_table.setItemDelegateForColumn(12, perc_pp)     # B PP
+        _bind_delegate(self.bl_star_table, 1, PercentageBarDelegate(self, max_value=100.0, gradient_min=0.0))   # A Clear
+        _bind_delegate(self.bl_star_table, 2, PercentageBarDelegate(self, max_value=100.0, gradient_min=0.0))   # B Clear
+        _bind_delegate(self.bl_star_table, 4, PercentageBarDelegate(self, max_value=100.0, gradient_min=0.0))   # A FC
+        _bind_delegate(self.bl_star_table, 5, PercentageBarDelegate(self, max_value=100.0, gradient_min=0.0))   # B FC
+        _bind_delegate(self.bl_star_table, 7, PercentageBarDelegate(self, max_value=100.0, gradient_min=75.0))  # A AvgAcc
+        _bind_delegate(self.bl_star_table, 8, PercentageBarDelegate(self, max_value=100.0, gradient_min=75.0))  # B AvgAcc
+        _bind_delegate(self.bl_star_table, 11, ColumnMaxBarDelegate(self))                                       # A PP
+        _bind_delegate(self.bl_star_table, 12, ColumnMaxBarDelegate(self))                                       # B PP
 
         root_layout.addWidget(self._splitter, 1)
         # デフォルトの分割比率
@@ -495,6 +529,8 @@ class SnapshotCompareDialog(QDialog):
         self.btn_toggle_ss.toggled.connect(self._on_toggle_ss)
         self.btn_toggle_bl.toggled.connect(self._on_toggle_bl)
         self.btn_toggle_metric.toggled.connect(self._on_toggle_metric)
+        self.btn_acc_as.clicked.connect(self._on_acc_mode_as)
+        self.btn_acc_rl.clicked.connect(self._on_acc_mode_rl)
         self.chk_col_clear.toggled.connect(self._apply_star_col_visibility)
         self.chk_col_fc.toggled.connect(self._apply_star_col_visibility)
         self.chk_col_acc.toggled.connect(self._apply_star_col_visibility)
@@ -674,6 +710,11 @@ class SnapshotCompareDialog(QDialog):
 
     def _restore_ui_state(self, data: dict) -> None:
         """JSON data からトグル/チェックボックスの状態を復元する。"""
+        acc_mode = data.get("ui_acc_mode")
+        if acc_mode in ("AS", "RL"):
+            self._acc_mode = acc_mode
+            self.btn_acc_as.setChecked(acc_mode == "AS")
+            self.btn_acc_rl.setChecked(acc_mode == "RL")
         for btn, key in (
             (self.btn_toggle_metric, "ui_toggle_metric"),
             (self.btn_toggle_ss,     "ui_toggle_ss"),
@@ -719,6 +760,7 @@ class SnapshotCompareDialog(QDialog):
                 data = {}
 
             # UI 状態（トグルボタン・チェックボックス）を常に保存
+            data["ui_acc_mode"]      = self._acc_mode
             data["ui_toggle_metric"] = self.btn_toggle_metric.isChecked()
             data["ui_toggle_ss"]     = self.btn_toggle_ss.isChecked()
             data["ui_toggle_bl"]     = self.btn_toggle_bl.isChecked()
@@ -845,6 +887,22 @@ class SnapshotCompareDialog(QDialog):
         self._rebalance_splitter()
         self._save_last_selection()
 
+    def _on_acc_mode_as(self) -> None:
+        """AccSaber モードに切り替える。"""
+        self._acc_mode = "AS"
+        self.btn_acc_as.setChecked(True)
+        self.btn_acc_rl.setChecked(False)
+        self._update_view2()
+        self._save_last_selection()
+
+    def _on_acc_mode_rl(self) -> None:
+        """AccSaber Reloaded モードに切り替える。"""
+        self._acc_mode = "RL"
+        self.btn_acc_as.setChecked(False)
+        self.btn_acc_rl.setChecked(True)
+        self._update_view2()
+        self._save_last_selection()
+
     def _on_toggle_ss(self, checked: bool) -> None:
         """ScoreSaber ★別テーブルの表示/非表示を切り替える。"""
         self.ss_star_table.setVisible(checked)
@@ -966,6 +1024,9 @@ class SnapshotCompareDialog(QDialog):
         elif label.startswith("[AS] "):
             icon = self._icon_accsaber
             text = label[len("[AS] "):]
+        elif label.startswith("[RL] "):
+            icon = self._icon_accsaber_rl
+            text = label[len("[RL] "):]
 
         item0 = QTableWidgetItem(text)
         item0.setBackground(label_cell_color())
@@ -1097,15 +1158,23 @@ class SnapshotCompareDialog(QDialog):
         ])
 
         # ★列ヘッダにサービスアイコンを設定
-        ss_head = self.ss_star_table.horizontalHeaderItem(0) or QTableWidgetItem("★")
-        ss_head.setIcon(self._icon_scoresaber)
-        ss_head.setToolTip("ScoreSaber")
-        self.ss_star_table.setHorizontalHeaderItem(0, ss_head)
+        ss_head_0 = self.ss_star_table.horizontalHeaderItem(0) or QTableWidgetItem("★")
+        ss_head_0.setIcon(self._icon_scoresaber)
+        ss_head_0.setToolTip("ScoreSaber")
+        self.ss_star_table.setHorizontalHeaderItem(0, ss_head_0)
+        ss_head_10 = self.ss_star_table.horizontalHeaderItem(10) or QTableWidgetItem("★")
+        ss_head_10.setIcon(self._icon_scoresaber)
+        ss_head_10.setToolTip("ScoreSaber")
+        self.ss_star_table.setHorizontalHeaderItem(10, ss_head_10)
 
-        bl_head = self.bl_star_table.horizontalHeaderItem(0) or QTableWidgetItem("★")
-        bl_head.setIcon(self._icon_beatleader)
-        bl_head.setToolTip("BeatLeader")
-        self.bl_star_table.setHorizontalHeaderItem(0, bl_head)
+        bl_head_0 = self.bl_star_table.horizontalHeaderItem(0) or QTableWidgetItem("★")
+        bl_head_0.setIcon(self._icon_beatleader)
+        bl_head_0.setToolTip("BeatLeader")
+        self.bl_star_table.setHorizontalHeaderItem(0, bl_head_0)
+        bl_head_10 = self.bl_star_table.horizontalHeaderItem(10) or QTableWidgetItem("★")
+        bl_head_10.setIcon(self._icon_beatleader)
+        bl_head_10.setToolTip("BeatLeader")
+        self.bl_star_table.setHorizontalHeaderItem(10, bl_head_10)
 
         # 上段: Player / ACC / AccSaber 系の指標
 
@@ -1265,121 +1334,29 @@ class SnapshotCompareDialog(QDialog):
         )
         row_main += 1
 
-        # AccSaber AP
+        # AccSaber 用ヘルパー (AS モード時に使用、事前定義)
         def _overall_ap_from_snapshot(snap: Snapshot) -> float | None:
             """True/Standard/Tech の AP 合計を Overall として扱う。
 
             古いスナップショットで per-skill AP が無い場合だけ、
             保存済みの overall_ap をそのまま使う。
             """
-
             true_ap = snap.accsaber_true_ap
             standard_ap = snap.accsaber_standard_ap
             tech_ap = snap.accsaber_tech_ap
-
             if any(v is not None for v in (true_ap, standard_ap, tech_ap)):
                 return (true_ap or 0.0) + (standard_ap or 0.0) + (tech_ap or 0.0)
             return snap.accsaber_overall_ap
 
-        overall_ap_a = _overall_ap_from_snapshot(snap_a)
-        overall_ap_b = _overall_ap_from_snapshot(snap_b)
-
-        self._set_row(
-            self.table,
-            row_main,
-            "[AS] Overall AP",
-            (round(overall_ap_a, 2) if overall_ap_a is not None else None),
-            (round(overall_ap_b, 2) if overall_ap_b is not None else None),
-        )
-        row_main += 1
-
-        self._set_row(
-            self.table,
-            row_main,
-            "[AS] True AP",
-            (round(snap_a.accsaber_true_ap, 2) if snap_a.accsaber_true_ap is not None else None),
-            (round(snap_b.accsaber_true_ap, 2) if snap_b.accsaber_true_ap is not None else None),
-        )
-        row_main += 1
-
-        self._set_row(
-            self.table,
-            row_main,
-            "[AS] Standard AP",
-            (round(snap_a.accsaber_standard_ap, 2) if snap_a.accsaber_standard_ap is not None else None),
-            (round(snap_b.accsaber_standard_ap, 2) if snap_b.accsaber_standard_ap is not None else None),
-        )
-        row_main += 1
-
-        self._set_row(
-            self.table,
-            row_main,
-            "[AS] Tech AP",
-            (round(snap_a.accsaber_tech_ap, 2) if snap_a.accsaber_tech_ap is not None else None),
-            (round(snap_b.accsaber_tech_ap, 2) if snap_b.accsaber_tech_ap is not None else None),
-        )
-        row_main += 1
-
-        # AccSaber Rank (Global + Country を 1 行にまとめる)
-        # Country Rank はスナップショット撮影時に計算した保存値をそのまま使う。
-        # キャッシュを再計算すると snap_a / snap_b が「同じ現時点のランク」を参照してしまい
-        # 比較が無意味になるため。
-        row_main = _set_combined_rank_row(
-            row_main,
-            "[AS] Overall Rank",
-            snap_a.accsaber_overall_rank,
-            snap_a.scoresaber_country,
-            snap_a.accsaber_overall_rank_country,
-            snap_b.accsaber_overall_rank,
-            snap_b.scoresaber_country,
-            snap_b.accsaber_overall_rank_country,
-        )
-
-        row_main = _set_combined_rank_row(
-            row_main,
-            "[AS] True Rank",
-            snap_a.accsaber_true_rank,
-            snap_a.scoresaber_country,
-            snap_a.accsaber_true_rank_country,
-            snap_b.accsaber_true_rank,
-            snap_b.scoresaber_country,
-            snap_b.accsaber_true_rank_country,
-        )
-
-        row_main = _set_combined_rank_row(
-            row_main,
-            "[AS] Standard Rank",
-            snap_a.accsaber_standard_rank,
-            snap_a.scoresaber_country,
-            snap_a.accsaber_standard_rank_country,
-            snap_b.accsaber_standard_rank,
-            snap_b.scoresaber_country,
-            snap_b.accsaber_standard_rank_country,
-        )
-
-        row_main = _set_combined_rank_row(
-            row_main,
-            "[AS] Tech Rank",
-            snap_a.accsaber_tech_rank,
-            snap_a.scoresaber_country,
-            snap_a.accsaber_tech_rank_country,
-            snap_b.accsaber_tech_rank,
-            snap_b.scoresaber_country,
-            snap_b.accsaber_tech_rank_country,
-        )
-
-        # AccSaber Play Count
         def _overall_play_from_snapshot(snap: Snapshot) -> int | None:
             """True/Standard/Tech の Play Count 合計を Overall として扱う。
 
             古いスナップショットで per-skill のプレイ数が無い場合だけ、
             保存済みの overall_play_count をそのまま使う。
             """
-
             true_pc = snap.accsaber_true_play_count
             standard_pc = snap.accsaber_standard_play_count
             tech_pc = snap.accsaber_tech_play_count
-
             if any(v is not None for v in (true_pc, standard_pc, tech_pc)):
                 return (true_pc or 0) + (standard_pc or 0) + (tech_pc or 0)
             return snap.accsaber_overall_play_count
@@ -1403,41 +1380,177 @@ class SnapshotCompareDialog(QDialog):
                 return plays
             return (plays, f"{plays:,}/{total:,}")
 
-        self._set_row(
-            self.table,
-            row_main,
-            "[AS] Overall Play Count",
-            _play_fmt(_overall_play_from_snapshot(snap_a), _cmp_overall_total),
-            _play_fmt(_overall_play_from_snapshot(snap_b), _cmp_overall_total),
-        )
-        row_main += 1
+        # AccSaber / AccSaber Reloaded (モードに応じて切り替え)
+        if self._acc_mode == "RL":
+            # --- AccSaber Reloaded ---
+            self._set_row(
+                self.table, row_main, "[RL] Overall AP",
+                round(snap_a.accsaber_reloaded_overall_ap, 2) if snap_a.accsaber_reloaded_overall_ap is not None else None,
+                round(snap_b.accsaber_reloaded_overall_ap, 2) if snap_b.accsaber_reloaded_overall_ap is not None else None,
+            )
+            row_main += 1
+            self._set_row(
+                self.table, row_main, "[RL] True AP",
+                round(snap_a.accsaber_reloaded_true_ap, 2) if snap_a.accsaber_reloaded_true_ap is not None else None,
+                round(snap_b.accsaber_reloaded_true_ap, 2) if snap_b.accsaber_reloaded_true_ap is not None else None,
+            )
+            row_main += 1
+            self._set_row(
+                self.table, row_main, "[RL] Standard AP",
+                round(snap_a.accsaber_reloaded_standard_ap, 2) if snap_a.accsaber_reloaded_standard_ap is not None else None,
+                round(snap_b.accsaber_reloaded_standard_ap, 2) if snap_b.accsaber_reloaded_standard_ap is not None else None,
+            )
+            row_main += 1
+            self._set_row(
+                self.table, row_main, "[RL] Tech AP",
+                round(snap_a.accsaber_reloaded_tech_ap, 2) if snap_a.accsaber_reloaded_tech_ap is not None else None,
+                round(snap_b.accsaber_reloaded_tech_ap, 2) if snap_b.accsaber_reloaded_tech_ap is not None else None,
+            )
+            row_main += 1
+            row_main = _set_combined_rank_row(
+                row_main, "[RL] Overall Rank",
+                snap_a.accsaber_reloaded_overall_rank, snap_a.scoresaber_country, snap_a.accsaber_reloaded_overall_rank_country,
+                snap_b.accsaber_reloaded_overall_rank, snap_b.scoresaber_country, snap_b.accsaber_reloaded_overall_rank_country,
+            )
+            row_main = _set_combined_rank_row(
+                row_main, "[RL] True Rank",
+                snap_a.accsaber_reloaded_true_rank, snap_a.scoresaber_country, snap_a.accsaber_reloaded_true_rank_country,
+                snap_b.accsaber_reloaded_true_rank, snap_b.scoresaber_country, snap_b.accsaber_reloaded_true_rank_country,
+            )
+            row_main = _set_combined_rank_row(
+                row_main, "[RL] Standard Rank",
+                snap_a.accsaber_reloaded_standard_rank, snap_a.scoresaber_country, snap_a.accsaber_reloaded_standard_rank_country,
+                snap_b.accsaber_reloaded_standard_rank, snap_b.scoresaber_country, snap_b.accsaber_reloaded_standard_rank_country,
+            )
+            row_main = _set_combined_rank_row(
+                row_main, "[RL] Tech Rank",
+                snap_a.accsaber_reloaded_tech_rank, snap_a.scoresaber_country, snap_a.accsaber_reloaded_tech_rank_country,
+                snap_b.accsaber_reloaded_tech_rank, snap_b.scoresaber_country, snap_b.accsaber_reloaded_tech_rank_country,
+            )
+            self._set_row(
+                self.table, row_main, "[RL] XP",
+                int(round(snap_a.accsaber_reloaded_xp)) if snap_a.accsaber_reloaded_xp is not None else None,
+                int(round(snap_b.accsaber_reloaded_xp)) if snap_b.accsaber_reloaded_xp is not None else None,
+            )
+            row_main += 1
+            row_main = _set_combined_rank_row(
+                row_main, "[RL] XP Rank",
+                snap_a.accsaber_reloaded_xp_rank, snap_a.scoresaber_country, snap_a.accsaber_reloaded_xp_rank_country,
+                snap_b.accsaber_reloaded_xp_rank, snap_b.scoresaber_country, snap_b.accsaber_reloaded_xp_rank_country,
+            )
 
-        self._set_row(
-            self.table,
-            row_main,
-            "[AS] True Play Count",
-            _play_fmt(snap_a.accsaber_true_play_count, _cmp_true_total),
-            _play_fmt(snap_b.accsaber_true_play_count, _cmp_true_total),
-        )
-        row_main += 1
+            # AccSaber Reloaded 総譜面数をキャッシュから取得
+            try:
+                _rl_map_counts = _get_reloaded_map_counts_from_cache()
+            except Exception:  # noqa: BLE001
+                _rl_map_counts = {}
 
-        self._set_row(
-            self.table,
-            row_main,
-            "[AS] Standard Play Count",
-            _play_fmt(snap_a.accsaber_standard_play_count, _cmp_standard_total),
-            _play_fmt(snap_b.accsaber_standard_play_count, _cmp_standard_total),
-        )
-        row_main += 1
+            def _rl_plays_fmt(plays: int | None, cat: str):
+                """playsを (int, 'xxx/yyy') タプルまたは int で返す。"""
+                if plays is None:
+                    return None
+                total = _rl_map_counts.get(cat)
+                if total:
+                    return (plays, f"{plays:,}/{total:,}")
+                return plays
 
-        self._set_row(
-            self.table,
-            row_main,
-            "[AS] Tech Play Count",
-            _play_fmt(snap_a.accsaber_tech_play_count, _cmp_tech_total),
-            _play_fmt(snap_b.accsaber_tech_play_count, _cmp_tech_total),
-        )
-        row_main += 1
+            self._set_row(
+                self.table, row_main, "[RL] Overall Play Count",
+                _rl_plays_fmt(snap_a.accsaber_reloaded_overall_ranked_plays, "overall"),
+                _rl_plays_fmt(snap_b.accsaber_reloaded_overall_ranked_plays, "overall"),
+            )
+            row_main += 1
+            self._set_row(
+                self.table, row_main, "[RL] True Play Count",
+                _rl_plays_fmt(snap_a.accsaber_reloaded_true_ranked_plays, "true"),
+                _rl_plays_fmt(snap_b.accsaber_reloaded_true_ranked_plays, "true"),
+            )
+            row_main += 1
+            self._set_row(
+                self.table, row_main, "[RL] Standard Play Count",
+                _rl_plays_fmt(snap_a.accsaber_reloaded_standard_ranked_plays, "standard"),
+                _rl_plays_fmt(snap_b.accsaber_reloaded_standard_ranked_plays, "standard"),
+            )
+            row_main += 1
+            self._set_row(
+                self.table, row_main, "[RL] Tech Play Count",
+                _rl_plays_fmt(snap_a.accsaber_reloaded_tech_ranked_plays, "tech"),
+                _rl_plays_fmt(snap_b.accsaber_reloaded_tech_ranked_plays, "tech"),
+            )
+            row_main += 1
+        else:
+            # --- AccSaber ---
+            overall_ap_a = _overall_ap_from_snapshot(snap_a)
+            overall_ap_b = _overall_ap_from_snapshot(snap_b)
+            self._set_row(
+                self.table, row_main, "[AS] Overall AP",
+                (round(overall_ap_a, 2) if overall_ap_a is not None else None),
+                (round(overall_ap_b, 2) if overall_ap_b is not None else None),
+            )
+            row_main += 1
+            self._set_row(
+                self.table, row_main, "[AS] True AP",
+                (round(snap_a.accsaber_true_ap, 2) if snap_a.accsaber_true_ap is not None else None),
+                (round(snap_b.accsaber_true_ap, 2) if snap_b.accsaber_true_ap is not None else None),
+            )
+            row_main += 1
+            self._set_row(
+                self.table, row_main, "[AS] Standard AP",
+                (round(snap_a.accsaber_standard_ap, 2) if snap_a.accsaber_standard_ap is not None else None),
+                (round(snap_b.accsaber_standard_ap, 2) if snap_b.accsaber_standard_ap is not None else None),
+            )
+            row_main += 1
+            self._set_row(
+                self.table, row_main, "[AS] Tech AP",
+                (round(snap_a.accsaber_tech_ap, 2) if snap_a.accsaber_tech_ap is not None else None),
+                (round(snap_b.accsaber_tech_ap, 2) if snap_b.accsaber_tech_ap is not None else None),
+            )
+            row_main += 1
+            # AccSaber Rank (Global + Country を 1 行にまとめる)
+            row_main = _set_combined_rank_row(
+                row_main, "[AS] Overall Rank",
+                snap_a.accsaber_overall_rank, snap_a.scoresaber_country, snap_a.accsaber_overall_rank_country,
+                snap_b.accsaber_overall_rank, snap_b.scoresaber_country, snap_b.accsaber_overall_rank_country,
+            )
+            row_main = _set_combined_rank_row(
+                row_main, "[AS] True Rank",
+                snap_a.accsaber_true_rank, snap_a.scoresaber_country, snap_a.accsaber_true_rank_country,
+                snap_b.accsaber_true_rank, snap_b.scoresaber_country, snap_b.accsaber_true_rank_country,
+            )
+            row_main = _set_combined_rank_row(
+                row_main, "[AS] Standard Rank",
+                snap_a.accsaber_standard_rank, snap_a.scoresaber_country, snap_a.accsaber_standard_rank_country,
+                snap_b.accsaber_standard_rank, snap_b.scoresaber_country, snap_b.accsaber_standard_rank_country,
+            )
+            row_main = _set_combined_rank_row(
+                row_main, "[AS] Tech Rank",
+                snap_a.accsaber_tech_rank, snap_a.scoresaber_country, snap_a.accsaber_tech_rank_country,
+                snap_b.accsaber_tech_rank, snap_b.scoresaber_country, snap_b.accsaber_tech_rank_country,
+            )
+            self._set_row(
+                self.table, row_main, "[AS] Overall Play Count",
+                _play_fmt(_overall_play_from_snapshot(snap_a), _cmp_overall_total),
+                _play_fmt(_overall_play_from_snapshot(snap_b), _cmp_overall_total),
+            )
+            row_main += 1
+            self._set_row(
+                self.table, row_main, "[AS] True Play Count",
+                _play_fmt(snap_a.accsaber_true_play_count, _cmp_true_total),
+                _play_fmt(snap_b.accsaber_true_play_count, _cmp_true_total),
+            )
+            row_main += 1
+            self._set_row(
+                self.table, row_main, "[AS] Standard Play Count",
+                _play_fmt(snap_a.accsaber_standard_play_count, _cmp_standard_total),
+                _play_fmt(snap_b.accsaber_standard_play_count, _cmp_standard_total),
+            )
+            row_main += 1
+            self._set_row(
+                self.table, row_main, "[AS] Tech Play Count",
+                _play_fmt(snap_a.accsaber_tech_play_count, _cmp_tech_total),
+                _play_fmt(snap_b.accsaber_tech_play_count, _cmp_tech_total),
+            )
+            row_main += 1
 
         # ----- 右側テーブル: ScoreSaber / BeatLeader の総クリア＋★別 -----
         # スナップショットに保存されている★別統計を利用する
