@@ -4,7 +4,7 @@ import re
 import threading
 from collections import defaultdict
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 import json
 from datetime import datetime, timezone
@@ -606,15 +606,20 @@ class PlayerAvatarWidget(QLabel):
         self._ss_pixmap: Optional[QPixmap] = None
         self._bl_pixmap: Optional[QPixmap] = None
         self._showing: str = "ss"   # "ss" or "bl"
+        self._on_toggled: Optional[Callable[[str], None]] = None
         self._signals = _AvatarFetchSignals()
         self._signals.fetched.connect(self._on_fetched)
         self._show_placeholder()
 
-    def set_ids(self, ss_id: Optional[str], bl_id: Optional[str]) -> None:
+    def set_toggle_callback(self, callback: "Optional[Callable[[str], None]]") -> None:
+        """SS/BL 切替時に呼ばれるコールバックを設定する。"""
+        self._on_toggled = callback
+
+    def set_ids(self, ss_id: Optional[str], bl_id: Optional[str], preferred: str = "ss") -> None:
         """SS/BL ID を受け取り、アバターを非同期で取得する。"""
         self._ss_pixmap = None
         self._bl_pixmap = None
-        self._showing = "ss"
+        self._showing = preferred if preferred in ("ss", "bl") else "ss"
         self._show_placeholder()
         if ss_id:
             threading.Thread(target=self._fetch, args=("ss", ss_id), daemon=True).start()
@@ -678,6 +683,8 @@ class PlayerAvatarWidget(QLabel):
                 self.setText("")
             else:
                 self.setText("SS")
+        if self._on_toggled:
+            self._on_toggled(self._showing)
         super().mousePressEvent(event)
 
 
@@ -694,6 +701,7 @@ class PlayerWindow(QMainWindow):
         # --- 上部: アバター + [Player行 / Snapshot行] + ボタン群 ---
         # プレイヤーアバターウィジェット（クリックで SS/BL 切替）
         self._avatar_widget = PlayerAvatarWidget(self)
+        self._avatar_widget.set_toggle_callback(self._save_avatar_showing)
 
         # Player 行 / Snapshot 行を縦に積む
         _rows_widget = QWidget(self)
@@ -1219,6 +1227,36 @@ class PlayerWindow(QMainWindow):
                 except Exception:  # noqa: BLE001
                     payload = {}
             payload["rl_unplayed_last_dir"] = out_dir
+            path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:  # noqa: BLE001
+            return
+
+    def _load_avatar_showing(self) -> str:
+        """前回のアバター表示サービス ("ss" or "bl") を読み込む。"""
+        path = self._settings_path()
+        if not path.exists():
+            return "ss"
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            return "ss"
+        v = data.get("avatar_showing", "ss")
+        return v if v in ("ss", "bl") else "ss"
+
+    def _save_avatar_showing(self, showing: str) -> None:
+        """現在のアバター表示サービスを保存する。"""
+        path = self._settings_path()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            payload: dict = {}
+            if path.exists():
+                try:
+                    raw = json.loads(path.read_text(encoding="utf-8"))
+                    if isinstance(raw, dict):
+                        payload = raw
+                except Exception:  # noqa: BLE001
+                    payload = {}
+            payload["avatar_showing"] = showing
             path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         except Exception:  # noqa: BLE001
             return
@@ -2013,7 +2051,8 @@ class PlayerWindow(QMainWindow):
             self._acc_rl_title.setText("AccSaber Reloaded")
 
         # プレイヤーアバターを非同期で取得
-        self._avatar_widget.set_ids(ss_id, bl_id)
+        _preferred_avatar = self._load_avatar_showing()
+        self._avatar_widget.set_ids(ss_id, bl_id, preferred=_preferred_avatar)
 
         # Snapshot の取得時刻をローカル時刻に変換して表示用文字列を作る
         taken_text = snap.taken_at
