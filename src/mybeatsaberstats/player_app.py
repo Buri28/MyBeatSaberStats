@@ -973,6 +973,7 @@ class PlayerWindow(QMainWindow):
         # --- SS パネル (左列): [アイコン+IDヘッダ] + [情報テーブル(2行6列)] + [★テーブル] ---
         self._ss_id_label = QLabel("", self)
         self._ss_id_label.setStyleSheet("font-weight: bold; padding: 2px 4px;")
+        self._ss_id_label.setOpenExternalLinks(True)
         _ss_icon_label = QLabel(self)
         _ss_icon_label.setPixmap(icon_scoresaber.pixmap(16, 16))
         _ss_hdr_row = QHBoxLayout()
@@ -996,6 +997,7 @@ class PlayerWindow(QMainWindow):
         # --- BL パネル (右列): [アイコン+IDヘッダ] + [情報テーブル(2行6列)] + [★テーブル] ---
         self._bl_id_label = QLabel("", self)
         self._bl_id_label.setStyleSheet("font-weight: bold; padding: 2px 4px;")
+        self._bl_id_label.setOpenExternalLinks(True)
         _bl_icon_label = QLabel(self)
         _bl_icon_label.setPixmap(icon_beatleader.pixmap(16, 16))
         _bl_hdr_row = QHBoxLayout()
@@ -1029,9 +1031,10 @@ class PlayerWindow(QMainWindow):
         left_acc_layout = QVBoxLayout(left_acc_widget)
         left_acc_layout.setContentsMargins(2, 2, 2, 2)
         left_acc_layout.setSpacing(2)
-        _acc_title = QLabel("AccSaber", self)
-        _acc_title.setStyleSheet("font-weight: bold; font-size: 11px; padding: 0px 2px;")
-        left_acc_layout.addWidget(_acc_title)
+        self._acc_title = QLabel("AccSaber", self)
+        self._acc_title.setStyleSheet("font-weight: bold; font-size: 11px; padding: 0px 2px;")
+        self._acc_title.setOpenExternalLinks(True)
+        left_acc_layout.addWidget(self._acc_title)
         left_acc_layout.addWidget(self.acc_table, 1)
 
         # AccSaber Reloaded テーブルを右下に表示するウィジェット
@@ -1044,16 +1047,18 @@ class PlayerWindow(QMainWindow):
         _acc_rl_header_layout = QHBoxLayout(_acc_rl_header)
         _acc_rl_header_layout.setContentsMargins(0, 0, 0, 0)
         _acc_rl_header_layout.setSpacing(4)
-        _acc_rl_title = QLabel("AccSaber Reloaded", self)
-        _acc_rl_title.setStyleSheet("font-weight: bold; font-size: 11px; padding: 0px 2px;")
+        self._acc_rl_title = QLabel("AccSaber Reloaded", self)
+        self._acc_rl_title.setStyleSheet("font-weight: bold; font-size: 11px; padding: 0px 2px;")
+        self._acc_rl_title.setOpenExternalLinks(True)
+        # XP表示ラベル
         self._acc_rl_xp_label = QLabel("", self)
-        self._acc_rl_xp_label.setStyleSheet("font-size: 11px; font-weight: 600; color: #3d90CC; padding: 0px 2px;")
+        self._acc_rl_xp_label.setStyleSheet("font-size: 11px; font-weight: 600; color: #DF8511; padding: 0px 2px;")
         self._btn_rl_unplayed = QPushButton("💾Unplayed Playlist", self)
         self._btn_rl_unplayed.setToolTip("BeatLeader 未プレイの AccSaber Reloaded 譜面を bplist ファイルに出力する")
         self._btn_rl_unplayed.setFixedHeight(20)
         self._btn_rl_unplayed.setStyleSheet("font-size: 11px; padding: 1px 6px;")
         self._btn_rl_unplayed.clicked.connect(self._on_export_rl_unplayed)
-        _acc_rl_header_layout.addWidget(_acc_rl_title)
+        _acc_rl_header_layout.addWidget(self._acc_rl_title)
         _acc_rl_header_layout.addWidget(self._acc_rl_xp_label)
         _acc_rl_header_layout.addStretch()
         _acc_rl_header_layout.addWidget(self._btn_rl_unplayed)
@@ -1953,6 +1958,8 @@ class PlayerWindow(QMainWindow):
         self._ss_id_label.setText("")
         self._bl_id_label.setText("")
         self._acc_rl_xp_label.setText("")
+        self._acc_title.setText("AccSaber")
+        self._acc_rl_title.setText("AccSaber Reloaded")
         self.acc_table.setRowCount(0)
         self.acc_rl_table.setRowCount(0)
         self.star_table.setRowCount(0)
@@ -1989,6 +1996,21 @@ class PlayerWindow(QMainWindow):
             self._bl_cache_label.setText(f"／ BL scores: {bl_meta[1]:,} maps  (fetched: {bl_meta[0]})")
         else:
             self._bl_cache_label.setText("／ BL scores: -")
+
+        # AccSaber / AccSaber Reloaded ラベルにリンクを設定
+        _as_link_color = "#5aaaee" if is_dark() else "#0066cc"
+        if ss_id:
+            self._acc_title.setText(
+                f'<a href="https://accsaber.com/profile/{ss_id}" style="color:{_as_link_color}; text-decoration:none; font-weight:bold; font-size:11px;">AccSaber</a>'
+            )
+        else:
+            self._acc_title.setText("AccSaber")
+        if bl_id:
+            self._acc_rl_title.setText(
+                f'<a href="https://accsaberreloaded.com/players/{bl_id}" style="color:{_as_link_color}; text-decoration:none; font-weight:bold; font-size:11px;">AccSaber Reloaded</a>'
+            )
+        else:
+            self._acc_rl_title.setText("AccSaber Reloaded")
 
         # プレイヤーアバターを非同期で取得
         self._avatar_widget.set_ids(ss_id, bl_id)
@@ -2141,8 +2163,16 @@ class PlayerWindow(QMainWindow):
             tbl.setItem(1, 5, _val(ranked_val))
             tbl.resizeColumnsToContents()
 
-        self._ss_id_label.setText(ss_name_country or "")
-        self._bl_id_label.setText(bl_name_country or "")
+        _link_color = "#5aaaee" if is_dark() else "#0066cc"
+        _link_style = f"color:{_link_color}; text-decoration:none; font-weight:bold;"
+        if ss_id and ss_name_country:
+            self._ss_id_label.setText(f'<a href="https://scoresaber.com/u/{ss_id}" style="{_link_style}">{ss_name_country}</a>')
+        else:
+            self._ss_id_label.setText(ss_name_country or "")
+        if bl_id and bl_name_country:
+            self._bl_id_label.setText(f'<a href="https://beatleader.com/u/{bl_id}" style="{_link_style}">{bl_name_country}</a>')
+        else:
+            self._bl_id_label.setText(bl_name_country or "")
         _set_info_tbl(
             self.ss_info_table,
             snap.scoresaber_id or snap.steam_id or "", ss_pp_text, ss_rank_text,
