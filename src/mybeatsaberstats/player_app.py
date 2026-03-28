@@ -980,7 +980,7 @@ class PlayerWindow(QMainWindow):
 
         # --- SS パネル (左列): [アイコン+IDヘッダ] + [情報テーブル(2行6列)] + [★テーブル] ---
         self._ss_id_label = QLabel("", self)
-        self._ss_id_label.setStyleSheet("font-weight: bold; padding: 2px 4px;")
+        self._ss_id_label.setStyleSheet("font-size: 13px; font-weight: bold; padding: 2px 4px;")
         self._ss_id_label.setOpenExternalLinks(True)
         _ss_icon_label = QLabel(self)
         _ss_icon_label.setPixmap(icon_scoresaber.pixmap(16, 16))
@@ -1004,7 +1004,7 @@ class PlayerWindow(QMainWindow):
 
         # --- BL パネル (右列): [アイコン+IDヘッダ] + [情報テーブル(2行6列)] + [★テーブル] ---
         self._bl_id_label = QLabel("", self)
-        self._bl_id_label.setStyleSheet("font-weight: bold; padding: 2px 4px;")
+        self._bl_id_label.setStyleSheet("font-size: 13px; font-weight: bold; padding: 2px 4px;")
         self._bl_id_label.setOpenExternalLinks(True)
         _bl_icon_label = QLabel(self)
         _bl_icon_label.setPixmap(icon_beatleader.pixmap(16, 16))
@@ -1061,6 +1061,7 @@ class PlayerWindow(QMainWindow):
         # XP表示ラベル
         self._acc_rl_xp_label = QLabel("", self)
         self._acc_rl_xp_label.setStyleSheet("font-size: 11px; font-weight: 600; color: #DF8511; padding: 0px 2px;")
+        self._acc_rl_xp_label.setTextFormat(Qt.TextFormat.RichText)
         self._btn_rl_unplayed = QPushButton("💾Unplayed Playlist", self)
         self._btn_rl_unplayed.setToolTip("BeatLeader 未プレイの AccSaber Reloaded 譜面を bplist ファイルに出力する")
         self._btn_rl_unplayed.setFixedHeight(20)
@@ -2424,14 +2425,17 @@ class PlayerWindow(QMainWindow):
         _xp_level = snap.accsaber_reloaded_xp_level
         _xp_str = None
         if _xp is not None:
-            _xp_str = f"{_xp:,.0f}" + (f" (Lv.{_xp_level})" if _xp_level else "")
+            _lv_html = f'<span style="font-size:13px;">Lv.{_xp_level} </span>' if _xp_level else ""
+            _xp_html = f'<span style="font-size:11px;">({_xp:,.0f} XP)</span>' if _xp_level else ""
+            _xp_str = _lv_html + _xp_html
         _xp_rank_str = _format_acc_rank(snap.accsaber_reloaded_xp_rank, snap.accsaber_reloaded_xp_rank_country, acc_country_code)
         _xp_parts: list[str] = []
         if _xp_str is not None:
-            _xp_parts.append(f"XP {_xp_str}")
+            _xp_parts.append(f"{_xp_str}")
         if _xp_rank_str is not None:
-            _xp_parts.append(f"XP Rank {_xp_rank_str}")
-        self._acc_rl_xp_label.setText(" / ".join(_xp_parts))
+            _xp_rank_html = f'<span style="font-size:12px;">{_xp_rank_str}</span>'  
+            _xp_parts.append(f"XP Rank：{_xp_rank_html}")
+        self._acc_rl_xp_label.setText(" ／ ".join(_xp_parts))
         for row, (label, overall, true, standard, tech) in enumerate(acc_rl_rows):
             self.acc_rl_table.insertRow(row)
             metric_item = QTableWidgetItem(label)
