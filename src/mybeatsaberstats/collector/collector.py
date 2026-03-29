@@ -1378,6 +1378,10 @@ def create_snapshot_for_steam_id(
     acc_true_ap: Optional[float] = None
     acc_standard_ap: Optional[float] = None
     acc_tech_ap: Optional[float] = None
+    acc_overall_avg_acc: Optional[float] = None
+    acc_true_avg_acc: Optional[float] = None
+    acc_standard_avg_acc: Optional[float] = None
+    acc_tech_avg_acc: Optional[float] = None
     accsaber_true_fetched: bool = False
     accsaber_standard_fetched: bool = False
     accsaber_tech_fetched: bool = False
@@ -1436,6 +1440,12 @@ def create_snapshot_for_steam_id(
             acc_overall_rank_global = acc_overall.rank
             acc_overall_play_count = _parse_acc_plays(getattr(acc_overall, "plays", ""))
             acc_overall_ap = _parse_ap(getattr(acc_overall, "total_ap", ""))
+            _oavg = getattr(acc_overall, "average_acc", "")
+            if _oavg:
+                try:
+                    acc_overall_avg_acc = float(str(_oavg).replace(",", "")) * 100.0
+                except (ValueError, TypeError):
+                    pass
 
         # True / Standard / Tech は必要になったときだけ API 経由で取得（ベストエフォート）。
         if scoresaber_id:
@@ -1451,6 +1461,12 @@ def create_snapshot_for_steam_id(
                 acc_true_rank_global = acc_true.rank
                 acc_true_play_count = _parse_acc_plays(getattr(acc_true, "plays", ""))
                 acc_true_ap = _parse_ap(getattr(acc_true, "total_ap", ""))
+                _tavg = getattr(acc_true, "average_acc", "")
+                if _tavg:
+                    try:
+                        acc_true_avg_acc = float(str(_tavg).replace(",", "")) * 100.0
+                    except (ValueError, TypeError):
+                        pass
                 accsaber_true_fetched = True
             elif _true_api_err:
                 accsaber_true_fetch_failed = True
@@ -1483,6 +1499,12 @@ def create_snapshot_for_steam_id(
                 acc_standard_rank_global = acc_standard.rank
                 acc_standard_play_count = _parse_acc_plays(getattr(acc_standard, "plays", ""))
                 acc_standard_ap = _parse_ap(getattr(acc_standard, "total_ap", ""))
+                _savg = getattr(acc_standard, "average_acc", "")
+                if _savg:
+                    try:
+                        acc_standard_avg_acc = float(str(_savg).replace(",", "")) * 100.0
+                    except (ValueError, TypeError):
+                        pass
                 accsaber_standard_fetched = True
             elif _std_api_err:
                 accsaber_standard_fetch_failed = True
@@ -1515,6 +1537,12 @@ def create_snapshot_for_steam_id(
                 acc_tech_rank_global = acc_tech.rank
                 acc_tech_play_count = _parse_acc_plays(getattr(acc_tech, "plays", ""))
                 acc_tech_ap = _parse_ap(getattr(acc_tech, "total_ap", ""))
+                _techavg = getattr(acc_tech, "average_acc", "")
+                if _techavg:
+                    try:
+                        acc_tech_avg_acc = float(str(_techavg).replace(",", "")) * 100.0
+                    except (ValueError, TypeError):
+                        pass
                 accsaber_tech_fetched = True
             elif _tech_api_err:
                 accsaber_tech_fetch_failed = True
@@ -1671,17 +1699,25 @@ def create_snapshot_for_steam_id(
     accsaber_reloaded_tech_rank_country:     Optional[int]   = None
     accsaber_reloaded_tech_ap:               Optional[float] = None
     accsaber_reloaded_tech_ranked_plays:     Optional[int]   = None
+    accsaber_reloaded_overall_avg_acc:       Optional[float] = None
+    accsaber_reloaded_true_avg_acc:          Optional[float] = None
+    accsaber_reloaded_standard_avg_acc:      Optional[float] = None
+    accsaber_reloaded_tech_avg_acc:          Optional[float] = None
     accsaber_reloaded_xp:                    Optional[float] = None
     accsaber_reloaded_xp_level:              Optional[int]   = None
     accsaber_reloaded_xp_rank:               Optional[int]   = None
     accsaber_reloaded_xp_rank_country:       Optional[int]   = None
 
-    if options.fetch_accsaber_reloaded and scoresaber_id:
+    # AccSaber Reloaded の userId は Steam ID（BeatLeader ID と同じ）なので beatleader_id を優先する。
+    # ScoreSaber が非 Steam 形式の ID（例: 3117609721598571）の場合に scoresaber_id を渡すと
+    # リーダーボードを全ページ走査してもマッチしないため、長時間固まる原因となる。
+    _rl_player_id = beatleader_id or scoresaber_id
+    if options.fetch_accsaber_reloaded and _rl_player_id:
         print("9.4R AccSaber Reloaded プレイヤーステータス取得...")
         _step(0.62, "Fetching AccSaber Reloaded ranks...")
         _rl_country = (scoresaber_country or "").upper() or None
         try:
-            _rl_result = _fetch_accsaber_reloaded(scoresaber_id, country=_rl_country, session=session)
+            _rl_result = _fetch_accsaber_reloaded(_rl_player_id, country=_rl_country, session=session)
         except Exception as exc:  # noqa: BLE001
             _rethrow_if_cancelled(exc)
             _rl_result = {}
@@ -1714,10 +1750,14 @@ def create_snapshot_for_steam_id(
         accsaber_reloaded_tech_rank_country     = _pick("tech",     "rank_country",  int)
         accsaber_reloaded_tech_ap               = _pick("tech",     "ap",            float)
         accsaber_reloaded_tech_ranked_plays     = _pick("tech",     "ranked_plays",  int)
+        accsaber_reloaded_overall_avg_acc       = _pick("overall",  "average_acc",   lambda v: float(v) * 100.0)
+        accsaber_reloaded_true_avg_acc          = _pick("true",     "average_acc",   lambda v: float(v) * 100.0)
+        accsaber_reloaded_standard_avg_acc      = _pick("standard", "average_acc",   lambda v: float(v) * 100.0)
+        accsaber_reloaded_tech_avg_acc          = _pick("tech",     "average_acc",   lambda v: float(v) * 100.0)
 
         # XP ランク
         try:
-            _rl_xp_result = _fetch_accsaber_reloaded_xp(scoresaber_id, country=_rl_country, session=session)
+            _rl_xp_result = _fetch_accsaber_reloaded_xp(_rl_player_id, country=_rl_country, session=session)
         except Exception as exc:  # noqa: BLE001
             _rethrow_if_cancelled(exc)
             _rl_xp_result = None
@@ -1731,6 +1771,8 @@ def create_snapshot_for_steam_id(
     else:
         if not options.fetch_accsaber_reloaded:
             print("9.4R AccSaber Reloaded 取得スキップ（オプションが無効）")
+        else:
+            print("9.4R AccSaber Reloaded 取得スキップ（BeatLeader ID / ScoreSaber ID が未取得）")
 
     # ScoreSaber / BeatLeader のスコア一覧から★別統計を集計する（失敗した場合は空リスト）。
     if options.fetch_ss_star_stats:
@@ -1795,6 +1837,10 @@ def create_snapshot_for_steam_id(
         accsaber_true_ap=acc_true_ap,
         accsaber_standard_ap=acc_standard_ap,
         accsaber_tech_ap=acc_tech_ap,
+        accsaber_overall_avg_acc=acc_overall_avg_acc,
+        accsaber_true_avg_acc=acc_true_avg_acc,
+        accsaber_standard_avg_acc=acc_standard_avg_acc,
+        accsaber_tech_avg_acc=acc_tech_avg_acc,
         # AccSaber 国別ランク
         accsaber_overall_rank_country=acc_overall_rank_country,
         accsaber_true_rank_country=acc_true_rank_country,
@@ -1829,6 +1875,10 @@ def create_snapshot_for_steam_id(
         accsaber_reloaded_tech_rank_country=accsaber_reloaded_tech_rank_country,
         accsaber_reloaded_tech_ap=accsaber_reloaded_tech_ap,
         accsaber_reloaded_tech_ranked_plays=accsaber_reloaded_tech_ranked_plays,
+        accsaber_reloaded_overall_avg_acc=accsaber_reloaded_overall_avg_acc,
+        accsaber_reloaded_true_avg_acc=accsaber_reloaded_true_avg_acc,
+        accsaber_reloaded_standard_avg_acc=accsaber_reloaded_standard_avg_acc,
+        accsaber_reloaded_tech_avg_acc=accsaber_reloaded_tech_avg_acc,
         accsaber_reloaded_xp=accsaber_reloaded_xp,
         accsaber_reloaded_xp_level=accsaber_reloaded_xp_level,
         accsaber_reloaded_xp_rank=accsaber_reloaded_xp_rank,

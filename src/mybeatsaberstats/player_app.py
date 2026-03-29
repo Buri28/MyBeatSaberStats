@@ -48,7 +48,7 @@ from .accsaber_reloaded import build_unplayed_bplist as _rl_build_unplayed_bplis
 from .accsaber_reloaded import fetch_player_all_categories as _rl_fetch_player
 from .accsaber_reloaded import fetch_player_scored_diff_ids as _rl_fetch_scored_diff_ids
 from .accsaber_reloaded import CATEGORY_IDS as _RL_CATEGORY_IDS
-from .snapshot_view import SnapshotCompareDialog
+from .snapshot_view import SnapshotCompareDialog, AccPlayCountBarDelegate, ACC_PLAY_COLORS, ACC_PLAY_COL_CATS
 from .snapshot_graph import SnapshotGraphDialog
 from .app import MainWindow as RankingWindow
 from .collector.collector import (
@@ -525,7 +525,13 @@ class ColumnMaxBarDelegate(QStyledItemDelegate):
     """列内の最大値を MAX として横棒グラフを描画するデリゲート。
 
     グラデーションは赤→青。太字・メダル表示は行わない。
+    skip_rows: バーを描画しない行インデックスのセット（max 計算からも除外）。
     """
+
+    def __init__(self, parent=None, skip_rows: "set[int] | None" = None, skip_last_row: bool = True) -> None:
+        super().__init__(parent)
+        self._skip_rows: set[int] = skip_rows or set()
+        self._skip_last_row = skip_last_row
 
     def _parse_value(self, text) -> Optional[float]:
         try:
@@ -543,7 +549,7 @@ class ColumnMaxBarDelegate(QStyledItemDelegate):
         last_row = model.rowCount() - 1
         max_val: Optional[float] = None
         for row in range(model.rowCount()):
-            if row == last_row:  # Total行は除外
+            if (self._skip_last_row and row == last_row) or row in self._skip_rows:  # Total行・除外行は除外
                 continue
             v = self._parse_value(model.data(model.index(row, col)))
             if v is not None and (max_val is None or v > max_val):
@@ -551,9 +557,9 @@ class ColumnMaxBarDelegate(QStyledItemDelegate):
         return max_val
 
     def paint(self, painter, option, index):  # type: ignore[override]
-        # Total行（最終行）はバーなしで通常描画
+        # Total行（最終行）または除外行はバーなしで通常描画
         model = index.model()
-        if model is not None and index.row() == model.rowCount() - 1:
+        if model is not None and ((self._skip_last_row and index.row() == model.rowCount() - 1) or index.row() in self._skip_rows):
             return super().paint(painter, option, index)
 
         value = self._parse_value(index.data())
@@ -830,13 +836,12 @@ class PlayerWindow(QMainWindow):
         self.acc_table.verticalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.acc_table.verticalHeader().setMinimumSectionSize(0)
         self.acc_table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
-        # AccSaber の表であることが分かるよう、ヘッダに明示する
         self.acc_table.setHorizontalHeaderLabels([
             "Metric",
-            "Overall",
-            "True",
-            "Standard",
-            "Tech",
+            "AP",
+            "Rank",
+            "Play Count",
+            "Avg Acc",
         ])
 
         # AccSaber Reloaded 用の指標テーブル
@@ -848,10 +853,10 @@ class PlayerWindow(QMainWindow):
         self.acc_rl_table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
         self.acc_rl_table.setHorizontalHeaderLabels([
             "Metric",
-            "Overall",
-            "True",
-            "Standard",
-            "Tech",
+            "AP",
+            "Rank",
+            "Play Count",
+            "Avg Acc",
         ])
 
         # SS ★別クリア統計テーブル
@@ -902,6 +907,10 @@ class PlayerWindow(QMainWindow):
             header.setStretchLastSection(False)
             table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
 
+        # AccSaber / AccSaber Reloaded テーブルはカラムが少ないため最小幅を広めに取る
+        self.acc_table.horizontalHeader().setMinimumSectionSize(80)
+        self.acc_rl_table.horizontalHeader().setMinimumSectionSize(80)
+
         # サービスごとのアイコンをヘッダに設定
         resources_dir = RESOURCES_DIR
         icon_scoresaber = QIcon(str(resources_dir / "scoresaber_logo.svg"))
@@ -913,19 +922,17 @@ class PlayerWindow(QMainWindow):
         self._icon_scoresaber = icon_scoresaber
         self._icon_beatleader = icon_beatleader
 
-        # AccSaber テーブル: データ列に AccSaber アイコンを付与
-        for col in range(1, 5):
-            item = self.acc_table.horizontalHeaderItem(col) or QTableWidgetItem("")
-            item.setIcon(icon_accsaber)
-            item.setToolTip("AccSaber")
-            self.acc_table.setHorizontalHeaderItem(col, item)
+        # AccSaber テーブル: Metric列(col 0)にアイコンのみ表示、他の列はアイコンなし
+        _acc_metric_item = QTableWidgetItem("")
+        _acc_metric_item.setIcon(icon_accsaber)
+        _acc_metric_item.setToolTip("AccSaber")
+        self.acc_table.setHorizontalHeaderItem(0, _acc_metric_item)
 
-        # AccSaber Reloaded テーブル: データ列に AccSaber Reloaded アイコンを付与・行番号非表示
-        for col in range(1, 5):
-            item = self.acc_rl_table.horizontalHeaderItem(col) or QTableWidgetItem("")
-            item.setIcon(icon_accsaber_rl)
-            item.setToolTip("AccSaber Reloaded")
-            self.acc_rl_table.setHorizontalHeaderItem(col, item)
+        # AccSaber Reloaded テーブル: Metric列(col 0)にアイコンのみ表示、行番号非表示
+        _rl_metric_item = QTableWidgetItem("")
+        _rl_metric_item.setIcon(icon_accsaber_rl)
+        _rl_metric_item.setToolTip("AccSaber Reloaded")
+        self.acc_rl_table.setHorizontalHeaderItem(0, _rl_metric_item)
         self.acc_rl_table.verticalHeader().setVisible(False)
 
         # ★テーブル: 先頭列ヘッダにサービスアイコン＋★を表示
@@ -944,6 +951,13 @@ class PlayerWindow(QMainWindow):
         self.bl_star_table.verticalHeader().setVisible(False)
         # acc_table の行番号も非表示にする
         self.acc_table.verticalHeader().setVisible(False)
+
+        # AccSaber / AccSaber Reloaded Play Count 列 (col 3) にバーを表示するデリゲート
+        self.acc_table.setItemDelegateForColumn(3, AccPlayCountBarDelegate(self))
+        self.acc_rl_table.setItemDelegateForColumn(3, AccPlayCountBarDelegate(self))
+        # AccSaber / AccSaber Reloaded Avg Acc 列 (col 4): 70〜100% グラデーション
+        self.acc_table.setItemDelegateForColumn(4, PercentageBarDelegate(self, max_value=100.0, gradient_min=70.0))
+        self.acc_rl_table.setItemDelegateForColumn(4, PercentageBarDelegate(self, max_value=100.0, gradient_min=70.0))
 
         # パーセンテージ列に横棒グラフを表示するデリゲートを適用
         # Clear Rate 用: 0〜100% で赤→黄→緑グラデーション
@@ -1063,7 +1077,7 @@ class PlayerWindow(QMainWindow):
         self._acc_rl_xp_label.setStyleSheet("font-size: 11px; font-weight: 600; color: #DF8511; padding: 0px 2px;")
         self._acc_rl_xp_label.setTextFormat(Qt.TextFormat.RichText)
         self._btn_rl_unplayed = QPushButton("💾Unplayed Playlist", self)
-        self._btn_rl_unplayed.setToolTip("BeatLeader 未プレイの AccSaber Reloaded 譜面を bplist ファイルに出力する")
+        self._btn_rl_unplayed.setToolTip("BeatLeader 未プレイの AccSaber Reloaded 譜面を bplist ファイルに出力します。")
         self._btn_rl_unplayed.setFixedHeight(20)
         self._btn_rl_unplayed.setStyleSheet("font-size: 11px; padding: 1px 6px;")
         self._btn_rl_unplayed.clicked.connect(self._on_export_rl_unplayed)
@@ -1088,7 +1102,7 @@ class PlayerWindow(QMainWindow):
         mid_bottom_splitter.addWidget(bottom_h_splitter)
         mid_bottom_splitter.setStretchFactor(0, 1)
         mid_bottom_splitter.setStretchFactor(1, 0)
-        mid_bottom_splitter.setSizes([600, 140])  # 初期サイズ配分の目安
+        mid_bottom_splitter.setSizes([600, 165])  # 初期サイズ配分の目安
 
         layout.addWidget(mid_bottom_splitter, 1)
 
@@ -2187,11 +2201,13 @@ class PlayerWindow(QMainWindow):
             idLbl = _lbl("ID")
             # ラベルのサイズを変更
             idLbl.setSizeHint(QSize(40, 30))
+            rankValItem = _val(rank_val)
+            rankValItem.setSizeHint(QSize(110, 30))
 
             tbl.setItem(0, 0, idLbl)
             tbl.setItem(0, 1, _val(id_val))
             tbl.setItem(0, 2, _lbl("Rank"))
-            tbl.setItem(0, 3, _val(rank_val))
+            tbl.setItem(0, 3, rankValItem)
             tbl.setItem(0, 4, _lbl("Total Play Count"))
             tbl.setItem(0, 5, QTableWidgetItem(f"{total_val:,}" if total_val is not None else ""))
             # 行1: ["PP" | PP値 | "Avg ACC" | Avg ACC値 | "Ranked" | Ranked値]
@@ -2362,27 +2378,85 @@ class PlayerWindow(QMainWindow):
         # Play Count 行(row index 2)では分母キャッシュも考慮
         _pl_stale_by_col = {2: _pl_stale_true, 3: _pl_stale_std, 4: _pl_stale_tech}
 
-        for row, (label, overall, true, standard, tech) in enumerate(acc_rows):
+        # Play Count バー用の割合 (0.0〜1.0)。分母/分子どちらかが None なら None。
+        def _play_ratio(plays: Optional[int], total: Optional[int]) -> Optional[float]:
+            if plays is None or total is None or total == 0:
+                return None
+            return min(1.0, plays / total)
+
+        _overall_play_count = (
+            (snap.accsaber_true_play_count or 0)
+            + (snap.accsaber_standard_play_count or 0)
+            + (snap.accsaber_tech_play_count or 0)
+        ) if any(
+            v is not None for v in (
+                snap.accsaber_true_play_count,
+                snap.accsaber_standard_play_count,
+                snap.accsaber_tech_play_count,
+            )
+        ) else snap.accsaber_overall_play_count
+        _acc_play_ratios = {
+            1: _play_ratio(_overall_play_count, overall_total_maps),
+            2: _play_ratio(snap.accsaber_true_play_count, true_total_maps),
+            3: _play_ratio(snap.accsaber_standard_play_count, standard_total_maps),
+            4: _play_ratio(snap.accsaber_tech_play_count, tech_total_maps),
+        }
+        _acc_avg_acc_vals = {
+            0: getattr(snap, "accsaber_overall_avg_acc", None),
+            1: getattr(snap, "accsaber_true_avg_acc", None),
+            2: getattr(snap, "accsaber_standard_avg_acc", None),
+            3: getattr(snap, "accsaber_tech_avg_acc", None),
+        }
+
+        # 行=Overall/True/Standard/Tech, 列=Metric/AP/Rank/Play Count/Avg Acc
+        _acc_cat_labels   = ["Overall", "True", "Standard", "Tech"]
+        _acc_cat_stale    = [False, _stale_true, _stale_std, _stale_tech]
+        _acc_cat_pl_stale = [False, _pl_stale_true, _pl_stale_std, _pl_stale_tech]
+        _acc_cat_colors   = [
+            ACC_PLAY_COLORS["overall"], ACC_PLAY_COLORS["true"],
+            ACC_PLAY_COLORS["standard"], ACC_PLAY_COLORS["tech"],
+        ]
+        for row, cat_label in enumerate(_acc_cat_labels):
             self.acc_table.insertRow(row)
-            metric_item = QTableWidgetItem(label)
+            metric_item = QTableWidgetItem(cat_label)
             metric_item.setBackground(label_cell_color())
             metric_item.setForeground(label_cell_text_color())
             self.acc_table.setItem(row, 0, metric_item)
-
-            overall_text = "" if overall is None else str(overall)
-            true_text    = "" if true     is None else str(true)
-            standard_text = "" if standard is None else str(standard)
-            tech_text    = "" if tech     is None else str(tech)
-
-            self.acc_table.setItem(row, 1, QTableWidgetItem(overall_text))
-            for _col, _txt in [(2, true_text), (3, standard_text), (4, tech_text)]:
-                _item = QTableWidgetItem(_txt)
-                # Play Count 行はデータ stale OR プレイリスト stale でオレンジ
-                _data_stale = _stale_by_col[_col]
-                _pl_s = _pl_stale_by_col[_col] if row == 2 else False
-                if _data_stale or _pl_s:
-                    _item.setForeground(_ORANGE)
-                self.acc_table.setItem(row, _col, _item)
+            _row_stale = _acc_cat_stale[row]
+            # col 1: AP
+            _ap_val = acc_rows[0][row + 1]
+            _ap_txt = "" if _ap_val is None else str(_ap_val)
+            _ap_item = QTableWidgetItem(_ap_txt)
+            if _row_stale:
+                _ap_item.setForeground(_ORANGE)
+            self.acc_table.setItem(row, 1, _ap_item)
+            # col 2: Rank
+            _rank_val = acc_rows[1][row + 1]
+            _rank_txt = "" if _rank_val is None else str(_rank_val)
+            _rank_item = QTableWidgetItem(_rank_txt)
+            if _row_stale:
+                _rank_item.setForeground(_ORANGE)
+            self.acc_table.setItem(row, 2, _rank_item)
+            # col 3: Play Count（バー + 🏆）
+            _play_val = acc_rows[2][row + 1]
+            _play_txt = "" if _play_val is None else str(_play_val)
+            _play_item = QTableWidgetItem(_play_txt)
+            if _row_stale or _acc_cat_pl_stale[row]:
+                _play_item.setForeground(_ORANGE)
+            _r = _acc_play_ratios.get(row + 1)
+            if _r is not None:
+                if _r >= 1.0:
+                    _play_item.setText(_play_txt + " 🏆")
+                _play_item.setData(Qt.ItemDataRole.UserRole, _r)
+                _play_item.setData(Qt.ItemDataRole.UserRole + 1, _acc_cat_colors[row])
+            self.acc_table.setItem(row, 3, _play_item)
+            # col 4: Avg Acc（バーあり）
+            _avg = _acc_avg_acc_vals.get(row)
+            _avg_txt = f"{_avg:.2f}%" if _avg is not None else ""
+            _avg_item = QTableWidgetItem(_avg_txt)
+            if _avg is not None:
+                _avg_item.setData(Qt.ItemDataRole.UserRole, _avg)
+            self.acc_table.setItem(row, 4, _avg_item)
 
         self.acc_table.resizeColumnsToContents()
 
@@ -2436,16 +2510,52 @@ class PlayerWindow(QMainWindow):
             _xp_rank_html = f'<span style="font-size:12px;">{_xp_rank_str}</span>'  
             _xp_parts.append(f"XP Rank：{_xp_rank_html}")
         self._acc_rl_xp_label.setText(" ／ ".join(_xp_parts))
-        for row, (label, overall, true, standard, tech) in enumerate(acc_rl_rows):
+
+        # AccSaber Reloaded Play Count バー用割合
+        _rl_play_ratios = {
+            1: _play_ratio(snap.accsaber_reloaded_overall_ranked_plays,  _rl_map_counts.get("overall")),
+            2: _play_ratio(snap.accsaber_reloaded_true_ranked_plays,     _rl_map_counts.get("true")),
+            3: _play_ratio(snap.accsaber_reloaded_standard_ranked_plays, _rl_map_counts.get("standard")),
+            4: _play_ratio(snap.accsaber_reloaded_tech_ranked_plays,     _rl_map_counts.get("tech")),
+        }
+        _rl_avg_acc_vals = {
+            0: getattr(snap, "accsaber_reloaded_overall_avg_acc", None),
+            1: getattr(snap, "accsaber_reloaded_true_avg_acc", None),
+            2: getattr(snap, "accsaber_reloaded_standard_avg_acc", None),
+            3: getattr(snap, "accsaber_reloaded_tech_avg_acc", None),
+        }
+
+        # 行=Overall/True/Standard/Tech, 列=Metric/AP/Rank/Play Count/Avg Acc
+        _rl_cat_labels = ["Overall", "True", "Standard", "Tech"]
+        _rl_cat_colors = [
+            ACC_PLAY_COLORS["overall"], ACC_PLAY_COLORS["true"],
+            ACC_PLAY_COLORS["standard"], ACC_PLAY_COLORS["tech"],
+        ]
+        for row, cat_label in enumerate(_rl_cat_labels):
             self.acc_rl_table.insertRow(row)
-            metric_item = QTableWidgetItem(label)
+            metric_item = QTableWidgetItem(cat_label)
             metric_item.setBackground(label_cell_color())
             metric_item.setForeground(label_cell_text_color())
             self.acc_rl_table.setItem(row, 0, metric_item)
-            self.acc_rl_table.setItem(row, 1, QTableWidgetItem("" if overall  is None else str(overall)))
-            self.acc_rl_table.setItem(row, 2, QTableWidgetItem("" if true     is None else str(true)))
-            self.acc_rl_table.setItem(row, 3, QTableWidgetItem("" if standard is None else str(standard)))
-            self.acc_rl_table.setItem(row, 4, QTableWidgetItem("" if tech     is None else str(tech)))
+            for col_i, src_row_i in enumerate([0, 1, 2], start=1):
+                _val = acc_rl_rows[src_row_i][row + 1]
+                _txt = "" if _val is None else str(_val)
+                _item = QTableWidgetItem(_txt)
+                if col_i == 3:
+                    _r = _rl_play_ratios.get(row + 1)
+                    if _r is not None:
+                        if _r >= 1.0:
+                            _item.setText(_txt + " 🏆")
+                        _item.setData(Qt.ItemDataRole.UserRole, _r)
+                        _item.setData(Qt.ItemDataRole.UserRole + 1, _rl_cat_colors[row])
+                self.acc_rl_table.setItem(row, col_i, _item)
+            # col 4: Avg Acc（バーあり）
+            _avg_rl = _rl_avg_acc_vals.get(row)
+            _avg_rl_txt = f"{_avg_rl:.2f}%" if _avg_rl is not None else ""
+            _avg_rl_item = QTableWidgetItem(_avg_rl_txt)
+            if _avg_rl is not None:
+                _avg_rl_item.setData(Qt.ItemDataRole.UserRole, _avg_rl)
+            self.acc_rl_table.setItem(row, 4, _avg_rl_item)
         self.acc_rl_table.resizeColumnsToContents()
 
         # --- 警告メッセージをスナップショット保存済みフィールドから構築して表示 ---
@@ -2887,7 +2997,7 @@ def run() -> None:
     window = PlayerWindow()
     # ScoreSaber / BeatLeader / AccSaber と★0〜15が見やすいように、やや横長＋縦広めに取る
     # stats画面のサイズ指定
-    window.resize(1220, 740)
+    window.resize(1220, 770)
     window.show()
 
     # 起動直後にスナップショットが1つも無い場合は、最初にだけ
