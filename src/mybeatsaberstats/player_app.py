@@ -2427,6 +2427,7 @@ class PlayerWindow(QMainWindow):
             _ap_val = acc_rows[0][row + 1]
             _ap_txt = "" if _ap_val is None else str(_ap_val)
             _ap_item = QTableWidgetItem(_ap_txt)
+            _ap_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             if _row_stale:
                 _ap_item.setForeground(_ORANGE)
             self.acc_table.setItem(row, 1, _ap_item)
@@ -2434,6 +2435,7 @@ class PlayerWindow(QMainWindow):
             _rank_val = acc_rows[1][row + 1]
             _rank_txt = "" if _rank_val is None else str(_rank_val)
             _rank_item = QTableWidgetItem(_rank_txt)
+            _rank_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             if _row_stale:
                 _rank_item.setForeground(_ORANGE)
             self.acc_table.setItem(row, 2, _rank_item)
@@ -2541,6 +2543,8 @@ class PlayerWindow(QMainWindow):
                 _val = acc_rl_rows[src_row_i][row + 1]
                 _txt = "" if _val is None else str(_val)
                 _item = QTableWidgetItem(_txt)
+                if col_i in (1, 2):
+                    _item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                 if col_i == 3:
                     _r = _rl_play_ratios.get(row + 1)
                     if _r is not None:
@@ -2665,7 +2669,7 @@ class PlayerWindow(QMainWindow):
             pp_val = getattr(s, "pp_contribution", None)
             pp_text = f"{pp_val:,.0f}" if pp_val is not None else "0"
             pp_item = QTableWidgetItem(pp_text)
-            pp_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            pp_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
             self.star_table.setItem(row, 10, pp_item)
 
             pp_solo_val = getattr(s, "pp_solo", None)
@@ -2726,7 +2730,7 @@ class PlayerWindow(QMainWindow):
 
             total_pp: float = sum(s.pp_contribution or 0.0 for s in stats)
             pp_total_item = QTableWidgetItem(f"{total_pp:,.0f}")
-            pp_total_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            pp_total_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
             self.star_table.setItem(total_row, 10, pp_total_item)
 
             total_solo_pp: float = sum(s.pp_solo or 0.0 for s in stats)
@@ -2808,7 +2812,7 @@ class PlayerWindow(QMainWindow):
             bl_pp_val = getattr(s, "pp_contribution", None)
             bl_pp_text = f"{bl_pp_val:,.0f}" if bl_pp_val is not None else "0"
             bl_pp_item = QTableWidgetItem(bl_pp_text)
-            bl_pp_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            bl_pp_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
             self.bl_star_table.setItem(row, 10, bl_pp_item)
 
             bl_pp_solo_val = getattr(s, "pp_solo", None)
@@ -2871,7 +2875,7 @@ class PlayerWindow(QMainWindow):
 
             bl_total_pp: float = sum(s.pp_contribution or 0.0 for s in bl_stats)
             bl_pp_total_item = QTableWidgetItem(f"{bl_total_pp:,.0f}")
-            bl_pp_total_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            bl_pp_total_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
             self.bl_star_table.setItem(bl_total_row, 10, bl_pp_total_item)
 
             bl_total_solo_pp: float = sum(s.pp_solo or 0.0 for s in bl_stats)

@@ -261,7 +261,7 @@ class SnapshotCompareDialog(QDialog):
             | Qt.WindowType.WindowMaximizeButtonHint
             | Qt.WindowType.WindowMinimizeButtonHint
         )
-        self.resize(1520, 720)
+        self.resize(1520, 760)
 
         # steam_id ごとにスナップショットを管理する
         self._snapshots_by_player: dict[str, List[Snapshot]] = {}
@@ -342,6 +342,13 @@ class SnapshotCompareDialog(QDialog):
         self.btn_toggle_bl.setStyleSheet(toggle_button_stylesheet())
         top_grid.addWidget(self.btn_toggle_bl, 0, 9)
 
+        self.btn_toggle_header = QPushButton("Header", self)
+        self.btn_toggle_header.setCheckable(True)
+        self.btn_toggle_header.setChecked(False)  # デフォルト非表示
+        self.btn_toggle_header.setFixedWidth(65)
+        self.btn_toggle_header.setToolTip("各テーブルのタイトルヘッダの表示/非表示")
+        self.btn_toggle_header.setStyleSheet(toggle_button_stylesheet())
+
         top_grid.addWidget(QLabel("  "), 0, 10)  # BL と AccSaber の間のスペーサ
 
         # AccSaber モード切り替えボタン (AccSaber / AccSaber Reloaded) — Metric/SS/BL の右隣
@@ -397,14 +404,29 @@ class SnapshotCompareDialog(QDialog):
         _chk_layout.addStretch(1)
         top_grid.addWidget(_chk_container, 1, 7, 1, 6)
 
-        # 左寄せに配置
-        root_layout.addLayout(top_grid, Qt.AlignmentFlag.AlignLeft)
+        # 左寄せに配置（右端に Header ボタンを右寄せで追加）
+        _top_hbox = QHBoxLayout()
+        _top_hbox.setContentsMargins(0, 0, 0, 0)
+        _top_hbox.addLayout(top_grid)
+        _top_hbox.addStretch(1)
+        _top_hbox.addWidget(self.btn_toggle_header, alignment=Qt.AlignmentFlag.AlignBottom)
+        root_layout.addLayout(_top_hbox)
 
         # 下部: 左右3つの比較テーブル（上段系 / ScoreSaber★別 / BeatLeader★別）
         self._splitter = QSplitter(Qt.Orientation.Horizontal, self)
 
-        # 左: プレイヤー/AccSaber 指標
-        self.table = QTableWidget(0, 4, self._splitter)
+        # 左: プレイヤー/AccSaber 指標（タイトルラベル＋テーブルをコンテナで包む）
+        self._metric_cmp_container = QWidget()
+        _metric_cmp_vbox = QVBoxLayout(self._metric_cmp_container)
+        _metric_cmp_vbox.setContentsMargins(0, 0, 0, 0)
+        _metric_cmp_vbox.setSpacing(2)
+        self._metric_title_label = QLabel("", self._metric_cmp_container)
+        self._metric_title_label.setStyleSheet("font-size: 11px; padding: 1px 2px;")
+        self._metric_title_label.setVisible(False)  # デフォルト非表示
+        _metric_cmp_vbox.addWidget(self._metric_title_label)
+        self._splitter.addWidget(self._metric_cmp_container)
+
+        self.table = QTableWidget(0, 4, self._metric_cmp_container)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setStyleSheet(table_stylesheet())
         self.table.verticalHeader().setDefaultSectionSize(14)  # 行の高さを少し詰める
@@ -424,11 +446,14 @@ class SnapshotCompareDialog(QDialog):
         header = self.table.horizontalHeader()
         header.setStretchLastSection(False)
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Interactive)
         header.resizeSection(0, 150)
-        header.resizeSection(3, 50)
+        header.resizeSection(1, 85)
+        header.resizeSection(2, 85)
+        header.resizeSection(3, 70)
+        _metric_cmp_vbox.addWidget(self.table)
 
         # 右側: 縦スプリッター（上=★別テーブル、下=AccSaberグリッド）
         self._right_vsplitter = QSplitter(Qt.Orientation.Vertical)
@@ -439,7 +464,16 @@ class SnapshotCompareDialog(QDialog):
         self._right_vsplitter.addWidget(self._star_hsplitter)
 
         # 中央: ScoreSaber ★別（クリア数 + AvgAcc 比較）
-        self.ss_star_table = QTableWidget(0, 17, self._star_hsplitter)
+        self._ss_cmp_container = QWidget()
+        _ss_cmp_vbox = QVBoxLayout(self._ss_cmp_container)
+        _ss_cmp_vbox.setContentsMargins(0, 0, 0, 0)
+        _ss_cmp_vbox.setSpacing(2)
+        self._ss_star_title_label = QLabel("", self._ss_cmp_container)
+        self._ss_star_title_label.setStyleSheet("font-size: 11px; padding: 1px 2px;")
+        _ss_cmp_vbox.addWidget(self._ss_star_title_label)
+        self._star_hsplitter.addWidget(self._ss_cmp_container)
+
+        self.ss_star_table = QTableWidget(0, 17, self._ss_cmp_container)
         self.ss_star_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.ss_star_table.setStyleSheet(table_stylesheet())
         self.ss_star_table.verticalHeader().setDefaultSectionSize(14)  # 行の高さを少し詰める
@@ -484,10 +518,20 @@ class SnapshotCompareDialog(QDialog):
         ss_star_header.resizeSection(14, 50)
         ss_star_header.resizeSection(15, 50)
         # 下段★テーブルは行番号(No)が紛らわしいので非表示にする
+        _ss_cmp_vbox.addWidget(self.ss_star_table)
         self.ss_star_table.verticalHeader().setVisible(False)
 
         # 右: BeatLeader ★別（クリア数 + AvgAcc 比較）
-        self.bl_star_table = QTableWidget(0, 17, self._star_hsplitter)
+        self._bl_cmp_container = QWidget()
+        _bl_cmp_vbox = QVBoxLayout(self._bl_cmp_container)
+        _bl_cmp_vbox.setContentsMargins(0, 0, 0, 0)
+        _bl_cmp_vbox.setSpacing(2)
+        self._bl_star_title_label = QLabel("", self._bl_cmp_container)
+        self._bl_star_title_label.setStyleSheet("font-size: 11px; padding: 1px 2px;")
+        _bl_cmp_vbox.addWidget(self._bl_star_title_label)
+        self._star_hsplitter.addWidget(self._bl_cmp_container)
+
+        self.bl_star_table = QTableWidget(0, 17, self._bl_cmp_container)
         self.bl_star_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.bl_star_table.setStyleSheet(table_stylesheet())
         self.bl_star_table.verticalHeader().setDefaultSectionSize(14)  # 行の高さを少し詰める
@@ -531,6 +575,7 @@ class SnapshotCompareDialog(QDialog):
         bl_star_header.resizeSection(12, 45)
         bl_star_header.resizeSection(14, 50)
         bl_star_header.resizeSection(15, 50)
+        _bl_cmp_vbox.addWidget(self.bl_star_table)
         self.bl_star_table.verticalHeader().setVisible(False)
 
         # 右下: AccSaber 比較グリッド（A/B を列で並べる 1 テーブル形式）
@@ -539,6 +584,11 @@ class SnapshotCompareDialog(QDialog):
         _acc_cmp_vbox.setContentsMargins(2, 2, 2, 2)
         _acc_cmp_vbox.setSpacing(2)
         self._right_vsplitter.addWidget(self._acc_cmp_container)
+
+        # タイトルラベル（プレイヤー名と日時）
+        self._acc_cmp_title_label = QLabel("", self._acc_cmp_container)
+        self._acc_cmp_title_label.setStyleSheet("font-size: 11px; padding: 1px 2px;")
+        _acc_cmp_vbox.addWidget(self._acc_cmp_title_label)
 
         # 1 テーブル: 4行 × 13列
         # 列: (icon) | A AP | B AP | ΔAP | A Rank | B Rank | ΔRank | A Play Count | B Play Count | ΔPlay Count | A Avg Acc | B Avg Acc | ΔAvg Acc
@@ -634,6 +684,7 @@ class SnapshotCompareDialog(QDialog):
         self.btn_toggle_ss.toggled.connect(self._on_toggle_ss)
         self.btn_toggle_bl.toggled.connect(self._on_toggle_bl)
         self.btn_toggle_metric.toggled.connect(self._on_toggle_metric)
+        self.btn_toggle_header.toggled.connect(self._on_toggle_header)
         self.btn_acc_as.clicked.connect(self._on_acc_mode_as)
         self.btn_acc_rl.clicked.connect(self._on_acc_mode_rl)
         self.chk_col_clear.toggled.connect(self._apply_star_col_visibility)
@@ -824,6 +875,7 @@ class SnapshotCompareDialog(QDialog):
             (self.btn_toggle_metric, "ui_toggle_metric"),
             (self.btn_toggle_ss,     "ui_toggle_ss"),
             (self.btn_toggle_bl,     "ui_toggle_bl"),
+            (self.btn_toggle_header, "ui_toggle_header"),
         ):
             if key in data:
                 btn.blockSignals(True)
@@ -841,9 +893,15 @@ class SnapshotCompareDialog(QDialog):
                 chk.setChecked(bool(data[key]))
                 chk.blockSignals(False)
         # 可視性を一括適用
-        self.table.setVisible(self.btn_toggle_metric.isChecked())
-        self.ss_star_table.setVisible(self.btn_toggle_ss.isChecked())
-        self.bl_star_table.setVisible(self.btn_toggle_bl.isChecked())
+        self._metric_cmp_container.setVisible(self.btn_toggle_metric.isChecked())
+        self._ss_cmp_container.setVisible(self.btn_toggle_ss.isChecked())
+        self._bl_cmp_container.setVisible(self.btn_toggle_bl.isChecked())
+        # タイトルヘッダの可視性を適用
+        _hdr = self.btn_toggle_header.isChecked()
+        self._metric_title_label.setVisible(_hdr)
+        self._ss_star_title_label.setVisible(_hdr)
+        self._bl_star_title_label.setVisible(_hdr)
+        self._acc_cmp_title_label.setVisible(_hdr)
         # 描画完了後に _rebalance_splitter() を呼ぶ（未描画時は sizes=[0,0,0] になるため）
         QTimer.singleShot(0, self._rebalance_splitter)
         self._apply_star_col_visibility_inner()
@@ -865,13 +923,14 @@ class SnapshotCompareDialog(QDialog):
                 data = {}
 
             # UI 状態（トグルボタン・チェックボックス）を常に保存
-            data["ui_acc_mode"]      = self._acc_mode
-            data["ui_toggle_metric"] = self.btn_toggle_metric.isChecked()
-            data["ui_toggle_ss"]     = self.btn_toggle_ss.isChecked()
-            data["ui_toggle_bl"]     = self.btn_toggle_bl.isChecked()
-            data["ui_col_clear"]     = self.chk_col_clear.isChecked()
-            data["ui_col_fc"]        = self.chk_col_fc.isChecked()
-            data["ui_col_acc"]       = self.chk_col_acc.isChecked()
+            data["ui_acc_mode"]       = self._acc_mode
+            data["ui_toggle_metric"]  = self.btn_toggle_metric.isChecked()
+            data["ui_toggle_ss"]      = self.btn_toggle_ss.isChecked()
+            data["ui_toggle_bl"]      = self.btn_toggle_bl.isChecked()
+            data["ui_toggle_header"]  = self.btn_toggle_header.isChecked()
+            data["ui_col_clear"]      = self.chk_col_clear.isChecked()
+            data["ui_col_fc"]         = self.chk_col_fc.isChecked()
+            data["ui_col_acc"]        = self.chk_col_acc.isChecked()
             data["ui_col_pp"]        = self.chk_col_pp.isChecked()
             data["ui_col_starpp"]    = self.chk_col_starpp.isChecked()
 
@@ -988,7 +1047,7 @@ class SnapshotCompareDialog(QDialog):
 
     def _on_toggle_metric(self, checked: bool) -> None:
         """Metric テーブルの表示/非表示を切り替える。"""
-        self.table.setVisible(checked)
+        self._metric_cmp_container.setVisible(checked)
         self._rebalance_splitter()
         self._save_last_selection()
 
@@ -1010,14 +1069,22 @@ class SnapshotCompareDialog(QDialog):
 
     def _on_toggle_ss(self, checked: bool) -> None:
         """ScoreSaber ★別テーブルの表示/非表示を切り替える。"""
-        self.ss_star_table.setVisible(checked)
+        self._ss_cmp_container.setVisible(checked)
         self._rebalance_splitter()
         self._save_last_selection()
 
     def _on_toggle_bl(self, checked: bool) -> None:
         """BeatLeader ★別テーブルの表示/非表示を切り替える。"""
-        self.bl_star_table.setVisible(checked)
+        self._bl_cmp_container.setVisible(checked)
         self._rebalance_splitter()
+        self._save_last_selection()
+
+    def _on_toggle_header(self, checked: bool) -> None:
+        """全テーブルのタイトルヘッダの表示/非表示を切り替える。"""
+        self._metric_title_label.setVisible(checked)
+        self._ss_star_title_label.setVisible(checked)
+        self._bl_star_title_label.setVisible(checked)
+        self._acc_cmp_title_label.setVisible(checked)
         self._save_last_selection()
 
     def _apply_star_col_visibility(self, *_) -> None:
@@ -1063,9 +1130,9 @@ class SnapshotCompareDialog(QDialog):
         """SS/BL/Metric テーブルの表示状態に応じてスプリッタサイズを再調整する。"""
         sizes = self._splitter.sizes()
         total = sum(sizes)
-        metric_vis = self.table.isVisible()
-        ss_vis = self.ss_star_table.isVisible()
-        bl_vis = self.bl_star_table.isVisible()
+        metric_vis = self._metric_cmp_container.isVisible()
+        ss_vis = self._ss_cmp_container.isVisible()
+        bl_vis = self._bl_cmp_container.isVisible()
 
         # Metric は初期幅 (300) を常に使う（現在幅は保存しない）
         metric_w = self._metric_preferred_width if metric_vis else 0
@@ -1087,6 +1154,8 @@ class SnapshotCompareDialog(QDialog):
             self._star_hsplitter.setSizes([0, star_total])
         else:
             self._star_hsplitter.setSizes([0, 0])
+        self._ss_cmp_container.setVisible(ss_vis)
+        self._bl_cmp_container.setVisible(bl_vis)
 
     def _current_snapshot(self, combo: QComboBox) -> Optional[Snapshot]:
         # A/B それぞれに対応するプレイヤーコンボから現在のプレイヤーを取得
@@ -1211,7 +1280,7 @@ class SnapshotCompareDialog(QDialog):
         if snap_a is None or snap_b is None:
             return
 
-        # A / B 列ヘッダにスナップショット日付を含める（例: A (2026/01/11)）
+        # A / B 列ヘッダにスナップショット日付+時刻を含める（例: A (2026/01/11 13:45)）
         def _date_only(taken_at: str) -> str:
             try:
                 t_str = taken_at
@@ -1221,17 +1290,42 @@ class SnapshotCompareDialog(QDialog):
                 else:
                     dt_utc = datetime.fromisoformat(t_str).replace(tzinfo=timezone.utc)
                 dt_local = dt_utc.astimezone()
-                return dt_local.strftime("%Y/%m/%d")
+                return dt_local.strftime("%Y/%m/%d %H:%M")
             except Exception:
                 return taken_at
 
         date_a = _date_only(snap_a.taken_at)
         date_b = _date_only(snap_b.taken_at)
+
+        # プレイヤー名（SteamIDなし）
+        def _player_name(snap) -> str:
+            return snap.scoresaber_name or snap.beatleader_name or snap.steam_id or ""
+
+        _name_a = _player_name(snap_a)
+        _name_b = _player_name(snap_b)
+        _same_player = (snap_a.steam_id == snap_b.steam_id)
+
+        # AccSaber 比較グリッドのタイトルラベルを更新
+        if _same_player:
+            _acc_title = f"{_name_a}　A: {date_a}　B: {date_b}"
+        else:
+            _acc_title = f"A: {_name_a} ({date_a})　B: {_name_b} ({date_b})"
+        self._acc_cmp_title_label.setText(_acc_title)
+
+        # ScoreSaber / BeatLeader ★別テーブルのタイトルラベルを更新
+        if _same_player:
+            _star_title = f"{_name_a}　A: {date_a}　B: {date_b}"
+        else:
+            _star_title = f"A: {_name_a} ({date_a})　B: {_name_b} ({date_b})"
+        self._ss_star_title_label.setText(_star_title)
+        self._bl_star_title_label.setText(_star_title)
+        self._metric_title_label.setText(_star_title)
+
         self.table.setHorizontalHeaderLabels([
             "Metric",
-            f"A ({date_a})",
-            f"B ({date_b})",
-            "Diff (A⇒B)",
+            f"A",
+            f"B",
+            "Diff",
         ])
         # ★テーブル側のヘッダはコンパクトな固定ラベルを使う（サービス名はアイコンで表現）
         self.ss_star_table.setHorizontalHeaderLabels([
@@ -1508,6 +1602,93 @@ class SnapshotCompareDialog(QDialog):
                 item.setData(Qt.ItemDataRole.UserRole, min(1.0, plays / total))
                 item.setData(Qt.ItemDataRole.UserRole + 1, color)
 
+        # AccSaber Overall メトリク行（モードに応じて切り替え）
+        if self._acc_mode != "RL":
+            # AccSaber (AS) Overall
+            _overall_ap_a = _overall_ap_from_snapshot(snap_a)
+            _overall_ap_b = _overall_ap_from_snapshot(snap_b)
+            self._set_row(
+                self.table, row_main, "[AS] Overall AP",
+                round(_overall_ap_a, 2) if _overall_ap_a is not None else None,
+                round(_overall_ap_b, 2) if _overall_ap_b is not None else None,
+            )
+            row_main += 1
+
+            row_main = _set_combined_rank_row(
+                row_main, "[AS] Overall Rank",
+                snap_a.accsaber_overall_rank, snap_a.scoresaber_country, snap_a.accsaber_overall_rank_country,
+                snap_b.accsaber_overall_rank, snap_b.scoresaber_country, snap_b.accsaber_overall_rank_country,
+            )
+
+            self._set_row(
+                self.table, row_main, "[AS] Overall Play Count",
+                _overall_play_from_snapshot(snap_a),
+                _overall_play_from_snapshot(snap_b),
+            )
+            row_main += 1
+
+            self._set_row(
+                self.table, row_main, "[AS] Overall AvgAcc",
+                round(snap_a.accsaber_overall_avg_acc, 2) if snap_a.accsaber_overall_avg_acc is not None else None,
+                round(snap_b.accsaber_overall_avg_acc, 2) if snap_b.accsaber_overall_avg_acc is not None else None,
+            )
+            row_main += 1
+        else:
+            # AccSaber Reloaded (RL) Overall + XP
+            self._set_row(
+                self.table, row_main, "[RL] Overall AP",
+                round(snap_a.accsaber_reloaded_overall_ap, 2) if snap_a.accsaber_reloaded_overall_ap is not None else None,
+                round(snap_b.accsaber_reloaded_overall_ap, 2) if snap_b.accsaber_reloaded_overall_ap is not None else None,
+            )
+            row_main += 1
+
+            row_main = _set_combined_rank_row(
+                row_main, "[RL] Overall Rank",
+                snap_a.accsaber_reloaded_overall_rank, snap_a.scoresaber_country, snap_a.accsaber_reloaded_overall_rank_country,
+                snap_b.accsaber_reloaded_overall_rank, snap_b.scoresaber_country, snap_b.accsaber_reloaded_overall_rank_country,
+            )
+
+            self._set_row(
+                self.table, row_main, "[RL] Overall Play Count",
+                snap_a.accsaber_reloaded_overall_ranked_plays,
+                snap_b.accsaber_reloaded_overall_ranked_plays,
+            )
+            row_main += 1
+
+            self._set_row(
+                self.table, row_main, "[RL] Overall AvgAcc",
+                round(snap_a.accsaber_reloaded_overall_avg_acc, 2) if snap_a.accsaber_reloaded_overall_avg_acc is not None else None,
+                round(snap_b.accsaber_reloaded_overall_avg_acc, 2) if snap_b.accsaber_reloaded_overall_avg_acc is not None else None,
+            )
+            row_main += 1
+
+            # XP / XP Rank (RL モードのみ)
+            _xp_lv_a = snap_a.accsaber_reloaded_xp_level
+            _xp_lv_b = snap_b.accsaber_reloaded_xp_level
+            def _xp_val(xp, level):
+                if xp is None:
+                    return None
+                v = int(round(xp))
+                if level is not None:
+                    return (v, f"{v:,} (Lv.{level})")
+                return v
+            self._set_row(
+                self.table, row_main, "[RL] XP",
+                _xp_val(snap_a.accsaber_reloaded_xp, _xp_lv_a),
+                _xp_val(snap_b.accsaber_reloaded_xp, _xp_lv_b),
+            )
+            if _xp_lv_a is not None and _xp_lv_b is not None:
+                _lv_diff = _xp_lv_b - _xp_lv_a
+                _diff_item = self.table.item(row_main, 3)
+                if _diff_item is not None:
+                    _diff_item.setText(_diff_item.text() + f" (Lv{_lv_diff:+d})")
+            row_main += 1
+            row_main = _set_combined_rank_row(
+                row_main, "[RL] XP Rank",
+                snap_a.accsaber_reloaded_xp_rank, snap_a.scoresaber_country, snap_a.accsaber_reloaded_xp_rank_country,
+                snap_b.accsaber_reloaded_xp_rank, snap_b.scoresaber_country, snap_b.accsaber_reloaded_xp_rank_country,
+            )
+
         # AccSaber 比較グリッドのヘッダを更新
         self.acc_cmp_table.setHorizontalHeaderLabels([
             "", "A AP", "B AP", "\u0394AP",
@@ -1653,33 +1834,6 @@ class SnapshotCompareDialog(QDialog):
 
         # AccSaber / AccSaber Reloaded (モードに応じて切り替え)
         if self._acc_mode == "RL":
-            # --- AccSaber Reloaded: XP / XP Rank のみ self.table に追加 ---
-            _xp_lv_a = snap_a.accsaber_reloaded_xp_level
-            _xp_lv_b = snap_b.accsaber_reloaded_xp_level
-            def _xp_val(xp, lv):
-                if xp is None:
-                    return None
-                v = int(round(xp))
-                if lv is not None:
-                    return (v, f"{v:,} (Lv.{lv})")
-                return v
-            self._set_row(
-                self.table, row_main, "[RL] XP",
-                _xp_val(snap_a.accsaber_reloaded_xp, _xp_lv_a),
-                _xp_val(snap_b.accsaber_reloaded_xp, _xp_lv_b),
-            )
-            if _xp_lv_a is not None and _xp_lv_b is not None:
-                _lv_diff = _xp_lv_b - _xp_lv_a
-                _diff_item = self.table.item(row_main, 3)
-                if _diff_item is not None:
-                    _diff_item.setText(_diff_item.text() + f" (Lv{_lv_diff:+d})")
-            row_main += 1
-            row_main = _set_combined_rank_row(
-                row_main, "[RL] XP Rank",
-                snap_a.accsaber_reloaded_xp_rank, snap_a.scoresaber_country, snap_a.accsaber_reloaded_xp_rank_country,
-                snap_b.accsaber_reloaded_xp_rank, snap_b.scoresaber_country, snap_b.accsaber_reloaded_xp_rank_country,
-            )
-
             # AccSaber Reloaded 総譜面数をキャッシュから取得
             try:
                 _rl_map_counts = _get_reloaded_map_counts_from_cache()
@@ -2164,6 +2318,6 @@ class SnapshotCompareDialog(QDialog):
                 pp_solo_a=bl_sp_total_a, pp_solo_b=bl_sp_total_b,
             )
 
-        self.table.resizeColumnsToContents()
+        self.table.resizeColumnToContents(0)  # Metric列のみ自動調整、A/B/Diff列は固定幅
         # チェックボックスで設定された列の表示/非表示を再適用
         self._apply_star_col_visibility_inner()
