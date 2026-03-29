@@ -137,6 +137,12 @@ class Snapshot:
     accsaber_standard_ap: float | None = None
     accsaber_tech_ap: float | None = None
 
+    # AccSaber Avg Acc (Overall / True / Standard / Tech, 0.0-100.0)
+    accsaber_overall_avg_acc: float | None = None
+    accsaber_true_avg_acc: float | None = None
+    accsaber_standard_avg_acc: float | None = None
+    accsaber_tech_avg_acc: float | None = None
+
     # BeatLeader の追加統計（将来の拡張用）
     beatleader_average_ranked_acc: float | None = None
     beatleader_total_play_count: int | None = None
@@ -180,6 +186,12 @@ class Snapshot:
     accsaber_reloaded_tech_rank_country: int | None = None
     accsaber_reloaded_tech_ap: float | None = None
     accsaber_reloaded_tech_ranked_plays: int | None = None
+
+    # AccSaber Reloaded Avg Acc (0.0-100.0)
+    accsaber_reloaded_overall_avg_acc: float | None = None
+    accsaber_reloaded_true_avg_acc: float | None = None
+    accsaber_reloaded_standard_avg_acc: float | None = None
+    accsaber_reloaded_tech_avg_acc: float | None = None
 
     accsaber_reloaded_xp: float | None = None
     accsaber_reloaded_xp_level: int | None = None
