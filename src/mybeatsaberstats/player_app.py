@@ -2105,12 +2105,12 @@ class PlayerWindow(QMainWindow):
         bl_pp_text = f"{snap.beatleader_pp:,.2f}" if snap.beatleader_pp is not None else None
 
         ss_acc_text = (
-            f"{snap.scoresaber_average_ranked_acc:.2f}"
+            f"{snap.scoresaber_average_ranked_acc:.2f}%"
             if snap.scoresaber_average_ranked_acc is not None
             else None
         )
         bl_acc_text = (
-            f"{snap.beatleader_average_ranked_acc:.2f}"
+            f"{snap.beatleader_average_ranked_acc:.2f}%"
             if snap.beatleader_average_ranked_acc is not None
             else None
         )
