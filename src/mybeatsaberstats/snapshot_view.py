@@ -261,7 +261,7 @@ class SnapshotCompareDialog(QDialog):
             | Qt.WindowType.WindowMaximizeButtonHint
             | Qt.WindowType.WindowMinimizeButtonHint
         )
-        self.resize(1520, 760)
+        self.resize(1520, 720)
 
         # steam_id ごとにスナップショットを管理する
         self._snapshots_by_player: dict[str, List[Snapshot]] = {}
@@ -452,7 +452,7 @@ class SnapshotCompareDialog(QDialog):
         header.resizeSection(0, 150)
         header.resizeSection(1, 85)
         header.resizeSection(2, 85)
-        header.resizeSection(3, 70)
+        header.resizeSection(3, 95)
         _metric_cmp_vbox.addWidget(self.table)
 
         # 右側: 縦スプリッター（上=★別テーブル、下=AccSaberグリッド）
@@ -470,6 +470,7 @@ class SnapshotCompareDialog(QDialog):
         _ss_cmp_vbox.setSpacing(2)
         self._ss_star_title_label = QLabel("", self._ss_cmp_container)
         self._ss_star_title_label.setStyleSheet("font-size: 11px; padding: 1px 2px;")
+        self._ss_star_title_label.setOpenExternalLinks(True)
         _ss_cmp_vbox.addWidget(self._ss_star_title_label)
         self._star_hsplitter.addWidget(self._ss_cmp_container)
 
@@ -528,6 +529,7 @@ class SnapshotCompareDialog(QDialog):
         _bl_cmp_vbox.setSpacing(2)
         self._bl_star_title_label = QLabel("", self._bl_cmp_container)
         self._bl_star_title_label.setStyleSheet("font-size: 11px; padding: 1px 2px;")
+        self._bl_star_title_label.setOpenExternalLinks(True)
         _bl_cmp_vbox.addWidget(self._bl_star_title_label)
         self._star_hsplitter.addWidget(self._bl_cmp_container)
 
@@ -588,6 +590,7 @@ class SnapshotCompareDialog(QDialog):
         # タイトルラベル（プレイヤー名と日時）
         self._acc_cmp_title_label = QLabel("", self._acc_cmp_container)
         self._acc_cmp_title_label.setStyleSheet("font-size: 11px; padding: 1px 2px;")
+        self._acc_cmp_title_label.setOpenExternalLinks(True)
         _acc_cmp_vbox.addWidget(self._acc_cmp_title_label)
 
         # 1 テーブル: 4行 × 13列
@@ -664,7 +667,7 @@ class SnapshotCompareDialog(QDialog):
         root_layout.addWidget(self._splitter, 1)
         # デフォルトの分割比率
         self._splitter.setSizes([300, 865])
-        self._right_vsplitter.setSizes([500, 180])
+        self._right_vsplitter.setSizes([510, 180])
         self._star_hsplitter.setSizes([380, 485])
 
         self._load_snapshots()
@@ -1307,19 +1310,44 @@ class SnapshotCompareDialog(QDialog):
 
         # AccSaber 比較グリッドのタイトルラベルを更新
         if _same_player:
-            _acc_title = f"{_name_a}　A: {date_a}　B: {date_b}"
+            _acc_title = f"{_name_a}&nbsp;&nbsp;&nbsp;<b>A:</b>&nbsp;{date_a}&nbsp;&nbsp;&nbsp;&nbsp;<b>B:</b>&nbsp;{date_b}"
         else:
-            _acc_title = f"A: {_name_a} ({date_a})　B: {_name_b} ({date_b})"
-        self._acc_cmp_title_label.setText(_acc_title)
+            _acc_title = f"<b>A:</b>&nbsp;{_name_a}&nbsp;({date_a})&nbsp;&nbsp;&nbsp;&nbsp;<b>B:</b>&nbsp;{_name_b}&nbsp;({date_b})"
+
+        _link_color = "#5aaaee" if is_dark() else "#0066cc"
+        _link_style = f"color:{_link_color}; text-decoration:none; font-weight:bold;"
+        _ss_id_a = snap_a.scoresaber_id
+        _bl_id_a = snap_a.beatleader_id or snap_a.steam_id
+
+        _acc_mode_text = "AccSaber Reloaded" if self._acc_mode == "RL" else "AccSaber"
+        if self._acc_mode == "RL":
+            _acc_service_url = f"https://accsaberreloaded.com/players/{_bl_id_a}" if _bl_id_a else ""
+        else:
+            _acc_service_url = f"https://accsaber.com/profile/{_ss_id_a}" if _ss_id_a else ""
+        if _acc_service_url:
+            _acc_service_text = f'<a href="{_acc_service_url}" style="{_link_style}">{_acc_mode_text}</a>'
+        else:
+            _acc_service_text = _acc_mode_text
+        self._acc_cmp_title_label.setText(f"{_acc_service_text} ／ {_acc_title}")
 
         # ScoreSaber / BeatLeader ★別テーブルのタイトルラベルを更新
         if _same_player:
-            _star_title = f"{_name_a}　A: {date_a}　B: {date_b}"
+            _star_title = f"{_name_a}&nbsp;&nbsp;&nbsp;<b>A:</b>&nbsp;{date_a}&nbsp;&nbsp;&nbsp;&nbsp;<b>B:</b>&nbsp;{date_b}"
         else:
-            _star_title = f"A: {_name_a} ({date_a})　B: {_name_b} ({date_b})"
-        self._ss_star_title_label.setText(_star_title)
-        self._bl_star_title_label.setText(_star_title)
-        self._metric_title_label.setText(_star_title)
+            _star_title = f"<b>A:</b>&nbsp;{_name_a}&nbsp;({date_a})&nbsp;&nbsp;&nbsp;&nbsp;<b>B:</b>&nbsp;{_name_b}&nbsp;({date_b})"
+        _ss_url = f"https://scoresaber.com/u/{_ss_id_a}" if _ss_id_a else ""
+        if _ss_url:
+            _ss_service_text = f'<a href="{_ss_url}" style="{_link_style}">ScoreSaber</a>'
+        else:
+            _ss_service_text = "ScoreSaber"
+        self._ss_star_title_label.setText(f"{_ss_service_text} ／ {_star_title}")
+        _bl_url = f"https://beatleader.com/u/{_bl_id_a}" if _bl_id_a else ""
+        if _bl_url:
+            _bl_service_text = f'<a href="{_bl_url}" style="{_link_style}">BeatLeader</a>'
+        else:
+            _bl_service_text = "BeatLeader"
+        self._bl_star_title_label.setText(f"{_bl_service_text} ／ {_star_title}")
+        self._metric_title_label.setText(f"{_star_title}")
 
         self.table.setHorizontalHeaderLabels([
             "Metric",
