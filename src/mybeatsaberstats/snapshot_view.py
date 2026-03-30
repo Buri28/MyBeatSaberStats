@@ -1755,7 +1755,7 @@ class SnapshotCompareDialog(QDialog):
 
                 # col 1/2/3: A AP / B AP / ΔAP
                 def _ap_item(ap):
-                    it = QTableWidgetItem(f"{round(ap, 2):.2f}" if ap is not None else "")
+                    it = QTableWidgetItem(f"{round(ap, 2):,.2f}" if ap is not None else "")
                     it.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                     return it
                 self.acc_cmp_table.setItem(row, 1, _ap_item(ap_a))

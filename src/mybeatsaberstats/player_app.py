@@ -1053,10 +1053,17 @@ class PlayerWindow(QMainWindow):
         left_acc_layout = QVBoxLayout(left_acc_widget)
         left_acc_layout.setContentsMargins(2, 2, 2, 2)
         left_acc_layout.setSpacing(2)
+        _acc_header = QWidget(self)
+        _acc_header_layout = QHBoxLayout(_acc_header)
+        _acc_header_layout.setContentsMargins(0, 0, 0, 0)
+        _acc_header_layout.setSpacing(4)
         self._acc_title = QLabel("AccSaber", self)
         self._acc_title.setStyleSheet("font-weight: bold; font-size: 11px; padding: 0px 2px;")
         self._acc_title.setOpenExternalLinks(True)
-        left_acc_layout.addWidget(self._acc_title)
+        _acc_header_layout.addWidget(self._acc_title)
+        _acc_header_layout.addStretch()
+        _acc_header.setFixedHeight(20)
+        left_acc_layout.addWidget(_acc_header)
         left_acc_layout.addWidget(self.acc_table, 1)
 
         # AccSaber Reloaded テーブルを右下に表示するウィジェット
@@ -1085,6 +1092,7 @@ class PlayerWindow(QMainWindow):
         _acc_rl_header_layout.addWidget(self._acc_rl_xp_label)
         _acc_rl_header_layout.addStretch()
         _acc_rl_header_layout.addWidget(self._btn_rl_unplayed)
+        _acc_rl_header.setFixedHeight(20)
         right_bottom_layout.addWidget(_acc_rl_header)
         right_bottom_layout.addWidget(self.acc_rl_table, 1)
 
@@ -2259,13 +2267,13 @@ class PlayerWindow(QMainWindow):
 
             parts: list[str] = []
             if global_rank is not None:
-                parts.append(str(global_rank))
+                parts.append(f"{global_rank:,}")
             if country_code and country_rank is not None:
                 flag = _country_flag(country_code)
                 if flag:
-                    parts.append(f"({flag} {country_rank})")
+                    parts.append(f"({flag} {country_rank:,})")
                 else:
-                    parts.append(f"({country_code} {country_rank})")
+                    parts.append(f"({country_code} {country_rank:,})")
             return " ".join(parts) if parts else None
 
         # AccSaber True / Standard / Tech の対象譜面総数をファイルキャッシュから取得する。
