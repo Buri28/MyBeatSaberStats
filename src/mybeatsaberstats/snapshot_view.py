@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
     QHeaderView,
+    QSizePolicy,
     QSplitter,
     QStyledItemDelegate,
 )
@@ -271,6 +272,8 @@ class SnapshotCompareDialog(QDialog):
         self._metric_preferred_width: int = 425
 
         root_layout = QVBoxLayout(self)
+        root_layout.setContentsMargins(2, 2, 2, 2)
+        root_layout.setSpacing(0)
 
         # サービス別アイコン
         resources_dir = RESOURCES_DIR
@@ -283,7 +286,9 @@ class SnapshotCompareDialog(QDialog):
         # 上部: 左右プレイヤー選択 + それぞれのスナップショット日時選択
         top_grid = QGridLayout()
         top_grid.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        top_grid.setContentsMargins(0, 2, 0, 2)
         top_grid.setHorizontalSpacing(5)
+        top_grid.setVerticalSpacing(3)
 
         # 1 行目: Player A / Player B
         top_grid.addWidget(QLabel("Player A:"), 0, 0)
@@ -401,16 +406,26 @@ class SnapshotCompareDialog(QDialog):
         btn_chk_none.clicked.connect(self._on_chk_none)
         _chk_layout.addWidget(btn_chk_all)
         _chk_layout.addWidget(btn_chk_none)
-        _chk_layout.addStretch(1)
         top_grid.addWidget(_chk_container, 1, 7, 1, 6)
 
-        # 左寄せに配置（右端に Header ボタンを右寄せで追加）
-        _top_hbox = QHBoxLayout()
-        _top_hbox.setContentsMargins(0, 0, 0, 0)
-        _top_hbox.addLayout(top_grid)
-        _top_hbox.addStretch(1)
-        _top_hbox.addWidget(self.btn_toggle_header, alignment=Qt.AlignmentFlag.AlignBottom)
-        root_layout.addLayout(_top_hbox)
+        # ストレッチ列でHeaderボタンを右端に寄せる
+        top_grid.setColumnStretch(13, 1)
+        top_grid.addWidget(self.btn_toggle_header, 1, 14)
+
+        # top_grid を QWidget でラップして縦スプリッターの上パネルにする
+        _top_ctrl_widget = QWidget(self)
+        _top_ctrl_inner = QVBoxLayout(_top_ctrl_widget)
+        _top_ctrl_inner.setContentsMargins(0, 0, 0, 0)
+        _top_ctrl_inner.setSpacing(0)
+        _top_ctrl_inner.addLayout(top_grid)
+        _top_ctrl_widget.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+
+        # 縦スプリッター: 上=コントロールエリア（折り畳み可）、下=テーブルエリア
+        self._v_splitter = QSplitter(Qt.Orientation.Vertical, self)
+        self._v_splitter.addWidget(_top_ctrl_widget)
+        # テーブルエリアは後で addWidget する
+
+        root_layout.addWidget(self._v_splitter, 1)
 
         # 下部: 左右3つの比較テーブル（上段系 / ScoreSaber★別 / BeatLeader★別）
         self._splitter = QSplitter(Qt.Orientation.Horizontal, self)
@@ -664,9 +679,12 @@ class SnapshotCompareDialog(QDialog):
         _bind_delegate(self.acc_cmp_table, 10, PercentageBarDelegate(self, max_value=100.0, gradient_min=70.0))  # A Avg Acc
         _bind_delegate(self.acc_cmp_table, 11, PercentageBarDelegate(self, max_value=100.0, gradient_min=70.0))  # B Avg Acc
 
-        root_layout.addWidget(self._splitter, 1)
+        self._v_splitter.addWidget(self._splitter)
+        self._v_splitter.setCollapsible(0, True)
+        self._v_splitter.setCollapsible(1, False)
         # デフォルトの分割比率
         self._splitter.setSizes([300, 865])
+        self._v_splitter.setSizes([60, 660])
         self._right_vsplitter.setSizes([510, 180])
         self._star_hsplitter.setSizes([380, 485])
 
@@ -905,6 +923,10 @@ class SnapshotCompareDialog(QDialog):
         self._ss_star_title_label.setVisible(_hdr)
         self._bl_star_title_label.setVisible(_hdr)
         self._acc_cmp_title_label.setVisible(_hdr)
+        # 縦スプリッターの上パネルサイズを復元
+        if "ui_v_splitter_top" in data:
+            _top_h = int(data["ui_v_splitter_top"])
+            QTimer.singleShot(0, lambda h=_top_h: self._restore_v_splitter(h))
         # 描画完了後に _rebalance_splitter() を呼ぶ（未描画時は sizes=[0,0,0] になるため）
         QTimer.singleShot(0, self._rebalance_splitter)
         self._apply_star_col_visibility_inner()
@@ -930,7 +952,8 @@ class SnapshotCompareDialog(QDialog):
             data["ui_toggle_metric"]  = self.btn_toggle_metric.isChecked()
             data["ui_toggle_ss"]      = self.btn_toggle_ss.isChecked()
             data["ui_toggle_bl"]      = self.btn_toggle_bl.isChecked()
-            data["ui_toggle_header"]  = self.btn_toggle_header.isChecked()
+            data["ui_toggle_header"]       = self.btn_toggle_header.isChecked()
+            data["ui_v_splitter_top"]      = self._v_splitter.sizes()[0]
             data["ui_col_clear"]      = self.chk_col_clear.isChecked()
             data["ui_col_fc"]         = self.chk_col_fc.isChecked()
             data["ui_col_acc"]        = self.chk_col_acc.isChecked()
@@ -1089,6 +1112,13 @@ class SnapshotCompareDialog(QDialog):
         self._bl_star_title_label.setVisible(checked)
         self._acc_cmp_title_label.setVisible(checked)
         self._save_last_selection()
+
+    def _restore_v_splitter(self, top_h: int) -> None:
+        """縦スプリッターの上パネルサイズを復元する（QTimer 経由で呼ぶ前提）。"""
+        total = sum(self._v_splitter.sizes())
+        if total <= 0:
+            return
+        self._v_splitter.setSizes([top_h, max(0, total - top_h)])
 
     def _apply_star_col_visibility(self, *_) -> None:
         """Clear/FC/Acc/PP/SPP 列グループの表示/非表示を SS/BL 両テーブルに適用する。"""
@@ -1506,7 +1536,7 @@ class SnapshotCompareDialog(QDialog):
         self._set_row(
             self.table,
             row_main,
-            "[SS] Average Ranked ACC",
+            "[SS] Avg Ranked ACC",
             round(snap_a.scoresaber_average_ranked_acc, 2) if snap_a.scoresaber_average_ranked_acc is not None else None,
             round(snap_b.scoresaber_average_ranked_acc, 2) if snap_b.scoresaber_average_ranked_acc is not None else None,
         )
@@ -1548,7 +1578,7 @@ class SnapshotCompareDialog(QDialog):
         self._set_row(
             self.table,
             row_main,
-            "[BL] Average Ranked ACC",
+            "[BL] Avg Ranked ACC",
             round(snap_a.beatleader_average_ranked_acc, 2) if snap_a.beatleader_average_ranked_acc is not None else None,
             round(snap_b.beatleader_average_ranked_acc, 2) if snap_b.beatleader_average_ranked_acc is not None else None,
         )
@@ -1798,7 +1828,22 @@ class SnapshotCompareDialog(QDialog):
                 delta_rank_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                 if rank_g_a is not None and rank_g_b is not None:
                     dr = rank_g_a - rank_g_b  # rank は小さいほど良いので逆向き
-                    delta_rank_item.setText(f"{dr:+,}")
+                    diff_text = f"{dr:+,}"
+                    # 国コードが同じ場合に国別ランク差分を追加
+                    if (
+                        isinstance(rank_c_a, (int, float))
+                        and isinstance(rank_c_b, (int, float))
+                        and country_a
+                        and country_b
+                        and str(country_a).upper() == str(country_b).upper()
+                    ):
+                        diff_country = rank_c_a - rank_c_b
+                        flag = _country_flag(str(country_a))
+                        if flag:
+                            diff_text += f" ({flag}{diff_country:+,d})"
+                        else:
+                            diff_text += f" ({country_a}{diff_country:+,d})"
+                    delta_rank_item.setText(diff_text)
                     if dr > 0:
                         delta_rank_item.setBackground(diff_positive_bg())
                     elif dr < 0:
