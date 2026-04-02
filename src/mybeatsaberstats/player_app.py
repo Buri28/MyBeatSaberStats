@@ -701,6 +701,14 @@ class PlayerWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("My Beat Saber Stats β")
 
+        # --- UI 状態保存用変数 ---
+        self._row_height: int = 14
+        self._saved_main_splitter_sizes: list[int] = [357, 363]
+        self._saved_bottom_splitter_sizes: list[int] = [357, 363]
+        self._saved_mid_splitter_sizes: list[int] = [600, 165]
+        self._default_window_size = (1220, 770)
+        self.resize(*self._default_window_size)
+
         central = QWidget(self)
         layout = QVBoxLayout(central)
 
@@ -764,6 +772,15 @@ class PlayerWindow(QMainWindow):
 
         self.update_button = QPushButton("🔄 Update")
         top_row.addWidget(self.update_button)
+
+        self.btn_row_height_up = QPushButton("▲")
+        self.btn_row_height_up.setFixedWidth(28)
+        self.btn_row_height_up.setToolTip("行の高さを増やす")
+        self.btn_row_height_dn = QPushButton("▼")
+        self.btn_row_height_dn.setFixedWidth(28)
+        self.btn_row_height_dn.setToolTip("行の高さを減らす")
+        top_row.addWidget(self.btn_row_height_up)
+        top_row.addWidget(self.btn_row_height_dn)
 
         _rows_layout.addLayout(top_row)
 
@@ -1041,12 +1058,12 @@ class PlayerWindow(QMainWindow):
         bl_col_layout.addWidget(self.bl_star_table, 1)  # stretch=1 → 残りを占有
 
         # 全体: 2列横スプリッタ [SS パネル (左) | BL パネル (右)]
-        main_splitter = QSplitter(Qt.Orientation.Horizontal, self)
-        main_splitter.addWidget(ss_column)
-        main_splitter.addWidget(bl_column)
-        main_splitter.setStretchFactor(0, 1)
-        main_splitter.setStretchFactor(1, 1)
-        main_splitter.setSizes([357, 363])  # 初期サイズ配分の目安
+        self._main_splitter = QSplitter(Qt.Orientation.Horizontal, self)
+        self._main_splitter.addWidget(ss_column)
+        self._main_splitter.addWidget(bl_column)
+        self._main_splitter.setStretchFactor(0, 1)
+        self._main_splitter.setStretchFactor(1, 1)
+        self._main_splitter.setSizes([357, 363])  # 初期サイズ配分の目安
 
         # AccSaber テーブルをタイトル付きコンテナに包む (左下)
         left_acc_widget = QWidget(self)
@@ -1097,22 +1114,22 @@ class PlayerWindow(QMainWindow):
         right_bottom_layout.addWidget(self.acc_rl_table, 1)
 
         # 下部: 横スプリッタ [AccSaber テーブル | AccSaber Reloaded テーブル]
-        bottom_h_splitter = QSplitter(Qt.Orientation.Horizontal, self)
-        bottom_h_splitter.addWidget(left_acc_widget)
-        bottom_h_splitter.addWidget(right_bottom_widget)
-        bottom_h_splitter.setStretchFactor(0, 1)
-        bottom_h_splitter.setStretchFactor(1, 1)
-        bottom_h_splitter.setSizes([357, 363])  # 初期サイズ配分の目安
+        self._bottom_h_splitter = QSplitter(Qt.Orientation.Horizontal, self)
+        self._bottom_h_splitter.addWidget(left_acc_widget)
+        self._bottom_h_splitter.addWidget(right_bottom_widget)
+        self._bottom_h_splitter.setStretchFactor(0, 1)
+        self._bottom_h_splitter.setStretchFactor(1, 1)
+        self._bottom_h_splitter.setSizes([357, 363])  # 初期サイズ配分の目安
 
         # 中央エリア (★テーブル) と下部エリアの間に縦スプリッタを設置
-        mid_bottom_splitter = QSplitter(Qt.Orientation.Vertical, self)
-        mid_bottom_splitter.addWidget(main_splitter)
-        mid_bottom_splitter.addWidget(bottom_h_splitter)
-        mid_bottom_splitter.setStretchFactor(0, 1)
-        mid_bottom_splitter.setStretchFactor(1, 0)
-        mid_bottom_splitter.setSizes([600, 165])  # 初期サイズ配分の目安
+        self._mid_bottom_splitter = QSplitter(Qt.Orientation.Vertical, self)
+        self._mid_bottom_splitter.addWidget(self._main_splitter)
+        self._mid_bottom_splitter.addWidget(self._bottom_h_splitter)
+        self._mid_bottom_splitter.setStretchFactor(0, 1)
+        self._mid_bottom_splitter.setStretchFactor(1, 0)
+        self._mid_bottom_splitter.setSizes([600, 165])  # 初期サイズ配分の目安
 
-        layout.addWidget(mid_bottom_splitter, 1)
+        layout.addWidget(self._mid_bottom_splitter, 1)
 
         self.setCentralWidget(central)
 
@@ -1132,6 +1149,19 @@ class PlayerWindow(QMainWindow):
 
         self.reload_snapshots()
 
+        # ボタンシグナル接続
+        self.btn_row_height_up.clicked.connect(self._on_row_height_up)
+        self.btn_row_height_dn.clicked.connect(self._on_row_height_dn)
+
+        # スプリッター移動時に自動保存
+        self._main_splitter.splitterMoved.connect(lambda *_: self._save_ui_state())
+        self._bottom_h_splitter.splitterMoved.connect(lambda *_: self._save_ui_state())
+        self._mid_bottom_splitter.splitterMoved.connect(lambda *_: self._save_ui_state())
+
+        # 保存済み UI 状態を復元（ウィンドウサイズ → QTimer でスプリッター）
+        self._load_ui_state()
+        self._apply_row_height()
+
         # 起動時にバックグラウンドで更新確認を開始する
         # ウィンドウ表示が落ち着いてから開始することで、ボタン幅変化による
         # レイアウトのちらつきを防ぐ。
@@ -1139,6 +1169,11 @@ class PlayerWindow(QMainWindow):
         QTimer.singleShot(100, self._update_checker.start)
 
     # ---------------- internal helpers ----------------
+
+    def closeEvent(self, event) -> None:  # type: ignore[override]
+        """ウィンドウクローズ時に UI 状態を確実に保存する。"""
+        self._save_ui_state()
+        super().closeEvent(event)
 
     def _cache_dir(self) -> Path:
         return BASE_DIR / "cache"
@@ -1283,6 +1318,89 @@ class PlayerWindow(QMainWindow):
             path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         except Exception:  # noqa: BLE001
             return
+
+    # --- 行高さ調整 / UI 状態保存・復元 ---
+
+    def _apply_row_height(self) -> None:
+        """テーブルの行高さを self._row_height に揃える。"""
+        h = self._row_height
+        for tbl in (self.acc_table, self.acc_rl_table, self.star_table, self.bl_star_table):
+            tbl.verticalHeader().setMinimumSectionSize(0)
+            tbl.verticalHeader().setDefaultSectionSize(h)
+            tbl.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
+
+    def _on_row_height_up(self) -> None:
+        if self._row_height < 40:
+            self._row_height += 1
+            self._apply_row_height()
+            self._save_ui_state()
+
+    def _on_row_height_dn(self) -> None:
+        if self._row_height > 8:
+            self._row_height -= 1
+            self._apply_row_height()
+            self._save_ui_state()
+
+    def _save_ui_state(self) -> None:
+        """行高さ・スプリッター位置・ウィンドウサイズを設定ファイルに保存する。"""
+        path = self._settings_path()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            payload: dict = {}
+            if path.exists():
+                try:
+                    raw = json.loads(path.read_text(encoding="utf-8"))
+                    if isinstance(raw, dict):
+                        payload = raw
+                except Exception:  # noqa: BLE001
+                    payload = {}
+            payload["ui_row_height"] = self._row_height
+            payload["ui_main_splitter_sizes"] = self._main_splitter.sizes()
+            payload["ui_bottom_splitter_sizes"] = self._bottom_h_splitter.sizes()
+            payload["ui_mid_splitter_sizes"] = self._mid_bottom_splitter.sizes()
+            payload["ui_window_width"] = self.width()
+            payload["ui_window_height"] = self.height()
+            path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:  # noqa: BLE001
+            return
+
+    def _load_ui_state(self) -> None:
+        """設定ファイルから行高さ・スプリッター位置・ウィンドウサイズを読み込んで適用する。"""
+        path = self._settings_path()
+        if not path.exists():
+            return
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            return
+
+        # ウィンドウサイズを最初に適用（スプリッターピクセル値がサイズ依存のため）
+        w = data.get("ui_window_width")
+        h = data.get("ui_window_height")
+        if isinstance(w, int) and isinstance(h, int) and w > 200 and h > 200:
+            self.resize(w, h)
+
+        rh = data.get("ui_row_height")
+        if isinstance(rh, int) and 8 <= rh <= 40:
+            self._row_height = rh
+
+        main_sz = data.get("ui_main_splitter_sizes")
+        if isinstance(main_sz, list) and len(main_sz) == 2:
+            self._saved_main_splitter_sizes = [int(v) for v in main_sz]
+        bottom_sz = data.get("ui_bottom_splitter_sizes")
+        if isinstance(bottom_sz, list) and len(bottom_sz) == 2:
+            self._saved_bottom_splitter_sizes = [int(v) for v in bottom_sz]
+        mid_sz = data.get("ui_mid_splitter_sizes")
+        if isinstance(mid_sz, list) and len(mid_sz) == 2:
+            self._saved_mid_splitter_sizes = [int(v) for v in mid_sz]
+
+        # スプリッター位置はウィンドウがリサイズされた後に適用する
+        def _restore_splitters() -> None:
+            self._main_splitter.setSizes(self._saved_main_splitter_sizes)
+            self._bottom_h_splitter.setSizes(self._saved_bottom_splitter_sizes)
+            self._mid_bottom_splitter.setSizes(self._saved_mid_splitter_sizes)
+
+        QTimer.singleShot(0, _restore_splitters)
 
     def _on_export_rl_unplayed(self) -> None:
         """BeatLeader/ScoreSaber スコアを参照し、未プレイの AccSaber Reloaded 譜面を bplist ファイルに出力する。"""
@@ -2025,6 +2143,7 @@ class PlayerWindow(QMainWindow):
         self.acc_rl_table.setRowCount(0)
         self.star_table.setRowCount(0)
         self.bl_star_table.setRowCount(0)
+        self._apply_row_height()
         steam_id = self._current_player_id()
         if steam_id is None:
             self._ss_cache_label.setText("ScoreSaber scores: -")
@@ -3007,9 +3126,7 @@ def run() -> None:
     if _icon_path.exists():
         app.setWindowIcon(QIcon(str(_icon_path)))
     window = PlayerWindow()
-    # ScoreSaber / BeatLeader / AccSaber と★0〜15が見やすいように、やや横長＋縦広めに取る
-    # stats画面のサイズ指定
-    window.resize(1220, 770)
+    # ウィンドウサイズは PlayerWindow.__init__ 内で復元される
     window.show()
 
     # 起動直後にスナップショットが1つも無い場合は、最初にだけ
