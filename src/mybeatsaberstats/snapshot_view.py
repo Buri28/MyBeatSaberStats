@@ -334,6 +334,7 @@ class SnapshotCompareDialog(QDialog):
         self._saved_splitter_sizes: list[int] = [300, 865]      # _splitter (Metric / right)
         self._saved_right_vsplitter_sizes: list[int] = [510, 180]  # _right_vsplitter (star / acc)
         self._saved_star_hsplitter_ss: int = 380                  # _star_hsplitter SS 側幅
+        self._saved_metric_vsplitter_sizes: list[int] = [300, 300]  # _metric_vsplitter (SS/BL / AccSaber)
 
         root_layout = QVBoxLayout(self)
         root_layout.setContentsMargins(2, 2, 2, 2)
@@ -512,31 +513,31 @@ class SnapshotCompareDialog(QDialog):
         # 下部: 左右3つの比較テーブル（上段系 / ScoreSaber★別 / BeatLeader★別）
         self._splitter = QSplitter(Qt.Orientation.Horizontal, self)
 
-        # 左: プレイヤー/AccSaber 指標（タイトルラベル＋テーブルをコンテナで包む）
+        # 左: ScoreSaber/BeatLeader + AccSaber 指標（縦スプリッターで上下に分割）
         self._metric_cmp_container = QWidget()
         _metric_cmp_vbox = QVBoxLayout(self._metric_cmp_container)
         _metric_cmp_vbox.setContentsMargins(0, 0, 0, 0)
-        _metric_cmp_vbox.setSpacing(2)
-        # タイトルラベル＋ All ボタンを横並びで配置
+        _metric_cmp_vbox.setSpacing(0)
+        self._splitter.addWidget(self._metric_cmp_container)
+
+        # 縦スプリッター (上: SS/BL テーブル, 下: AccSaber テーブル)
+        self._metric_vsplitter = QSplitter(Qt.Orientation.Vertical, self._metric_cmp_container)
+
+        # 上段: SS/BL テーブル
+        _ss_bl_widget = QWidget(self._metric_cmp_container)
+        _ss_bl_vbox = QVBoxLayout(_ss_bl_widget)
+        _ss_bl_vbox.setContentsMargins(0, 0, 0, 0)
+        _ss_bl_vbox.setSpacing(2)
         _metric_hdr_row = QHBoxLayout()
         _metric_hdr_row.setContentsMargins(0, 0, 0, 0)
         _metric_hdr_row.setSpacing(4)
-        self._metric_title_label = QLabel("", self._metric_cmp_container)
+        self._metric_title_label = QLabel("", _ss_bl_widget)
         self._metric_title_label.setStyleSheet("font-size: 11px; padding: 1px 2px;")
         self._metric_title_label.setVisible(False)  # デフォルト非表示
         _metric_hdr_row.addWidget(self._metric_title_label, 1)
-        self.btn_acc_all = QPushButton("All", self._metric_cmp_container)
-        self.btn_acc_all.setCheckable(True)
-        self.btn_acc_all.setChecked(False)
-        self.btn_acc_all.setFixedWidth(40)
-        self.btn_acc_all.setToolTip("AccSaber / RL の全カテゴリを Metric に表示する")
-        self.btn_acc_all.setStyleSheet(toggle_button_stylesheet())
-        self.btn_acc_all.setVisible(False)  # Header 非表示時は隠す
-        _metric_hdr_row.addWidget(self.btn_acc_all)
-        _metric_cmp_vbox.addLayout(_metric_hdr_row)
-        self._splitter.addWidget(self._metric_cmp_container)
+        _ss_bl_vbox.addLayout(_metric_hdr_row)
 
-        self.table = QTableWidget(0, 5, self._metric_cmp_container)
+        self.table = QTableWidget(0, 5, _ss_bl_widget)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setStyleSheet(table_stylesheet())
         self.table.verticalHeader().setDefaultSectionSize(14)  # 行の高さを少し詰める
@@ -566,7 +567,44 @@ class SnapshotCompareDialog(QDialog):
         header.resizeSection(2, 85)
         header.resizeSection(3, 85)
         header.resizeSection(4, 95)
-        _metric_cmp_vbox.addWidget(self.table)
+        _ss_bl_vbox.addWidget(self.table)
+        self._metric_vsplitter.addWidget(_ss_bl_widget)
+
+        # 下段: AccSaber テーブル（ヘッダラベル＋テーブル）
+        self._acc_metric_container = QWidget(self._metric_cmp_container)
+        _acc_metric_vbox = QVBoxLayout(self._acc_metric_container)
+        _acc_metric_vbox.setContentsMargins(0, 0, 0, 0)
+        _acc_metric_vbox.setSpacing(2)
+        self._acc_metric_title_label = QLabel("", self._acc_metric_container)
+        self._acc_metric_title_label.setStyleSheet("font-size: 11px; padding: 1px 2px;")
+        self._acc_metric_title_label.setOpenExternalLinks(True)
+        _acc_metric_vbox.addWidget(self._acc_metric_title_label)
+
+        self.table_acc = QTableWidget(0, 5, self._acc_metric_container)
+        self.table_acc.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table_acc.setStyleSheet(table_stylesheet())
+        self.table_acc.verticalHeader().setDefaultSectionSize(14)
+        self.table_acc.verticalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.table_acc.verticalHeader().setMinimumSectionSize(0)
+        self.table_acc.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
+        self.table_acc.verticalHeader().setVisible(False)
+        self.table_acc.setHorizontalHeaderLabels(["Group", "Metric", "A", "B", "Diff(A⇒B)"])
+        header_acc = self.table_acc.horizontalHeader()
+        header_acc.setStretchLastSection(False)
+        header_acc.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
+        header_acc.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        header_acc.setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
+        header_acc.setSectionResizeMode(3, QHeaderView.ResizeMode.Interactive)
+        header_acc.setSectionResizeMode(4, QHeaderView.ResizeMode.Interactive)
+        header_acc.resizeSection(0, 60)
+        header_acc.resizeSection(1, 150)
+        header_acc.resizeSection(2, 85)
+        header_acc.resizeSection(3, 85)
+        header_acc.resizeSection(4, 95)
+        _acc_metric_vbox.addWidget(self.table_acc)
+        self._metric_vsplitter.addWidget(self._acc_metric_container)
+
+        _metric_cmp_vbox.addWidget(self._metric_vsplitter)
 
         # 右側: 縦スプリッター（上=★別テーブル、下=AccSaberグリッド）
         self._right_vsplitter = QSplitter(Qt.Orientation.Vertical)
@@ -785,6 +823,10 @@ class SnapshotCompareDialog(QDialog):
         _bind_delegate(self.table, 2, AccPlayCountBarDelegate(self))
         _bind_delegate(self.table, 3, AccPlayCountBarDelegate(self))
 
+        # AccSaber テーブル (table_acc): 同様にバーを描画
+        _bind_delegate(self.table_acc, 2, AccPlayCountBarDelegate(self))
+        _bind_delegate(self.table_acc, 3, AccPlayCountBarDelegate(self))
+
         self._v_splitter.addWidget(self._splitter)
         self._v_splitter.setCollapsible(0, True)
         self._v_splitter.setCollapsible(1, False)
@@ -793,6 +835,7 @@ class SnapshotCompareDialog(QDialog):
         self._v_splitter.setSizes([60, 660])
         self._right_vsplitter.setSizes([510, 180])
         self._star_hsplitter.setSizes([380, 485])
+        self._metric_vsplitter.setSizes([300, 300])
 
         self._load_snapshots()
         # Stats 画面から steam_id が渡されている場合はそちらを優先し、
@@ -815,7 +858,6 @@ class SnapshotCompareDialog(QDialog):
         self.btn_toggle_header.toggled.connect(self._on_toggle_header)
         self.btn_acc_as.clicked.connect(self._on_acc_mode_as)
         self.btn_acc_rl.clicked.connect(self._on_acc_mode_rl)
-        self.btn_acc_all.toggled.connect(lambda _: self._update_view2())
         self.chk_col_clear.toggled.connect(self._apply_star_col_visibility)
         self.chk_col_fc.toggled.connect(self._apply_star_col_visibility)
         self.chk_col_acc.toggled.connect(self._apply_star_col_visibility)
@@ -826,6 +868,7 @@ class SnapshotCompareDialog(QDialog):
         self._splitter.splitterMoved.connect(lambda *_: self._save_last_selection())
         self._right_vsplitter.splitterMoved.connect(lambda *_: self._save_last_selection())
         self._star_hsplitter.splitterMoved.connect(lambda *_: self._save_last_selection())
+        self._metric_vsplitter.splitterMoved.connect(lambda *_: self._save_last_selection())
 
         self._apply_row_height()
         self._update_view2()
@@ -1012,7 +1055,6 @@ class SnapshotCompareDialog(QDialog):
             (self.btn_toggle_bl,     "ui_toggle_bl"),
             (self.btn_bl_below,      "ui_toggle_bl_below"),
             (self.btn_toggle_header, "ui_toggle_header"),
-            (self.btn_acc_all,       "ui_acc_all"),
         ):
             if key in data:
                 btn.blockSignals(True)
@@ -1039,7 +1081,6 @@ class SnapshotCompareDialog(QDialog):
         # タイトルヘッダの可視性を適用
         _hdr = self.btn_toggle_header.isChecked()
         self._metric_title_label.setVisible(_hdr)
-        self.btn_acc_all.setVisible(_hdr)
         self._ss_star_title_label.setVisible(_hdr)
         self._bl_star_title_label.setVisible(_hdr)
         self._acc_cmp_title_label.setVisible(_hdr)
@@ -1065,9 +1106,14 @@ class SnapshotCompareDialog(QDialog):
                 self._saved_right_vsplitter_sizes = [int(x) for x in v]
         if "ui_star_hsplitter_ss" in data:
             self._saved_star_hsplitter_ss = int(data["ui_star_hsplitter_ss"])
+        if "ui_metric_vsplitter_sizes" in data:
+            v = data["ui_metric_vsplitter_sizes"]
+            if isinstance(v, list) and len(v) == 2:
+                self._saved_metric_vsplitter_sizes = [int(x) for x in v]
         # 描画完了後にスプリッター位置を適用する
         def _restore_splitters():
             self._right_vsplitter.setSizes(self._saved_right_vsplitter_sizes)
+            self._metric_vsplitter.setSizes(self._saved_metric_vsplitter_sizes)
             self._rebalance_splitter()
         QTimer.singleShot(0, _restore_splitters)
         self._apply_star_col_visibility_inner()
@@ -1095,7 +1141,6 @@ class SnapshotCompareDialog(QDialog):
             data["ui_toggle_bl"]      = self.btn_toggle_bl.isChecked()
             data["ui_toggle_bl_below"] = self.btn_bl_below.isChecked()
             data["ui_toggle_header"]       = self.btn_toggle_header.isChecked()
-            data["ui_acc_all"]             = self.btn_acc_all.isChecked()
             data["ui_row_height"]          = self._row_height
             data["ui_v_splitter_top"]      = self._v_splitter.sizes()[0]
             # メインスプリッター・右縦スプリッター・SS/BL横スプリッターの位置を保存
@@ -1111,6 +1156,10 @@ class SnapshotCompareDialog(QDialog):
             if _shs[0] > 0 and self._ss_cmp_container.isVisible():
                 self._saved_star_hsplitter_ss = _shs[0]
             data["ui_star_hsplitter_ss"]       = self._saved_star_hsplitter_ss
+            _mvsp = self._metric_vsplitter.sizes()
+            if sum(_mvsp) > 0:
+                self._saved_metric_vsplitter_sizes = list(_mvsp)
+            data["ui_metric_vsplitter_sizes"] = self._saved_metric_vsplitter_sizes
             # ウィンドウサイズを保存
             data["ui_window_width"]  = self.width()
             data["ui_window_height"] = self.height()
@@ -1234,7 +1283,7 @@ class SnapshotCompareDialog(QDialog):
     def _apply_row_height(self) -> None:
         """全テーブルの行高を self._row_height に統一して適用する。"""
         h = self._row_height
-        for tbl in (self.table, self.ss_star_table, self.bl_star_table, self.acc_cmp_table):
+        for tbl in (self.table, self.table_acc, self.ss_star_table, self.bl_star_table, self.acc_cmp_table):
             tbl.verticalHeader().setMinimumSectionSize(0)
             tbl.verticalHeader().setDefaultSectionSize(h)
             tbl.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
@@ -1295,7 +1344,6 @@ class SnapshotCompareDialog(QDialog):
     def _on_toggle_header(self, checked: bool) -> None:
         """全テーブルのタイトルヘッダの表示/非表示を切り替える。"""
         self._metric_title_label.setVisible(checked)
-        self.btn_acc_all.setVisible(checked)
         self._ss_star_title_label.setVisible(checked)
         self._bl_star_title_label.setVisible(checked)
         self._acc_cmp_title_label.setVisible(checked)
@@ -1496,6 +1544,7 @@ class SnapshotCompareDialog(QDialog):
         snap_a = self._current_snapshot(self.combo_a)
         snap_b = self._current_snapshot(self.combo_b)
         self.table.setRowCount(0)
+        self.table_acc.setRowCount(0)
         self.ss_star_table.setRowCount(0)
         self.bl_star_table.setRowCount(0)
         # setRowCount(0) で垂直ヘッダの設定がリセットされるため再適用する
@@ -1554,6 +1603,7 @@ class SnapshotCompareDialog(QDialog):
         else:
             _acc_service_text = _acc_mode_text
         self._acc_cmp_title_label.setText(f"{_acc_service_text} ／ {_acc_title}")
+        self._acc_metric_title_label.setText(f"{_acc_service_text} ／ {_acc_title}")
 
         # ScoreSaber / BeatLeader ★別テーブルのタイトルラベルを更新
         if _same_player:
@@ -1677,16 +1727,18 @@ class SnapshotCompareDialog(QDialog):
             global_b: Optional[int],
             country_code_b: Optional[str],
             country_rank_b: Optional[int],
+            _tbl=None,
         ) -> int:
+            _target = _tbl if _tbl is not None else self.table
             text_a = _format_rank_cell(global_a, country_code_a, country_rank_a)
             text_b = _format_rank_cell(global_b, country_code_b, country_rank_b)
 
             a_value = global_a if global_a is not None else None
             b_value = global_b if global_b is not None else None
 
-            self._set_row(self.table, row, label, (a_value, text_a), (b_value, text_b))
+            self._set_row(_target, row, label, (a_value, text_a), (b_value, text_b))
 
-            diff_item = self.table.item(row, 4)
+            diff_item = _target.item(row, 4)
             if diff_item is not None and isinstance(global_a, (int, float)) and isinstance(global_b, (int, float)):
                 diff_global = global_b - global_a
                 # Rank 系は数値が小さいほど良いので符号を反転
@@ -1880,7 +1932,7 @@ class SnapshotCompareDialog(QDialog):
             """Play Count 行の col 1/2 に ratio と色を UserRole で設定する。"""
             color = ACC_PLAY_COLORS.get(cat, QColor(128, 128, 128, 160))
             for col, plays in ((2, plays_a), (3, plays_b)):
-                item = self.table.item(row, col)
+                item = self.table_acc.item(row, col)
                 if item is None or plays is None or total is None or total == 0:
                     continue
                 item.setData(Qt.ItemDataRole.UserRole, min(1.0, plays / total))
@@ -1889,7 +1941,7 @@ class SnapshotCompareDialog(QDialog):
         def _set_avg_acc_bar(row: int, acc_a: "float | None", acc_b: "float | None", cat: str) -> None:
             """Avg Acc 行の col 2/3 に ratio を UserRole で設定する（70–100% スケール、赤→緑グラデーション描画）。"""
             for col, acc in ((2, acc_a), (3, acc_b)):
-                item = self.table.item(row, col)
+                item = self.table_acc.item(row, col)
                 if item is None or acc is None:
                     continue
                 ratio = max(0.0, min(1.0, (acc - 70.0) / 30.0))
@@ -1904,105 +1956,70 @@ class SnapshotCompareDialog(QDialog):
             _gi.setForeground(label_cell_text_color())
             _gi.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
             _gi.setIcon(_icon)
-            self.table.setItem(start_row, 0, _gi)
+            self.table_acc.setItem(start_row, 0, _gi)
             if count > 1:
-                self.table.setSpan(start_row, 0, count, 1)
+                self.table_acc.setSpan(start_row, 0, count, 1)
 
-        # AccSaber Overall メトリク行（モードに応じて切り替え）
+        # AccSaber 行: self.table_acc に出力 (row_acc = 0 から)
+        row_acc = 0
         if self._acc_mode != "RL":
-            # AccSaber (AS) モード
-            if self.btn_acc_all.isChecked():
-                # 全項目表示 (4 AP + 4 Rank + 4 Play Count + 4 AvgAcc = 16行)
-                _grp_start = row_main
-                for _lbl, _attr in (
-                    ("[AS] Overall AP",  "accsaber_overall_ap"),
-                    ("[AS] True AP",     "accsaber_true_ap"),
-                    ("[AS] Standard AP", "accsaber_standard_ap"),
-                    ("[AS] Tech AP",     "accsaber_tech_ap"),
-                ):
-                    _v_a = getattr(snap_a, _attr)
-                    _v_b = getattr(snap_b, _attr)
-                    self._set_row(self.table, row_main, _lbl,
-                                  round(_v_a, 2) if _v_a is not None else None,
-                                  round(_v_b, 2) if _v_b is not None else None)
-                    row_main += 1
-                _set_group_label(_grp_start, 4, "AP")
-                _grp_start = row_main
-                for _lbl, _r_attr, _rc_attr in (
-                    ("[AS] Overall Rank",  "accsaber_overall_rank",  "accsaber_overall_rank_country"),
-                    ("[AS] True Rank",     "accsaber_true_rank",     "accsaber_true_rank_country"),
-                    ("[AS] Standard Rank", "accsaber_standard_rank", "accsaber_standard_rank_country"),
-                    ("[AS] Tech Rank",     "accsaber_tech_rank",     "accsaber_tech_rank_country"),
-                ):
-                    row_main = _set_combined_rank_row(
-                        row_main, _lbl,
-                        getattr(snap_a, _r_attr), snap_a.scoresaber_country, getattr(snap_a, _rc_attr),
-                        getattr(snap_b, _r_attr), snap_b.scoresaber_country, getattr(snap_b, _rc_attr),
-                    )
-                _set_group_label(_grp_start, 4, "Rank")
-                _grp_start = row_main
-                for _lbl, _attr, _cat, _total in (
-                    ("[AS] Overall Play Count",  "accsaber_overall_play_count",  "overall",  _cmp_overall_total),
-                    ("[AS] True Play Count",     "accsaber_true_play_count",     "true",     _cmp_true_total),
-                    ("[AS] Standard Play Count", "accsaber_standard_play_count", "standard", _cmp_standard_total),
-                    ("[AS] Tech Play Count",     "accsaber_tech_play_count",     "tech",     _cmp_tech_total),
-                ):
-                    _pc_a = getattr(snap_a, _attr)
-                    _pc_b = getattr(snap_b, _attr)
-                    self._set_row(self.table, row_main, _lbl, _play_fmt(_pc_a, _total), _play_fmt(_pc_b, _total))
-                    _set_play_bar(row_main, _pc_a, _pc_b, _total, _cat)
-                    row_main += 1
-                _set_group_label(_grp_start, 4, "Plays")
-                _grp_start = row_main
-                for _lbl, _attr, _cat in (
-                    ("[AS] Overall AvgAcc",  "accsaber_overall_avg_acc",  "overall"),
-                    ("[AS] True AvgAcc",     "accsaber_true_avg_acc",     "true"),
-                    ("[AS] Standard AvgAcc", "accsaber_standard_avg_acc", "standard"),
-                    ("[AS] Tech AvgAcc",     "accsaber_tech_avg_acc",     "tech"),
-                ):
-                    _v_a = getattr(snap_a, _attr)
-                    _v_b = getattr(snap_b, _attr)
-                    self._set_row(self.table, row_main, _lbl,
-                                  (round(_v_a, 2), f"{_v_a:.2f}%") if _v_a is not None else None,
-                                  (round(_v_b, 2), f"{_v_b:.2f}%") if _v_b is not None else None)
-                    _set_avg_acc_bar(row_main, _v_a, _v_b, _cat)
-                    row_main += 1
-                _set_group_label(_grp_start, 4, "Acc")
-            else:
-                # サマリー表示（従来の4行）
-                _grp_start = row_main
-                _overall_ap_a = _overall_ap_from_snapshot(snap_a)
-                _overall_ap_b = _overall_ap_from_snapshot(snap_b)
-                self._set_row(
-                    self.table, row_main, "[AS] AP",
-                    round(_overall_ap_a, 2) if _overall_ap_a is not None else None,
-                    round(_overall_ap_b, 2) if _overall_ap_b is not None else None,
+            # AccSaber (AS) モード — 全項目表示 (4 AP + 4 Rank + 4 Play Count + 4 AvgAcc = 16行)
+            _grp_start = row_acc
+            for _lbl, _attr in (
+                ("[AS] Overall AP",  "accsaber_overall_ap"),
+                ("[AS] True AP",     "accsaber_true_ap"),
+                ("[AS] Standard AP", "accsaber_standard_ap"),
+                ("[AS] Tech AP",     "accsaber_tech_ap"),
+            ):
+                _v_a = getattr(snap_a, _attr)
+                _v_b = getattr(snap_b, _attr)
+                self._set_row(self.table_acc, row_acc, _lbl,
+                              round(_v_a, 2) if _v_a is not None else None,
+                              round(_v_b, 2) if _v_b is not None else None)
+                row_acc += 1
+            _set_group_label(_grp_start, 4, "AP")
+            _grp_start = row_acc
+            for _lbl, _r_attr, _rc_attr in (
+                ("[AS] Overall Rank",  "accsaber_overall_rank",  "accsaber_overall_rank_country"),
+                ("[AS] True Rank",     "accsaber_true_rank",     "accsaber_true_rank_country"),
+                ("[AS] Standard Rank", "accsaber_standard_rank", "accsaber_standard_rank_country"),
+                ("[AS] Tech Rank",     "accsaber_tech_rank",     "accsaber_tech_rank_country"),
+            ):
+                row_acc = _set_combined_rank_row(
+                    row_acc, _lbl,
+                    getattr(snap_a, _r_attr), snap_a.scoresaber_country, getattr(snap_a, _rc_attr),
+                    getattr(snap_b, _r_attr), snap_b.scoresaber_country, getattr(snap_b, _rc_attr),
+                    _tbl=self.table_acc,
                 )
-                row_main += 1
-                row_main = _set_combined_rank_row(
-                    row_main, "[AS] Rank",
-                    snap_a.accsaber_overall_rank, snap_a.scoresaber_country, snap_a.accsaber_overall_rank_country,
-                    snap_b.accsaber_overall_rank, snap_b.scoresaber_country, snap_b.accsaber_overall_rank_country,
-                )
-                _ov_play_a = _overall_play_from_snapshot(snap_a)
-                _ov_play_b = _overall_play_from_snapshot(snap_b)
-                self._set_row(
-                    self.table, row_main, "[AS] Play Count",
-                    _play_fmt(_ov_play_a, _cmp_overall_total),
-                    _play_fmt(_ov_play_b, _cmp_overall_total),
-                )
-                _set_play_bar(row_main, _ov_play_a, _ov_play_b, _cmp_overall_total, "overall")
-                row_main += 1
-                _ov_acc_a = snap_a.accsaber_overall_avg_acc
-                _ov_acc_b = snap_b.accsaber_overall_avg_acc
-                self._set_row(
-                    self.table, row_main, "[AS] AvgAcc",
-                    (round(_ov_acc_a, 2), f"{_ov_acc_a:.2f}%") if _ov_acc_a is not None else None,
-                    (round(_ov_acc_b, 2), f"{_ov_acc_b:.2f}%") if _ov_acc_b is not None else None,
-                )
-                _set_avg_acc_bar(row_main, _ov_acc_a, _ov_acc_b, "overall")
-                row_main += 1
-                _set_group_label(_grp_start, 4, "Overall")
+            _set_group_label(_grp_start, 4, "Rank")
+            _grp_start = row_acc
+            for _lbl, _attr, _cat, _total in (
+                ("[AS] Overall Play Count",  "accsaber_overall_play_count",  "overall",  _cmp_overall_total),
+                ("[AS] True Play Count",     "accsaber_true_play_count",     "true",     _cmp_true_total),
+                ("[AS] Standard Play Count", "accsaber_standard_play_count", "standard", _cmp_standard_total),
+                ("[AS] Tech Play Count",     "accsaber_tech_play_count",     "tech",     _cmp_tech_total),
+            ):
+                _pc_a = getattr(snap_a, _attr)
+                _pc_b = getattr(snap_b, _attr)
+                self._set_row(self.table_acc, row_acc, _lbl, _play_fmt(_pc_a, _total), _play_fmt(_pc_b, _total))
+                _set_play_bar(row_acc, _pc_a, _pc_b, _total, _cat)
+                row_acc += 1
+            _set_group_label(_grp_start, 4, "Plays")
+            _grp_start = row_acc
+            for _lbl, _attr, _cat in (
+                ("[AS] Overall AvgAcc",  "accsaber_overall_avg_acc",  "overall"),
+                ("[AS] True AvgAcc",     "accsaber_true_avg_acc",     "true"),
+                ("[AS] Standard AvgAcc", "accsaber_standard_avg_acc", "standard"),
+                ("[AS] Tech AvgAcc",     "accsaber_tech_avg_acc",     "tech"),
+            ):
+                _v_a = getattr(snap_a, _attr)
+                _v_b = getattr(snap_b, _attr)
+                self._set_row(self.table_acc, row_acc, _lbl,
+                              (round(_v_a, 2), f"{_v_a:.2f}%") if _v_a is not None else None,
+                              (round(_v_b, 2), f"{_v_b:.2f}%") if _v_b is not None else None)
+                _set_avg_acc_bar(row_acc, _v_a, _v_b, _cat)
+                row_acc += 1
+            _set_group_label(_grp_start, 4, "Acc")
         else:
             # AccSaber Reloaded (RL) モード — 総譜面数をキャッシュから取得
             try:
@@ -2023,124 +2040,84 @@ class SnapshotCompareDialog(QDialog):
 
             def _rl_set_xp_row(r: int) -> int:
                 self._set_row(
-                    self.table, r, "[RL] XP",
+                    self.table_acc, r, "[RL] XP",
                     _xp_val(snap_a.accsaber_reloaded_xp, _xp_lv_a),
                     _xp_val(snap_b.accsaber_reloaded_xp, _xp_lv_b),
                 )
                 if _xp_lv_a is not None and _xp_lv_b is not None:
                     _lv_diff = _xp_lv_b - _xp_lv_a
-                    _diff_item = self.table.item(r, 4)
+                    _diff_item = self.table_acc.item(r, 4)
                     if _diff_item is not None:
                         _diff_item.setText(_diff_item.text() + f" (Lv{_lv_diff:+d})")
                 return r + 1
 
-            if self.btn_acc_all.isChecked():
-                # 全項目表示モード (18行)
-                _grp_start = row_main
-                row_main = _rl_set_xp_row(row_main)
-                row_main = _set_combined_rank_row(
-                    row_main, "[RL] XP Rank",
-                    snap_a.accsaber_reloaded_xp_rank, snap_a.scoresaber_country, snap_a.accsaber_reloaded_xp_rank_country,
-                    snap_b.accsaber_reloaded_xp_rank, snap_b.scoresaber_country, snap_b.accsaber_reloaded_xp_rank_country,
+            # 全項目表示 (XP×2 + AP×4 + Rank×4 + Play Count×4 + AvgAcc×4 = 18行)
+            _grp_start = row_acc
+            row_acc = _rl_set_xp_row(row_acc)
+            row_acc = _set_combined_rank_row(
+                row_acc, "[RL] XP Rank",
+                snap_a.accsaber_reloaded_xp_rank, snap_a.scoresaber_country, snap_a.accsaber_reloaded_xp_rank_country,
+                snap_b.accsaber_reloaded_xp_rank, snap_b.scoresaber_country, snap_b.accsaber_reloaded_xp_rank_country,
+                _tbl=self.table_acc,
+            )
+            _set_group_label(_grp_start, 2, "XP")
+            _grp_start = row_acc
+            for _lbl, _attr in (
+                ("[RL] Overall AP",  "accsaber_reloaded_overall_ap"),
+                ("[RL] True AP",     "accsaber_reloaded_true_ap"),
+                ("[RL] Standard AP", "accsaber_reloaded_standard_ap"),
+                ("[RL] Tech AP",     "accsaber_reloaded_tech_ap"),
+            ):
+                _v_a = getattr(snap_a, _attr)
+                _v_b = getattr(snap_b, _attr)
+                self._set_row(self.table_acc, row_acc, _lbl,
+                              round(_v_a, 2) if _v_a is not None else None,
+                              round(_v_b, 2) if _v_b is not None else None)
+                row_acc += 1
+            _set_group_label(_grp_start, 4, "AP")
+            _grp_start = row_acc
+            for _lbl, _r_attr, _rc_attr in (
+                ("[RL] Overall Rank",  "accsaber_reloaded_overall_rank",  "accsaber_reloaded_overall_rank_country"),
+                ("[RL] True Rank",     "accsaber_reloaded_true_rank",     "accsaber_reloaded_true_rank_country"),
+                ("[RL] Standard Rank", "accsaber_reloaded_standard_rank", "accsaber_reloaded_standard_rank_country"),
+                ("[RL] Tech Rank",     "accsaber_reloaded_tech_rank",     "accsaber_reloaded_tech_rank_country"),
+            ):
+                row_acc = _set_combined_rank_row(
+                    row_acc, _lbl,
+                    getattr(snap_a, _r_attr), snap_a.scoresaber_country, getattr(snap_a, _rc_attr),
+                    getattr(snap_b, _r_attr), snap_b.scoresaber_country, getattr(snap_b, _rc_attr),
+                    _tbl=self.table_acc,
                 )
-                _set_group_label(_grp_start, 2, "XP")
-                _grp_start = row_main
-                for _lbl, _attr in (
-                    ("[RL] Overall AP",  "accsaber_reloaded_overall_ap"),
-                    ("[RL] True AP",     "accsaber_reloaded_true_ap"),
-                    ("[RL] Standard AP", "accsaber_reloaded_standard_ap"),
-                    ("[RL] Tech AP",     "accsaber_reloaded_tech_ap"),
-                ):
-                    _v_a = getattr(snap_a, _attr)
-                    _v_b = getattr(snap_b, _attr)
-                    self._set_row(self.table, row_main, _lbl,
-                                  round(_v_a, 2) if _v_a is not None else None,
-                                  round(_v_b, 2) if _v_b is not None else None)
-                    row_main += 1
-                _set_group_label(_grp_start, 4, "AP")
-                _grp_start = row_main
-                for _lbl, _r_attr, _rc_attr in (
-                    ("[RL] Overall Rank",  "accsaber_reloaded_overall_rank",  "accsaber_reloaded_overall_rank_country"),
-                    ("[RL] True Rank",     "accsaber_reloaded_true_rank",     "accsaber_reloaded_true_rank_country"),
-                    ("[RL] Standard Rank", "accsaber_reloaded_standard_rank", "accsaber_reloaded_standard_rank_country"),
-                    ("[RL] Tech Rank",     "accsaber_reloaded_tech_rank",     "accsaber_reloaded_tech_rank_country"),
-                ):
-                    row_main = _set_combined_rank_row(
-                        row_main, _lbl,
-                        getattr(snap_a, _r_attr), snap_a.scoresaber_country, getattr(snap_a, _rc_attr),
-                        getattr(snap_b, _r_attr), snap_b.scoresaber_country, getattr(snap_b, _rc_attr),
-                    )
-                _set_group_label(_grp_start, 4, "Rank")
-                _grp_start = row_main
-                for _lbl, _attr, _cat in (
-                    ("[RL] Overall Play Count",  "accsaber_reloaded_overall_ranked_plays",  "overall"),
-                    ("[RL] True Play Count",     "accsaber_reloaded_true_ranked_plays",     "true"),
-                    ("[RL] Standard Play Count", "accsaber_reloaded_standard_ranked_plays", "standard"),
-                    ("[RL] Tech Play Count",     "accsaber_reloaded_tech_ranked_plays",     "tech"),
-                ):
-                    _pc_a = getattr(snap_a, _attr)
-                    _pc_b = getattr(snap_b, _attr)
-                    _rl_total = _rl_totals.get(_cat)
-                    self._set_row(self.table, row_main, _lbl, _play_fmt(_pc_a, _rl_total), _play_fmt(_pc_b, _rl_total))
-                    _set_play_bar(row_main, _pc_a, _pc_b, _rl_total, _cat)
-                    row_main += 1
-                _set_group_label(_grp_start, 4, "Plays")
-                _grp_start = row_main
-                for _lbl, _attr, _cat in (
-                    ("[RL] Overall AvgAcc",  "accsaber_reloaded_overall_avg_acc",  "overall"),
-                    ("[RL] True AvgAcc",     "accsaber_reloaded_true_avg_acc",     "true"),
-                    ("[RL] Standard AvgAcc", "accsaber_reloaded_standard_avg_acc", "standard"),
-                    ("[RL] Tech AvgAcc",     "accsaber_reloaded_tech_avg_acc",     "tech"),
-                ):
-                    _v_a = getattr(snap_a, _attr)
-                    _v_b = getattr(snap_b, _attr)
-                    self._set_row(self.table, row_main, _lbl,
-                                  (round(_v_a, 2), f"{_v_a:.2f}%") if _v_a is not None else None,
-                                  (round(_v_b, 2), f"{_v_b:.2f}%") if _v_b is not None else None)
-                    _set_avg_acc_bar(row_main, _v_a, _v_b, _cat)
-                    row_main += 1
-                _set_group_label(_grp_start, 4, "Acc")
-            else:
-                # サマリー表示（従来の6行）
-                _grp_start = row_main
-                self._set_row(
-                    self.table, row_main, "[RL] AP",
-                    round(snap_a.accsaber_reloaded_overall_ap, 2) if snap_a.accsaber_reloaded_overall_ap is not None else None,
-                    round(snap_b.accsaber_reloaded_overall_ap, 2) if snap_b.accsaber_reloaded_overall_ap is not None else None,
-                )
-                row_main += 1
-                row_main = _set_combined_rank_row(
-                    row_main, "[RL] Rank",
-                    snap_a.accsaber_reloaded_overall_rank, snap_a.scoresaber_country, snap_a.accsaber_reloaded_overall_rank_country,
-                    snap_b.accsaber_reloaded_overall_rank, snap_b.scoresaber_country, snap_b.accsaber_reloaded_overall_rank_country,
-                )
-                _rl_ov_play_a = snap_a.accsaber_reloaded_overall_ranked_plays
-                _rl_ov_play_b = snap_b.accsaber_reloaded_overall_ranked_plays
-                self._set_row(
-                    self.table, row_main, "[RL] Play Count",
-                    _play_fmt(_rl_ov_play_a, _rl_totals.get("overall")),
-                    _play_fmt(_rl_ov_play_b, _rl_totals.get("overall")),
-                )
-                _set_play_bar(row_main, _rl_ov_play_a, _rl_ov_play_b, _rl_totals.get("overall"), "overall")
-                row_main += 1
-                _rl_ov_acc_a = snap_a.accsaber_reloaded_overall_avg_acc
-                _rl_ov_acc_b = snap_b.accsaber_reloaded_overall_avg_acc
-                self._set_row(
-                    self.table, row_main, "[RL] AvgAcc",
-                    (round(_rl_ov_acc_a, 2), f"{_rl_ov_acc_a:.2f}%") if _rl_ov_acc_a is not None else None,
-                    (round(_rl_ov_acc_b, 2), f"{_rl_ov_acc_b:.2f}%") if _rl_ov_acc_b is not None else None,
-                )
-                _set_avg_acc_bar(row_main, _rl_ov_acc_a, _rl_ov_acc_b, "overall")
-                row_main += 1
-                _set_group_label(_grp_start, 4, "Overall")
-                _grp_start = row_main
-                row_main = _rl_set_xp_row(row_main)
-                row_main = _set_combined_rank_row(
-                    row_main, "[RL] XP Rank",
-                    snap_a.accsaber_reloaded_xp_rank, snap_a.scoresaber_country, snap_a.accsaber_reloaded_xp_rank_country,
-                    snap_b.accsaber_reloaded_xp_rank, snap_b.scoresaber_country, snap_b.accsaber_reloaded_xp_rank_country,
-                )
-                _set_group_label(_grp_start, 2, "XP")
+            _set_group_label(_grp_start, 4, "Rank")
+            _grp_start = row_acc
+            for _lbl, _attr, _cat in (
+                ("[RL] Overall Play Count",  "accsaber_reloaded_overall_ranked_plays",  "overall"),
+                ("[RL] True Play Count",     "accsaber_reloaded_true_ranked_plays",     "true"),
+                ("[RL] Standard Play Count", "accsaber_reloaded_standard_ranked_plays", "standard"),
+                ("[RL] Tech Play Count",     "accsaber_reloaded_tech_ranked_plays",     "tech"),
+            ):
+                _pc_a = getattr(snap_a, _attr)
+                _pc_b = getattr(snap_b, _attr)
+                _rl_total = _rl_totals.get(_cat)
+                self._set_row(self.table_acc, row_acc, _lbl, _play_fmt(_pc_a, _rl_total), _play_fmt(_pc_b, _rl_total))
+                _set_play_bar(row_acc, _pc_a, _pc_b, _rl_total, _cat)
+                row_acc += 1
+            _set_group_label(_grp_start, 4, "Plays")
+            _grp_start = row_acc
+            for _lbl, _attr, _cat in (
+                ("[RL] Overall AvgAcc",  "accsaber_reloaded_overall_avg_acc",  "overall"),
+                ("[RL] True AvgAcc",     "accsaber_reloaded_true_avg_acc",     "true"),
+                ("[RL] Standard AvgAcc", "accsaber_reloaded_standard_avg_acc", "standard"),
+                ("[RL] Tech AvgAcc",     "accsaber_reloaded_tech_avg_acc",     "tech"),
+            ):
+                _v_a = getattr(snap_a, _attr)
+                _v_b = getattr(snap_b, _attr)
+                self._set_row(self.table_acc, row_acc, _lbl,
+                              (round(_v_a, 2), f"{_v_a:.2f}%") if _v_a is not None else None,
+                              (round(_v_b, 2), f"{_v_b:.2f}%") if _v_b is not None else None)
+                _set_avg_acc_bar(row_acc, _v_a, _v_b, _cat)
+                row_acc += 1
+            _set_group_label(_grp_start, 4, "Acc")
 
         # AccSaber 比較グリッドのヘッダを更新
         self.acc_cmp_table.setHorizontalHeaderLabels([
