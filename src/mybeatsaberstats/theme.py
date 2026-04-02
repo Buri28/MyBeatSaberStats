@@ -109,11 +109,13 @@ def button_label() -> str:
 # ------------------------------------------------------------------ #
 _TABLE_STYLE_LIGHT = (
     "QTableWidget { background-color: #ffffff; alternate-background-color: #f6f7fb; }"
+    "QTableWidget::item { padding-top: 0px; padding-bottom: 0px; }"
 )
 
 _TABLE_STYLE_DARK = (
     "QTableWidget { background-color: #121212; alternate-background-color: #191919; "
     "color: #d4d4d4; gridline-color: #434343; }"
+    "QTableWidget::item { padding-top: 0px; padding-bottom: 0px; }"
 )
 
 
