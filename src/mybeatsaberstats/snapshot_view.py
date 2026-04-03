@@ -454,7 +454,7 @@ class SnapshotCompareDialog(QDialog):
         top_grid.addWidget(self.btn_acc_rl, 0, 13)
 
         # AccSaber 表示位置切り替えボタン (Left ↔ Bottom トグル)
-        self.btn_acc_pos = QPushButton("ACC⇩", self)
+        self.btn_acc_pos = QPushButton("Acc⇩", self)
         self.btn_acc_pos.setCheckable(False)
         self.btn_acc_pos.setFixedWidth(60)
         self.btn_acc_pos.setToolTip("AccSaberの表示位置を左(⇦)/下(⇩)で切り替える")
@@ -575,7 +575,7 @@ class SnapshotCompareDialog(QDialog):
         header.setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
         header.setSectionResizeMode(3, QHeaderView.ResizeMode.Interactive)
         header.setSectionResizeMode(4, QHeaderView.ResizeMode.Interactive)
-        header.resizeSection(0, 60)
+        header.resizeSection(0, 96)
         header.resizeSection(1, 150)
         header.resizeSection(2, 85)
         header.resizeSection(3, 85)
@@ -609,7 +609,7 @@ class SnapshotCompareDialog(QDialog):
         header_acc.setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
         header_acc.setSectionResizeMode(3, QHeaderView.ResizeMode.Interactive)
         header_acc.setSectionResizeMode(4, QHeaderView.ResizeMode.Interactive)
-        header_acc.resizeSection(0, 60)
+        header_acc.resizeSection(0, 96)
         header_acc.resizeSection(1, 150)
         header_acc.resizeSection(2, 85)
         header_acc.resizeSection(3, 85)
@@ -863,7 +863,7 @@ class SnapshotCompareDialog(QDialog):
         # （_restore_ui_state が呼ばれた場合は QTimer で上書きされる）
         self._acc_cmp_container.setVisible(self._acc_position == "Bottom")
         self._acc_metric_container.setVisible(self._acc_position == "Left")
-        self.btn_acc_pos.setText("ACC⇦" if self._acc_position == "Bottom" else "ACC⇩")
+        self.btn_acc_pos.setText("Acc⇦" if self._acc_position == "Bottom" else "Acc⇩")
 
         self.combo_player_a.currentIndexChanged.connect(self._on_player_a_changed)
         self.combo_player_b.currentIndexChanged.connect(self._on_player_b_changed)
@@ -1073,7 +1073,7 @@ class SnapshotCompareDialog(QDialog):
         acc_position = data.get("ui_acc_position")
         if acc_position in ("Left", "Bottom"):
             self._acc_position = acc_position
-            self.btn_acc_pos.setText("ACC⇦" if acc_position == "Bottom" else "ACC⇩")
+            self.btn_acc_pos.setText("Acc⇦" if acc_position == "Bottom" else "Acc⇩")
         if "ui_toggle_bl_below" in data:
             self._bl_below = bool(data["ui_toggle_bl_below"])
         for btn, key in (
@@ -1347,7 +1347,7 @@ class SnapshotCompareDialog(QDialog):
         self.btn_acc_rl.setChecked(True)
 
         self._acc_position = "Left"
-        self.btn_acc_pos.setText("ACC⇩")
+        self.btn_acc_pos.setText("Acc⇩")
 
         # コンテナ表示状態を確定させる
         self._metric_cmp_container.setVisible(True)
@@ -1356,11 +1356,11 @@ class SnapshotCompareDialog(QDialog):
 
         # --- サイズ・行高リセット ---
         self._row_height = 21
-        self._saved_splitter_sizes = [459, 1065]
+        self._saved_splitter_sizes = [440, 1045]
         self._saved_right_vsplitter_sizes = [615, 190]
         self._saved_star_hsplitter_ss = 392
         self._saved_metric_vsplitter_sizes = [303, 500]
-        self.resize(1533, 870)
+        self.resize(1520, 870)
         self._apply_row_height()
         self._update_view2()
 
@@ -1412,7 +1412,7 @@ class SnapshotCompareDialog(QDialog):
             self._acc_position = "Bottom"
         else:
             self._acc_position = "Left"
-        self.btn_acc_pos.setText("ACC⇦" if self._acc_position == "Bottom" else "ACC⇩")
+        self.btn_acc_pos.setText("Acc⇦" if self._acc_position == "Bottom" else "Acc⇩")
         self._apply_acc_position()
         self._save_last_selection()
 
@@ -1815,7 +1815,7 @@ class SnapshotCompareDialog(QDialog):
         bl_head_10.setToolTip("BeatLeader")
         self.bl_star_table.setHorizontalHeaderItem(10, bl_head_10)
 
-        # 上段: Player / ACC / AccSaber 系の指標
+        # 上段: Player / Acc / AccSaber 系の指標
 
         def _country_flag(code: Optional[str]) -> Optional[str]:
             if not code:
@@ -1924,7 +1924,7 @@ class SnapshotCompareDialog(QDialog):
         self._set_row(
             self.table,
             row_main,
-            "[SS] Avg Ranked ACC",
+            "[SS] Avg Ranked Acc",
             (round(snap_a.scoresaber_average_ranked_acc, 2), f"{snap_a.scoresaber_average_ranked_acc:.2f}%") if snap_a.scoresaber_average_ranked_acc is not None else None,
             (round(snap_b.scoresaber_average_ranked_acc, 2), f"{snap_b.scoresaber_average_ranked_acc:.2f}%") if snap_b.scoresaber_average_ranked_acc is not None else None,
         )
@@ -1974,7 +1974,7 @@ class SnapshotCompareDialog(QDialog):
         self._set_row(
             self.table,
             row_main,
-            "[BL] Avg Ranked ACC",
+            "[BL] Avg Ranked Acc",
             (round(snap_a.beatleader_average_ranked_acc, 2), f"{snap_a.beatleader_average_ranked_acc:.2f}%") if snap_a.beatleader_average_ranked_acc is not None else None,
             (round(snap_b.beatleader_average_ranked_acc, 2), f"{snap_b.beatleader_average_ranked_acc:.2f}%") if snap_b.beatleader_average_ranked_acc is not None else None,
         )
@@ -2180,7 +2180,7 @@ class SnapshotCompareDialog(QDialog):
             _grp_start = row_acc
             row_acc = _rl_set_xp_row(row_acc)
             row_acc = _set_combined_rank_row(
-                row_acc, "[RL] XP Rank",
+                row_acc, "[RL] Rank",
                 snap_a.accsaber_reloaded_xp_rank, snap_a.scoresaber_country, snap_a.accsaber_reloaded_xp_rank_country,
                 snap_b.accsaber_reloaded_xp_rank, snap_b.scoresaber_country, snap_b.accsaber_reloaded_xp_rank_country,
                 _tbl=self.table_acc,
@@ -2188,10 +2188,10 @@ class SnapshotCompareDialog(QDialog):
             _set_group_label(_grp_start, 2, "XP")
             _grp_start = row_acc
             for _lbl, _attr in (
-                ("[RL] Overall AP",  "accsaber_reloaded_overall_ap"),
-                ("[RL] True AP",     "accsaber_reloaded_true_ap"),
-                ("[RL] Standard AP", "accsaber_reloaded_standard_ap"),
-                ("[RL] Tech AP",     "accsaber_reloaded_tech_ap"),
+                ("[RL] Overall",  "accsaber_reloaded_overall_ap"),
+                ("[RL] True",     "accsaber_reloaded_true_ap"),
+                ("[RL] Standard", "accsaber_reloaded_standard_ap"),
+                ("[RL] Tech",     "accsaber_reloaded_tech_ap"),
             ):
                 _v_a = getattr(snap_a, _attr)
                 _v_b = getattr(snap_b, _attr)
@@ -2202,10 +2202,10 @@ class SnapshotCompareDialog(QDialog):
             _set_group_label(_grp_start, 4, "AP")
             _grp_start = row_acc
             for _lbl, _r_attr, _rc_attr in (
-                ("[RL] Overall Rank",  "accsaber_reloaded_overall_rank",  "accsaber_reloaded_overall_rank_country"),
-                ("[RL] True Rank",     "accsaber_reloaded_true_rank",     "accsaber_reloaded_true_rank_country"),
-                ("[RL] Standard Rank", "accsaber_reloaded_standard_rank", "accsaber_reloaded_standard_rank_country"),
-                ("[RL] Tech Rank",     "accsaber_reloaded_tech_rank",     "accsaber_reloaded_tech_rank_country"),
+                ("[RL] Overall",  "accsaber_reloaded_overall_rank",  "accsaber_reloaded_overall_rank_country"),
+                ("[RL] True",     "accsaber_reloaded_true_rank",     "accsaber_reloaded_true_rank_country"),
+                ("[RL] Standard", "accsaber_reloaded_standard_rank", "accsaber_reloaded_standard_rank_country"),
+                ("[RL] Tech",     "accsaber_reloaded_tech_rank",     "accsaber_reloaded_tech_rank_country"),
             ):
                 row_acc = _set_combined_rank_row(
                     row_acc, _lbl,
@@ -2216,10 +2216,10 @@ class SnapshotCompareDialog(QDialog):
             _set_group_label(_grp_start, 4, "Rank")
             _grp_start = row_acc
             for _lbl, _attr, _cat in (
-                ("[RL] Overall Play Count",  "accsaber_reloaded_overall_ranked_plays",  "overall"),
-                ("[RL] True Play Count",     "accsaber_reloaded_true_ranked_plays",     "true"),
-                ("[RL] Standard Play Count", "accsaber_reloaded_standard_ranked_plays", "standard"),
-                ("[RL] Tech Play Count",     "accsaber_reloaded_tech_ranked_plays",     "tech"),
+                ("[RL] Overall",  "accsaber_reloaded_overall_ranked_plays",  "overall"),
+                ("[RL] True",     "accsaber_reloaded_true_ranked_plays",     "true"),
+                ("[RL] Standard", "accsaber_reloaded_standard_ranked_plays", "standard"),
+                ("[RL] Tech",     "accsaber_reloaded_tech_ranked_plays",     "tech"),
             ):
                 _pc_a = getattr(snap_a, _attr)
                 _pc_b = getattr(snap_b, _attr)
@@ -2227,13 +2227,13 @@ class SnapshotCompareDialog(QDialog):
                 self._set_row(self.table_acc, row_acc, _lbl, _play_fmt(_pc_a, _rl_total), _play_fmt(_pc_b, _rl_total))
                 _set_play_bar(row_acc, _pc_a, _pc_b, _rl_total, _cat)
                 row_acc += 1
-            _set_group_label(_grp_start, 4, "Plays")
+            _set_group_label(_grp_start, 4, "Play Count")
             _grp_start = row_acc
             for _lbl, _attr, _cat in (
-                ("[RL] Overall AvgAcc",  "accsaber_reloaded_overall_avg_acc",  "overall"),
-                ("[RL] True AvgAcc",     "accsaber_reloaded_true_avg_acc",     "true"),
-                ("[RL] Standard AvgAcc", "accsaber_reloaded_standard_avg_acc", "standard"),
-                ("[RL] Tech AvgAcc",     "accsaber_reloaded_tech_avg_acc",     "tech"),
+                ("[RL] Overall",  "accsaber_reloaded_overall_avg_acc",  "overall"),
+                ("[RL] True",     "accsaber_reloaded_true_avg_acc",     "true"),
+                ("[RL] Standard", "accsaber_reloaded_standard_avg_acc", "standard"),
+                ("[RL] Tech",     "accsaber_reloaded_tech_avg_acc",     "tech"),
             ):
                 _v_a = getattr(snap_a, _attr)
                 _v_b = getattr(snap_b, _attr)
@@ -2242,7 +2242,7 @@ class SnapshotCompareDialog(QDialog):
                               (round(_v_b, 2), f"{_v_b:.2f}%") if _v_b is not None else None)
                 _set_avg_acc_bar(row_acc, _v_a, _v_b, _cat)
                 row_acc += 1
-            _set_group_label(_grp_start, 4, "Acc")
+            _set_group_label(_grp_start, 4, "Avg Acc")
 
         # AccSaber 比較グリッドのヘッダを更新
         self.acc_cmp_table.setHorizontalHeaderLabels([
