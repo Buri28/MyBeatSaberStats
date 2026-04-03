@@ -18,6 +18,7 @@ from .theme import (
     table_stylesheet,
     toggle_button_stylesheet,
     radio_toggle_stylesheet,
+    action_button_stylesheet,
     is_dark,
 )
 from PySide6.QtWidgets import (
@@ -319,7 +320,7 @@ class SnapshotCompareDialog(QDialog):
             | Qt.WindowType.WindowMaximizeButtonHint
             | Qt.WindowType.WindowMinimizeButtonHint
         )
-        self._default_window_size = (1520, 720)
+        self._default_window_size = (1533, 870)
         self.resize(*self._default_window_size)
 
         # steam_id ごとにスナップショットを管理する
@@ -329,12 +330,12 @@ class SnapshotCompareDialog(QDialog):
         # Metric 列の幅の非表示から復帰用(ここで左端の Metric 列の幅を固定値で保持しておく)
         self._metric_preferred_width: int = 425
         # 全テーブル共通の行高（▲▼ボタンで変更）
-        self._row_height: int = 14
+        self._row_height: int = 21
         # スプリッター位置の保存用（_rebalance_splitter と共用）
-        self._saved_splitter_sizes: list[int] = [300, 865]      # _splitter (Metric / right)
-        self._saved_right_vsplitter_sizes: list[int] = [510, 180]  # _right_vsplitter (star / acc)
-        self._saved_star_hsplitter_ss: int = 380                  # _star_hsplitter SS 側幅
-        self._saved_metric_vsplitter_sizes: list[int] = [300, 300]  # _metric_vsplitter (SS/BL / AccSaber)
+        self._saved_splitter_sizes: list[int] = [459, 1065]      # _splitter (Metric / right)
+        self._saved_right_vsplitter_sizes: list[int] = [615, 190]  # _right_vsplitter (star / acc)
+        self._saved_star_hsplitter_ss: int = 392                  # _star_hsplitter SS 側幅
+        self._saved_metric_vsplitter_sizes: list[int] = [303, 500]  # _metric_vsplitter (SS/BL / AccSaber)
 
         root_layout = QVBoxLayout(self)
         root_layout.setContentsMargins(2, 2, 2, 2)
@@ -419,18 +420,19 @@ class SnapshotCompareDialog(QDialog):
         self.btn_toggle_header.setToolTip("各テーブルのタイトルヘッダの表示/非表示")
         self.btn_toggle_header.setStyleSheet(toggle_button_stylesheet())
 
-        self.btn_bl_below = QPushButton("BL↓", self)
-        self.btn_bl_below.setCheckable(True)
-        self.btn_bl_below.setChecked(False)
+        self.btn_bl_below = QPushButton("BL⇩", self)
+        self.btn_bl_below.setCheckable(False)
         self.btn_bl_below.setFixedWidth(45)
-        self.btn_bl_below.setToolTip("BeatLeaderをScoreSaberの下に表示する")
-        self.btn_bl_below.setStyleSheet(toggle_button_stylesheet())
+        self.btn_bl_below.setToolTip("BeatLeaderをScoreSaberの下に配置する / 左右並びに戻す")
+        self.btn_bl_below.setStyleSheet(action_button_stylesheet())
         top_grid.addWidget(self.btn_bl_below, 0, 10)
 
         top_grid.addWidget(QLabel("  "), 0, 10 + 1)  # BL と AccSaber の間のスペーサ
 
         # AccSaber モード切り替えボタン (AccSaber / AccSaber Reloaded) — Metric/SS/BL の右隣
         self._acc_mode: str = "AS"  # "AS" or "RL"
+        self._acc_position: str = "Left"  # "Left" or "Bottom"
+        self._bl_below: bool = False
         self.btn_acc_as = QPushButton("AccSaber", self)
         self.btn_acc_as.setCheckable(True)
         self.btn_acc_as.setChecked(True)
@@ -451,11 +453,17 @@ class SnapshotCompareDialog(QDialog):
         self.btn_acc_rl.setStyleSheet(radio_toggle_stylesheet())
         top_grid.addWidget(self.btn_acc_rl, 0, 13)
 
-        # SS/BL テーブル列グループ 表示/非表示チェックボックス（SS/BL ボタンの下に配置）
+        # AccSaber 表示位置切り替えボタン (Left ↔ Bottom トグル)
+        self.btn_acc_pos = QPushButton("ACC⇩", self)
+        self.btn_acc_pos.setCheckable(False)
+        self.btn_acc_pos.setFixedWidth(60)
+        self.btn_acc_pos.setToolTip("AccSaberの表示位置を左(⇦)/下(⇩)で切り替える")
+        self.btn_acc_pos.setStyleSheet(action_button_stylesheet())
+        top_grid.addWidget(self.btn_acc_pos, 0, 14)
         _chk_container = QWidget(self)
         _chk_layout = QHBoxLayout(_chk_container)
         _chk_layout.setContentsMargins(0, 0, 0, 0)
-        _chk_layout.setSpacing(6)
+        _chk_layout.setSpacing(3)
         self.chk_col_clear = QCheckBox("Clear", _chk_container)
         self.chk_col_clear.setChecked(True)
         self.chk_col_fc = QCheckBox("FC", _chk_container)
@@ -479,11 +487,12 @@ class SnapshotCompareDialog(QDialog):
         btn_chk_none.clicked.connect(self._on_chk_none)
         _chk_layout.addWidget(btn_chk_all)
         _chk_layout.addWidget(btn_chk_none)
+        _chk_layout.addStretch(1)
         top_grid.addWidget(_chk_container, 1, 7, 1, 7)
 
         # ストレッチ列でHeaderボタンを右端に寄せる
-        top_grid.setColumnStretch(14, 1)
-        top_grid.addWidget(self.btn_toggle_header, 1, 15)
+        top_grid.setColumnStretch(15, 1)
+        top_grid.addWidget(self.btn_toggle_header, 1, 16)
 
         # 行高 ▲▼ ボタン
         self.btn_row_height_up = QPushButton("▲", self)
@@ -492,8 +501,12 @@ class SnapshotCompareDialog(QDialog):
         self.btn_row_height_dn = QPushButton("▼", self)
         self.btn_row_height_dn.setFixedWidth(28)
         self.btn_row_height_dn.setToolTip("行の高さを小さくする")
-        top_grid.addWidget(self.btn_row_height_up, 1, 16)
-        top_grid.addWidget(self.btn_row_height_dn, 1, 17)
+        top_grid.addWidget(self.btn_row_height_up, 1, 17)
+        top_grid.addWidget(self.btn_row_height_dn, 1, 18)
+
+        self.btn_default_layout = QPushButton("Default Layout", self)
+        self.btn_default_layout.setToolTip("レイアウトをデフォルトにリセットする")
+        top_grid.addWidget(self.btn_default_layout, 1, 19)
 
         # top_grid を QWidget でラップして縦スプリッターの上パネルにする
         _top_ctrl_widget = QWidget(self)
@@ -548,7 +561,7 @@ class SnapshotCompareDialog(QDialog):
         self.table.verticalHeader().setVisible(False)
 
         self.table.setHorizontalHeaderLabels([
-            "Group",
+            "Genre",
             "Metric",
             "A",
             "B",
@@ -588,7 +601,7 @@ class SnapshotCompareDialog(QDialog):
         self.table_acc.verticalHeader().setMinimumSectionSize(0)
         self.table_acc.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
         self.table_acc.verticalHeader().setVisible(False)
-        self.table_acc.setHorizontalHeaderLabels(["Group", "Metric", "A", "B", "Diff(A⇒B)"])
+        self.table_acc.setHorizontalHeaderLabels(["Genre", "Metric", "A", "B", "Diff(A⇒B)"])
         header_acc = self.table_acc.horizontalHeader()
         header_acc.setStretchLastSection(False)
         header_acc.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
@@ -832,7 +845,7 @@ class SnapshotCompareDialog(QDialog):
         self._v_splitter.setCollapsible(1, False)
         # デフォルトの分割比率
         self._splitter.setSizes([300, 865])
-        self._v_splitter.setSizes([60, 660])
+        self._v_splitter.setSizes([53, 660])
         self._right_vsplitter.setSizes([510, 180])
         self._star_hsplitter.setSizes([380, 485])
         self._metric_vsplitter.setSizes([300, 300])
@@ -846,6 +859,12 @@ class SnapshotCompareDialog(QDialog):
         else:
             self._restore_last_selection_for_player(self._initial_steam_id)
 
+        # 設定ファイルが存在しない場合のデフォルト可視状態を保証する
+        # （_restore_ui_state が呼ばれた場合は QTimer で上書きされる）
+        self._acc_cmp_container.setVisible(self._acc_position == "Bottom")
+        self._acc_metric_container.setVisible(self._acc_position == "Left")
+        self.btn_acc_pos.setText("ACC⇦" if self._acc_position == "Bottom" else "ACC⇩")
+
         self.combo_player_a.currentIndexChanged.connect(self._on_player_a_changed)
         self.combo_player_b.currentIndexChanged.connect(self._on_player_b_changed)
         self.combo_a.currentIndexChanged.connect(self._on_snapshot_a_changed)
@@ -853,11 +872,12 @@ class SnapshotCompareDialog(QDialog):
         self.button_latest_b.clicked.connect(self._on_select_latest_b)
         self.btn_toggle_ss.toggled.connect(self._on_toggle_ss)
         self.btn_toggle_bl.toggled.connect(self._on_toggle_bl)
-        self.btn_bl_below.toggled.connect(self._on_toggle_bl_below)
+        self.btn_bl_below.clicked.connect(self._on_toggle_bl_below)
         self.btn_toggle_metric.toggled.connect(self._on_toggle_metric)
         self.btn_toggle_header.toggled.connect(self._on_toggle_header)
         self.btn_acc_as.clicked.connect(self._on_acc_mode_as)
         self.btn_acc_rl.clicked.connect(self._on_acc_mode_rl)
+        self.btn_acc_pos.clicked.connect(self._on_acc_position_toggle)
         self.chk_col_clear.toggled.connect(self._apply_star_col_visibility)
         self.chk_col_fc.toggled.connect(self._apply_star_col_visibility)
         self.chk_col_acc.toggled.connect(self._apply_star_col_visibility)
@@ -865,6 +885,7 @@ class SnapshotCompareDialog(QDialog):
         self.chk_col_starpp.toggled.connect(self._apply_star_col_visibility)
         self.btn_row_height_up.clicked.connect(self._on_row_height_up)
         self.btn_row_height_dn.clicked.connect(self._on_row_height_dn)
+        self.btn_default_layout.clicked.connect(self._on_default_layout)
         self._splitter.splitterMoved.connect(lambda *_: self._save_last_selection())
         self._right_vsplitter.splitterMoved.connect(lambda *_: self._save_last_selection())
         self._star_hsplitter.splitterMoved.connect(lambda *_: self._save_last_selection())
@@ -1049,11 +1070,16 @@ class SnapshotCompareDialog(QDialog):
             self._acc_mode = acc_mode
             self.btn_acc_as.setChecked(acc_mode == "AS")
             self.btn_acc_rl.setChecked(acc_mode == "RL")
+        acc_position = data.get("ui_acc_position")
+        if acc_position in ("Left", "Bottom"):
+            self._acc_position = acc_position
+            self.btn_acc_pos.setText("ACC⇦" if acc_position == "Bottom" else "ACC⇩")
+        if "ui_toggle_bl_below" in data:
+            self._bl_below = bool(data["ui_toggle_bl_below"])
         for btn, key in (
             (self.btn_toggle_metric, "ui_toggle_metric"),
             (self.btn_toggle_ss,     "ui_toggle_ss"),
             (self.btn_toggle_bl,     "ui_toggle_bl"),
-            (self.btn_bl_below,      "ui_toggle_bl_below"),
             (self.btn_toggle_header, "ui_toggle_header"),
         ):
             if key in data:
@@ -1071,12 +1097,13 @@ class SnapshotCompareDialog(QDialog):
                 chk.blockSignals(True)
                 chk.setChecked(bool(data[key]))
                 chk.blockSignals(False)
-        # 可視性を一括適用
+        # 可視性を一択適用
         self._metric_cmp_container.setVisible(self.btn_toggle_metric.isChecked())
         self._ss_cmp_container.setVisible(self.btn_toggle_ss.isChecked())
         self._bl_cmp_container.setVisible(self.btn_toggle_bl.isChecked())
+        self.btn_bl_below.setText("BL⇨" if self._bl_below else "BL⇩")
         self._star_hsplitter.setOrientation(
-            Qt.Orientation.Vertical if self.btn_bl_below.isChecked() else Qt.Orientation.Horizontal
+            Qt.Orientation.Vertical if self._bl_below else Qt.Orientation.Horizontal
         )
         # タイトルヘッダの可視性を適用
         _hdr = self.btn_toggle_header.isChecked()
@@ -1084,6 +1111,7 @@ class SnapshotCompareDialog(QDialog):
         self._ss_star_title_label.setVisible(_hdr)
         self._bl_star_title_label.setVisible(_hdr)
         self._acc_cmp_title_label.setVisible(_hdr)
+        self._acc_metric_title_label.setVisible(_hdr)
         # 縦スプリッターの上パネルサイズを復元
         if "ui_v_splitter_top" in data:
             _top_h = int(data["ui_v_splitter_top"])
@@ -1115,6 +1143,7 @@ class SnapshotCompareDialog(QDialog):
             self._right_vsplitter.setSizes(self._saved_right_vsplitter_sizes)
             self._metric_vsplitter.setSizes(self._saved_metric_vsplitter_sizes)
             self._rebalance_splitter()
+            self._apply_acc_position()
         QTimer.singleShot(0, _restore_splitters)
         self._apply_star_col_visibility_inner()
 
@@ -1136,20 +1165,21 @@ class SnapshotCompareDialog(QDialog):
 
             # UI 状態（トグルボタン・チェックボックス）を常に保存
             data["ui_acc_mode"]       = self._acc_mode
+            data["ui_acc_position"]   = self._acc_position
             data["ui_toggle_metric"]  = self.btn_toggle_metric.isChecked()
             data["ui_toggle_ss"]      = self.btn_toggle_ss.isChecked()
             data["ui_toggle_bl"]      = self.btn_toggle_bl.isChecked()
-            data["ui_toggle_bl_below"] = self.btn_bl_below.isChecked()
+            data["ui_toggle_bl_below"] = self._bl_below
             data["ui_toggle_header"]       = self.btn_toggle_header.isChecked()
             data["ui_row_height"]          = self._row_height
             data["ui_v_splitter_top"]      = self._v_splitter.sizes()[0]
             # メインスプリッター・右縦スプリッター・SS/BL横スプリッターの位置を保存
             _sp = self._splitter.sizes()
-            if sum(_sp) > 0:
+            if sum(_sp) > 0 and self._metric_cmp_container.isVisible():
                 self._saved_splitter_sizes = list(_sp)
             data["ui_splitter_sizes"]          = self._saved_splitter_sizes
             _rvsp = self._right_vsplitter.sizes()
-            if sum(_rvsp) > 0:
+            if sum(_rvsp) > 0 and self._acc_cmp_container.isVisible():
                 self._saved_right_vsplitter_sizes = list(_rvsp)
             data["ui_right_vsplitter_sizes"]   = self._saved_right_vsplitter_sizes
             _shs = self._star_hsplitter.sizes()
@@ -1157,7 +1187,7 @@ class SnapshotCompareDialog(QDialog):
                 self._saved_star_hsplitter_ss = _shs[0]
             data["ui_star_hsplitter_ss"]       = self._saved_star_hsplitter_ss
             _mvsp = self._metric_vsplitter.sizes()
-            if sum(_mvsp) > 0:
+            if sum(_mvsp) > 0 and self._acc_metric_container.isVisible():
                 self._saved_metric_vsplitter_sizes = list(_mvsp)
             data["ui_metric_vsplitter_sizes"] = self._saved_metric_vsplitter_sizes
             # ウィンドウサイズを保存
@@ -1300,10 +1330,57 @@ class SnapshotCompareDialog(QDialog):
         self._apply_row_height()
         self._save_last_selection()
 
-    def _on_toggle_bl_below(self, checked: bool) -> None:
-        """BeatLeader を ScoreSaber の下に表示するかどうかを切り替える。"""
+    def _on_default_layout(self) -> None:
+        """ボタン状態をリセットしてからレイアウトをデフォルト値に戻す。"""
+        # --- ボタン状態リセット（シグナルを一時ブロックして副作用を防ぐ） ---
+        for btn in (self.btn_toggle_metric, self.btn_toggle_ss, self.btn_toggle_bl):
+            btn.blockSignals(True)
+            btn.setChecked(True)
+            btn.blockSignals(False)
+
+        self._bl_below = True
+        self.btn_bl_below.setText("BL⇨")
+        self._star_hsplitter.setOrientation(Qt.Orientation.Vertical)
+
+        self._acc_mode = "RL"
+        self.btn_acc_as.setChecked(False)
+        self.btn_acc_rl.setChecked(True)
+
+        self._acc_position = "Left"
+        self.btn_acc_pos.setText("ACC⇩")
+
+        # コンテナ表示状態を確定させる
+        self._metric_cmp_container.setVisible(True)
+        self._ss_cmp_container.setVisible(True)
+        self._bl_cmp_container.setVisible(True)
+
+        # --- サイズ・行高リセット ---
+        self._row_height = 21
+        self._saved_splitter_sizes = [459, 1065]
+        self._saved_right_vsplitter_sizes = [615, 190]
+        self._saved_star_hsplitter_ss = 392
+        self._saved_metric_vsplitter_sizes = [303, 500]
+        self.resize(1533, 870)
+        self._apply_row_height()
+        self._update_view2()
+
+        def _apply() -> None:
+            self._right_vsplitter.setSizes(self._saved_right_vsplitter_sizes)
+            self._metric_vsplitter.setSizes(self._saved_metric_vsplitter_sizes)
+            self._rebalance_splitter()
+            self._apply_acc_position()
+            self._restore_v_splitter(53)
+            self._save_last_selection()
+
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(0, _apply)
+
+    def _on_toggle_bl_below(self) -> None:
+        """BeatLeader を ScoreSaber の下に配置する / 左右並びに戻す。"""
+        self._bl_below = not self._bl_below
+        self.btn_bl_below.setText("BL⇨" if self._bl_below else "BL⇩")
         self._star_hsplitter.setOrientation(
-            Qt.Orientation.Vertical if checked else Qt.Orientation.Horizontal
+            Qt.Orientation.Vertical if self._bl_below else Qt.Orientation.Horizontal
         )
         self._save_last_selection()
 
@@ -1329,6 +1406,16 @@ class SnapshotCompareDialog(QDialog):
         self._update_view2()
         self._save_last_selection()
 
+    def _on_acc_position_toggle(self) -> None:
+        """AccSaberの表示位置を左パネル⇔下パネルでトグルする。"""
+        if self._acc_position == "Left":
+            self._acc_position = "Bottom"
+        else:
+            self._acc_position = "Left"
+        self.btn_acc_pos.setText("ACC⇦" if self._acc_position == "Bottom" else "ACC⇩")
+        self._apply_acc_position()
+        self._save_last_selection()
+
     def _on_toggle_ss(self, checked: bool) -> None:
         """ScoreSaber ★別テーブルの表示/非表示を切り替える。"""
         self._ss_cmp_container.setVisible(checked)
@@ -1347,6 +1434,7 @@ class SnapshotCompareDialog(QDialog):
         self._ss_star_title_label.setVisible(checked)
         self._bl_star_title_label.setVisible(checked)
         self._acc_cmp_title_label.setVisible(checked)
+        self._acc_metric_title_label.setVisible(checked)
         self._save_last_selection()
 
     def _restore_v_splitter(self, top_h: int) -> None:
@@ -1430,6 +1518,43 @@ class SnapshotCompareDialog(QDialog):
             self._star_hsplitter.setSizes([0, 0])
         self._ss_cmp_container.setVisible(ss_vis)
         self._bl_cmp_container.setVisible(bl_vis)
+
+    def _apply_acc_position(self) -> None:
+        """_acc_position に応じて AccSaber 関連コンテナの表示/非表示を切り替え、スプリッターを再調整する。
+
+        - Left モード: 左側リスト (_acc_metric_container) を表示、右下グリッド (_acc_cmp_container) を非表示
+        - Bottom モード: 右下グリッド (_acc_cmp_container) を表示、左側リスト (_acc_metric_container) を非表示
+        """
+        show_metric = (self._acc_position == "Left")
+        show_cmp = (self._acc_position == "Bottom")
+        self._acc_metric_container.setVisible(show_metric)
+        self._acc_cmp_container.setVisible(show_cmp)
+
+        # _metric_vsplitter の再調整
+        mv_sizes = self._metric_vsplitter.sizes()
+        mv_total = sum(mv_sizes)
+        if mv_total > 0:
+            if show_metric:
+                ss = self._saved_metric_vsplitter_sizes
+                s0, s1 = max(1, ss[0]), max(1, ss[1])
+                t = s0 + s1
+                new_top = int(mv_total * s0 / t)
+                self._metric_vsplitter.setSizes([new_top, mv_total - new_top])
+            else:
+                self._metric_vsplitter.setSizes([mv_total, 0])
+
+        # _right_vsplitter の再調整
+        rv_sizes = self._right_vsplitter.sizes()
+        rv_total = sum(rv_sizes)
+        if rv_total > 0:
+            if show_cmp:
+                ss = self._saved_right_vsplitter_sizes
+                s0, s1 = max(1, ss[0]), max(1, ss[1])
+                t = s0 + s1
+                new_top = int(rv_total * s0 / t)
+                self._right_vsplitter.setSizes([new_top, rv_total - new_top])
+            else:
+                self._right_vsplitter.setSizes([rv_total, 0])
 
     def _current_snapshot(self, combo: QComboBox) -> Optional[Snapshot]:
         # A/B それぞれに対応するプレイヤーコンボから現在のプレイヤーを取得
@@ -1625,7 +1750,7 @@ class SnapshotCompareDialog(QDialog):
         self._metric_title_label.setText(f"{_star_title}")
 
         self.table.setHorizontalHeaderLabels([
-            "Group",
+            "Genre",
             "Metric",
             "A",
             "B",
