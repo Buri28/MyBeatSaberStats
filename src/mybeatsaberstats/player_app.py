@@ -702,11 +702,11 @@ class PlayerWindow(QMainWindow):
         self.setWindowTitle("My Beat Saber Stats β")
 
         # --- UI 状態保存用変数 ---
-        self._row_height: int = 14
-        self._saved_main_splitter_sizes: list[int] = [357, 363]
-        self._saved_bottom_splitter_sizes: list[int] = [357, 363]
-        self._saved_mid_splitter_sizes: list[int] = [600, 165]
-        self._default_window_size = (1220, 770)
+        self._row_height: int = 24
+        self._saved_main_splitter_sizes: list[int] = [578, 610]
+        self._saved_bottom_splitter_sizes: list[int] = [575, 613]
+        self._saved_mid_splitter_sizes: list[int] = [528, 165]
+        self._default_window_size = (1211, 770)
         self.resize(*self._default_window_size)
 
         central = QWidget(self)
@@ -779,8 +779,9 @@ class PlayerWindow(QMainWindow):
         self.btn_row_height_dn = QPushButton("▼")
         self.btn_row_height_dn.setFixedWidth(28)
         self.btn_row_height_dn.setToolTip("行の高さを減らす")
-        top_row.addWidget(self.btn_row_height_up)
-        top_row.addWidget(self.btn_row_height_dn)
+
+        self.btn_default_layout = QPushButton("Default Layout")
+        self.btn_default_layout.setToolTip("レイアウトをデフォルトにリセットする")
 
         _rows_layout.addLayout(top_row)
 
@@ -802,6 +803,10 @@ class PlayerWindow(QMainWindow):
         _ver_color = "#cccccc" if is_dark() else "black"
         self._ver_label.setStyleSheet(f"font-size: 12px; color: {_ver_color}; padding-right: 4px;")
         snapshot_row.addStretch(1)
+        snapshot_row.addWidget(self.btn_row_height_up)
+        snapshot_row.addWidget(self.btn_row_height_dn)
+        snapshot_row.addWidget(self.btn_default_layout)
+        snapshot_row.addSpacing(96)  # ダミースペースで右端のボタン群とバージョン表示を分離
         snapshot_row.addWidget(self._ver_label)
         _rows_layout.addLayout(snapshot_row)
 
@@ -1063,7 +1068,7 @@ class PlayerWindow(QMainWindow):
         self._main_splitter.addWidget(bl_column)
         self._main_splitter.setStretchFactor(0, 1)
         self._main_splitter.setStretchFactor(1, 1)
-        self._main_splitter.setSizes([357, 363])  # 初期サイズ配分の目安
+        self._main_splitter.setSizes([578, 610])  # 初期サイズ配分の目安
 
         # AccSaber テーブルをタイトル付きコンテナに包む (左下)
         left_acc_widget = QWidget(self)
@@ -1119,7 +1124,7 @@ class PlayerWindow(QMainWindow):
         self._bottom_h_splitter.addWidget(right_bottom_widget)
         self._bottom_h_splitter.setStretchFactor(0, 1)
         self._bottom_h_splitter.setStretchFactor(1, 1)
-        self._bottom_h_splitter.setSizes([357, 363])  # 初期サイズ配分の目安
+        self._bottom_h_splitter.setSizes([575, 613])  # 初期サイズ配分の目安
 
         # 中央エリア (★テーブル) と下部エリアの間に縦スプリッタを設置
         self._mid_bottom_splitter = QSplitter(Qt.Orientation.Vertical, self)
@@ -1127,7 +1132,7 @@ class PlayerWindow(QMainWindow):
         self._mid_bottom_splitter.addWidget(self._bottom_h_splitter)
         self._mid_bottom_splitter.setStretchFactor(0, 1)
         self._mid_bottom_splitter.setStretchFactor(1, 0)
-        self._mid_bottom_splitter.setSizes([600, 165])  # 初期サイズ配分の目安
+        self._mid_bottom_splitter.setSizes([528, 165])  # 初期サイズ配分の目安
 
         layout.addWidget(self._mid_bottom_splitter, 1)
 
@@ -1152,6 +1157,7 @@ class PlayerWindow(QMainWindow):
         # ボタンシグナル接続
         self.btn_row_height_up.clicked.connect(self._on_row_height_up)
         self.btn_row_height_dn.clicked.connect(self._on_row_height_dn)
+        self.btn_default_layout.clicked.connect(self._on_default_layout)
 
         # スプリッター移動時に自動保存
         self._main_splitter.splitterMoved.connect(lambda *_: self._save_ui_state())
@@ -1340,6 +1346,24 @@ class PlayerWindow(QMainWindow):
             self._row_height -= 1
             self._apply_row_height()
             self._save_ui_state()
+
+    def _on_default_layout(self) -> None:
+        """レイアウトをデフォルト値にリセットする。"""
+        self._row_height = 24
+        self._saved_main_splitter_sizes = [578, 610]
+        self._saved_bottom_splitter_sizes = [575, 613]
+        self._saved_mid_splitter_sizes = [528, 165]
+        self.resize(1211, 770)
+        self._apply_row_height()
+
+        def _apply() -> None:
+            self._main_splitter.setSizes(self._saved_main_splitter_sizes)
+            self._bottom_h_splitter.setSizes(self._saved_bottom_splitter_sizes)
+            self._mid_bottom_splitter.setSizes(self._saved_mid_splitter_sizes)
+
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(0, _apply)
+        self._save_ui_state()
 
     def _save_ui_state(self) -> None:
         """行高さ・スプリッター位置・ウィンドウサイズを設定ファイルに保存する。"""

@@ -170,6 +170,23 @@ def radio_toggle_stylesheet() -> str:
     return _RADIO_TOGGLE_DARK if _dark_mode else _RADIO_TOGGLE_LIGHT
 
 
+_ACTION_BUTTON_DARK = (
+    "QPushButton { background-color: #1a4a7a; color: #ffffff; "
+    "border: 1px solid #4a9edd; border-radius: 3px; padding: 2px 8px; font-weight: bold; } "
+    "QPushButton:hover { background-color: #1e5c9a; }"
+)
+_ACTION_BUTTON_LIGHT = (
+    "QPushButton { background-color: #1565c0; color: #ffffff; "
+    "border: 1px solid #42a5f5; border-radius: 3px; padding: 2px 8px; font-weight: bold; } "
+    "QPushButton:hover { background-color: #1976d2; }"
+)
+
+
+def action_button_stylesheet() -> str:
+    """常時アクティブ（ON 色）に見えるアクションボタン用スタイルシートを返す。"""
+    return _ACTION_BUTTON_DARK if _dark_mode else _ACTION_BUTTON_LIGHT
+
+
 # ------------------------------------------------------------------ #
 #  テーマ別カラーヘルパー
 # ------------------------------------------------------------------ #
