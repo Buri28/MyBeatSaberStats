@@ -187,6 +187,40 @@ def action_button_stylesheet() -> str:
     return _ACTION_BUTTON_DARK if _dark_mode else _ACTION_BUTTON_LIGHT
 
 
+_ACTION_BUTTON_RED_DARK = (
+    "QPushButton { background-color: #7a1a1a; color: #ffffff; "
+    "border: 1px solid #dd4a4a; border-radius: 3px; padding: 2px 8px; font-weight: bold; } "
+    "QPushButton:hover { background-color: #9a1e1e; }"
+)
+_ACTION_BUTTON_RED_LIGHT = (
+    "QPushButton { background-color: #c62828; color: #ffffff; "
+    "border: 1px solid #ef9a9a; border-radius: 3px; padding: 2px 8px; font-weight: bold; } "
+    "QPushButton:hover { background-color: #d32f2f; }"
+)
+
+
+def action_button_red_stylesheet() -> str:
+    """赤系のアクションボタン用スタイルシートを返す。"""
+    return _ACTION_BUTTON_RED_DARK if _dark_mode else _ACTION_BUTTON_RED_LIGHT
+
+
+_ACTION_BUTTON_GREEN_DARK = (
+    "QPushButton { background-color: #1a5c2a; color: #ffffff; "
+    "border: 1px solid #4aaa5a; border-radius: 3px; padding: 2px 8px; font-weight: bold; } "
+    "QPushButton:hover { background-color: #1e7a34; }"
+)
+_ACTION_BUTTON_GREEN_LIGHT = (
+    "QPushButton { background-color: #2e7d32; color: #ffffff; "
+    "border: 1px solid #81c784; border-radius: 3px; padding: 2px 8px; font-weight: bold; } "
+    "QPushButton:hover { background-color: #388e3c; }"
+)
+
+
+def action_button_green_stylesheet() -> str:
+    """緑系のアクションボタン用スタイルシートを返す。"""
+    return _ACTION_BUTTON_GREEN_DARK if _dark_mode else _ACTION_BUTTON_GREEN_LIGHT
+
+
 # ------------------------------------------------------------------ #
 #  テーマ別カラーヘルパー
 # ------------------------------------------------------------------ #
