@@ -19,6 +19,8 @@ from .theme import (
     toggle_button_stylesheet,
     radio_toggle_stylesheet,
     action_button_stylesheet,
+    action_button_red_stylesheet,
+    action_button_green_stylesheet,
     is_dark,
 )
 from PySide6.QtWidgets import (
@@ -424,7 +426,7 @@ class SnapshotCompareDialog(QDialog):
         self.btn_bl_below.setCheckable(False)
         self.btn_bl_below.setFixedWidth(45)
         self.btn_bl_below.setToolTip("BeatLeaderをScoreSaberの下に配置する / 左右並びに戻す")
-        self.btn_bl_below.setStyleSheet(action_button_stylesheet())
+        self.btn_bl_below.setStyleSheet(action_button_green_stylesheet())
         top_grid.addWidget(self.btn_bl_below, 0, 10)
 
         top_grid.addWidget(QLabel("  "), 0, 10 + 1)  # BL と AccSaber の間のスペーサ
@@ -1338,6 +1340,13 @@ class SnapshotCompareDialog(QDialog):
             btn.setChecked(True)
             btn.blockSignals(False)
 
+        # --- チェックボックス全オン ---
+        for chk in (self.chk_col_clear, self.chk_col_fc, self.chk_col_acc, self.chk_col_pp, self.chk_col_starpp):
+            chk.blockSignals(True)
+            chk.setChecked(True)
+            chk.blockSignals(False)
+        self._apply_star_col_visibility()
+
         self._bl_below = True
         self.btn_bl_below.setText("BL⇨")
         self._star_hsplitter.setOrientation(Qt.Orientation.Vertical)
@@ -2091,10 +2100,10 @@ class SnapshotCompareDialog(QDialog):
             # AccSaber (AS) モード — 全項目表示 (4 AP + 4 Rank + 4 Play Count + 4 AvgAcc = 16行)
             _grp_start = row_acc
             for _lbl, _attr in (
-                ("[AS] Overall AP",  "accsaber_overall_ap"),
-                ("[AS] True AP",     "accsaber_true_ap"),
-                ("[AS] Standard AP", "accsaber_standard_ap"),
-                ("[AS] Tech AP",     "accsaber_tech_ap"),
+                ("[AS] Overall",  "accsaber_overall_ap"),
+                ("[AS] True",     "accsaber_true_ap"),
+                ("[AS] Standard", "accsaber_standard_ap"),
+                ("[AS] Tech",     "accsaber_tech_ap"),
             ):
                 _v_a = getattr(snap_a, _attr)
                 _v_b = getattr(snap_b, _attr)
@@ -2105,10 +2114,10 @@ class SnapshotCompareDialog(QDialog):
             _set_group_label(_grp_start, 4, "AP")
             _grp_start = row_acc
             for _lbl, _r_attr, _rc_attr in (
-                ("[AS] Overall Rank",  "accsaber_overall_rank",  "accsaber_overall_rank_country"),
-                ("[AS] True Rank",     "accsaber_true_rank",     "accsaber_true_rank_country"),
-                ("[AS] Standard Rank", "accsaber_standard_rank", "accsaber_standard_rank_country"),
-                ("[AS] Tech Rank",     "accsaber_tech_rank",     "accsaber_tech_rank_country"),
+                ("[AS] Overall",  "accsaber_overall_rank",  "accsaber_overall_rank_country"),
+                ("[AS] True",     "accsaber_true_rank",     "accsaber_true_rank_country"),
+                ("[AS] Standard", "accsaber_standard_rank", "accsaber_standard_rank_country"),
+                ("[AS] Tech",     "accsaber_tech_rank",     "accsaber_tech_rank_country"),
             ):
                 row_acc = _set_combined_rank_row(
                     row_acc, _lbl,
@@ -2119,23 +2128,23 @@ class SnapshotCompareDialog(QDialog):
             _set_group_label(_grp_start, 4, "Rank")
             _grp_start = row_acc
             for _lbl, _attr, _cat, _total in (
-                ("[AS] Overall Play Count",  "accsaber_overall_play_count",  "overall",  _cmp_overall_total),
-                ("[AS] True Play Count",     "accsaber_true_play_count",     "true",     _cmp_true_total),
-                ("[AS] Standard Play Count", "accsaber_standard_play_count", "standard", _cmp_standard_total),
-                ("[AS] Tech Play Count",     "accsaber_tech_play_count",     "tech",     _cmp_tech_total),
+                ("[AS] Overall",  "accsaber_overall_play_count",  "overall",  _cmp_overall_total),
+                ("[AS] True",     "accsaber_true_play_count",     "true",     _cmp_true_total),
+                ("[AS] Standard", "accsaber_standard_play_count", "standard", _cmp_standard_total),
+                ("[AS] Tech",     "accsaber_tech_play_count",     "tech",     _cmp_tech_total),
             ):
                 _pc_a = getattr(snap_a, _attr)
                 _pc_b = getattr(snap_b, _attr)
                 self._set_row(self.table_acc, row_acc, _lbl, _play_fmt(_pc_a, _total), _play_fmt(_pc_b, _total))
                 _set_play_bar(row_acc, _pc_a, _pc_b, _total, _cat)
                 row_acc += 1
-            _set_group_label(_grp_start, 4, "Plays")
+            _set_group_label(_grp_start, 4, "Play Count")
             _grp_start = row_acc
             for _lbl, _attr, _cat in (
-                ("[AS] Overall AvgAcc",  "accsaber_overall_avg_acc",  "overall"),
-                ("[AS] True AvgAcc",     "accsaber_true_avg_acc",     "true"),
-                ("[AS] Standard AvgAcc", "accsaber_standard_avg_acc", "standard"),
-                ("[AS] Tech AvgAcc",     "accsaber_tech_avg_acc",     "tech"),
+                ("[AS] Overall",  "accsaber_overall_avg_acc",  "overall"),
+                ("[AS] True",     "accsaber_true_avg_acc",     "true"),
+                ("[AS] Standard", "accsaber_standard_avg_acc", "standard"),
+                ("[AS] Tech",     "accsaber_tech_avg_acc",     "tech"),
             ):
                 _v_a = getattr(snap_a, _attr)
                 _v_b = getattr(snap_b, _attr)
