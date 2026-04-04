@@ -59,6 +59,7 @@ from .collector.collector import (
     _read_cache_fetched_at,
 )
 from mybeatsaberstats.collector.map_store import MapStore
+from .playlist_view import PlaylistWindow
 
 
 def _format_bplist(bplist: dict) -> str:
@@ -750,6 +751,10 @@ class PlayerWindow(QMainWindow):
         self.graph_button = QPushButton("📈 Graph")
         self.graph_button.clicked.connect(self.open_graph)
         top_row.addWidget(self.graph_button)
+
+        self.playlist_button = QPushButton("📋 Playlist")
+        self.playlist_button.clicked.connect(self.open_playlist)
+        top_row.addWidget(self.playlist_button)
 
         top_row.addStretch(1)
 
@@ -3140,6 +3145,18 @@ class PlayerWindow(QMainWindow):
             dlg.exec()
         except Exception as exc:  # noqa: BLE001
             QMessageBox.warning(self, "Snapshot Graph", f"Failed to open snapshot graph:\n{exc}")
+
+    def open_playlist(self) -> None:
+        """Playlist 画面を開く（現在プレイヤーのクリア情報を渡す）。"""
+        steam_id = self._current_player_id()
+        if not hasattr(self, "_playlist_window") or self._playlist_window is None:
+            self._playlist_window = PlaylistWindow(steam_id=steam_id, parent=None)
+        else:
+            # プレイヤーが変わっていたら steam_id を更新
+            self._playlist_window._steam_id = steam_id
+        self._playlist_window.show()
+        self._playlist_window.raise_()
+        self._playlist_window.activateWindow()
 
 
 def run() -> None:
