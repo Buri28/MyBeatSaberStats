@@ -1368,7 +1368,7 @@ class SnapshotCompareDialog(QDialog):
         self._saved_splitter_sizes = [440, 1045]
         self._saved_right_vsplitter_sizes = [615, 190]
         self._saved_star_hsplitter_ss = 392
-        self._saved_metric_vsplitter_sizes = [303, 500]
+        self._saved_metric_vsplitter_sizes = [367, 436]
         self.resize(1540, 880)
         self._apply_row_height()
         self._update_view2()
