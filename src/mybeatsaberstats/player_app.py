@@ -2035,6 +2035,10 @@ class PlayerWindow(QMainWindow):
             rw._control_row.setSpacing(2)
             rw.dark_mode_button.setChecked(dark)
             rw.dark_mode_button.setText(_theme_button_label())
+        # プレイリスト画面が開いていれば更新する
+        pw = getattr(self, "_playlist_window", None)
+        if pw is not None:
+            pw.apply_theme()
 
     def reload_snapshots(self) -> None:
         """snapshots フォルダを読み直して、プレイヤー一覧を更新する。"""

@@ -5,8 +5,11 @@ AccSaber / AccSaber Reloaded は API から取得するためネットワーク�
 """
 from __future__ import annotations
 
+import base64
 import json
 import math
+import os
+import tempfile
 import threading
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
@@ -15,7 +18,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 import requests
 
 from PySide6.QtCore import Qt, QObject, Signal
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QImage, QPainter, QFont
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -43,7 +46,6 @@ from PySide6.QtWidgets import (
     QWidget,
     QProgressDialog,
     QApplication,
-    QInputDialog,
     QCheckBox,
 )
 
@@ -56,13 +58,13 @@ from .theme import is_dark, table_stylesheet
 SOURCE_SS = "ScoreSaber"
 SOURCE_BL = "BeatLeader"
 SOURCE_ACC = "AccSaber"
-SOURCE_ACC_RL = "AccSaber Reloaded"
+SOURCE_ACC_RL = "AccSaber RL"
 SOURCE_OPEN = "Open File"
 
 # ステータス表示
-STATUS_CLEARED = "✓"
+STATUS_CLEARED = "✔"
 STATUS_NF = "⚠NF"
-STATUS_UNPLAYED = "✗"
+STATUS_UNPLAYED = "✖"
 
 # 難易度の表示順
 _DIFF_ORDER: Dict[str, int] = {"Easy": 1, "Normal": 2, "Hard": 3, "Expert": 4, "ExpertPlus": 5}
@@ -70,6 +72,7 @@ _DIFF_ORDER: Dict[str, int] = {"Easy": 1, "Normal": 2, "Hard": 3, "Expert": 4, "
 _CACHE_DIR = BASE_DIR / "cache"
 _BATCH_CONFIG_PATH = _CACHE_DIR / "batch_configs.json"
 _EXPORT_DIR_PATH = _CACHE_DIR / "export_dir.json"
+_PLAYLIST_WINDOW_PATH = _CACHE_DIR / "playlist_window.json"
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -408,11 +411,149 @@ class _NumItem(QTableWidgetItem):
         return self._v < other_v
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# bplist 出力ヘルパー
-# ──────────────────────────────────────────────────────────────────────────────
+# 難易度アイコン: Beat Saber 公式カラー + 短縮テキスト
+_DIFF_INFO: Dict[str, tuple] = {
+    "Easy":       ("Es",  QColor("#1acc1a")),
+    "Normal":     ("N",  QColor("#59b0f4")),
+    "Hard":       ("H",  QColor("#f4a015")),
+    "Expert":     ("Ex",   QColor("#ff4e4e")),
+    "ExpertPlus": ("E+",  QColor("#bf2aff")),
+}
 
-def _make_bplist(title: str, entries: List[MapEntry]) -> dict:
+# モードアイコン
+_MODE_INFO: Dict[str, str] = {
+    "Standard":  "2S",
+    "OneSaber":  "1S",
+    "NoArrows":  "NA",
+    "90Degree":  "90°",
+    "360Degree": "360°",
+    "Lightshow": "LS",
+    "Lawless":   "Law",
+}
+
+
+def _diff_item(difficulty: str) -> QTableWidgetItem:
+    short, color = _DIFF_INFO.get(difficulty, (difficulty[:4], QColor("#aaaaaa")))
+    item = QTableWidgetItem(short)
+    item.setBackground(color)
+    item.setForeground(QColor("#DDDDDD") if is_dark() else QColor("#000000"))
+    item.setToolTip(difficulty)
+    item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+    # 太字にする（ただし、環境によってはフォントサイズが変わってしまうため、スタイルシートで擬似的に太字にする）
+    font = item.font()
+    font.setBold(True)
+    item.setFont(font)
+    return item
+
+
+def _mode_item(mode: str) -> QTableWidgetItem:
+    short = _MODE_INFO.get(mode, mode[:4])
+    item = QTableWidgetItem(short)
+    item.setToolTip(mode)
+    item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+    return item
+
+
+def _sort_dir_from_mode(sort_mode: str) -> str:
+    """sort_mode 文字列から 'asc'/'desc' を返す。"""
+    return "desc" if sort_mode in ("pp_high", "ap_high", "acc_high", "rank_high", "star_desc") else "asc"
+
+
+def _make_playlist_cover(
+    cover_type: str,  # "star" | "true" | "standard" | "tech" | "default"
+    label: str = "",  # "star" 時は星数文字列
+    sort_dir: str = "asc",  # "asc" | "desc"
+) -> str:
+    """プレイリストカバー画像を生成し data:image/png;base64,... を返す。
+
+    cover_type:
+        "star"     → app_icon + ★N (黄)
+        "true"     → accsaberreloaded_logo + T (緑)
+        "standard" → accsaberreloaded_logo + S (青)
+        "tech"     → accsaberreloaded_logo + Tc (赤)
+        "default"  → app_icon のみ
+    sort_dir: "asc" → ⇧, "desc" → ⇩
+    """
+    SIZE = 256
+
+    # ベース画像選択
+    if cover_type in ("true", "standard", "tech"):
+        base_path = RESOURCES_DIR / "accsaberreloaded_logo.png"
+    else:
+        base_path = RESOURCES_DIR / "app_icon.png"
+
+    if base_path.exists():
+        base_img = QImage(str(base_path))
+        base_img = base_img.scaled(
+            SIZE, SIZE,
+            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        cx = (base_img.width() - SIZE) // 2
+        cy = (base_img.height() - SIZE) // 2
+        base_img = base_img.copy(cx, cy, SIZE, SIZE)
+    else:
+        base_img = QImage(SIZE, SIZE, QImage.Format.Format_ARGB32)
+        base_img.fill(QColor(30, 30, 30))
+
+    canvas = base_img.convertToFormat(QImage.Format.Format_ARGB32)
+    painter = QPainter(canvas)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+
+    # カテゴリ・ラベル設定
+    if cover_type == "true":
+        main_text, text_color = "T", QColor(0, 220, 80)
+    elif cover_type == "standard":
+        main_text, text_color = "S", QColor(80, 180, 255)
+    elif cover_type == "tech":
+        main_text, text_color = "Tc", QColor(255, 80, 80)
+    elif cover_type == "star":
+        main_text, text_color = f"\u2605{label}", QColor(255, 220, 0)
+    else:
+        main_text, text_color = "", QColor(255, 255, 255)
+
+    arrow = "\u21e7" if sort_dir == "asc" else "\u21e9"
+
+    if main_text:
+        bar_h = SIZE // 3
+        painter.fillRect(0, SIZE - bar_h, SIZE, bar_h, QColor(0, 0, 0, 180))
+        font_main = QFont("Segoe UI", 60, QFont.Weight.Black)
+        painter.setFont(font_main)
+        rect_main = Qt.AlignmentFlag.AlignCenter
+        # 影
+        painter.setPen(QColor(0, 0, 0, 220))
+        from PySide6.QtCore import QRect as _QRect
+        painter.drawText(_QRect(2, SIZE - bar_h + 2, SIZE, bar_h - 18), rect_main, main_text)
+        # 本体
+        painter.setPen(text_color)
+        painter.drawText(_QRect(0, SIZE - bar_h, SIZE, bar_h - 18), rect_main, main_text)
+
+    # ソート矢印（右下隅）
+    font_arrow = QFont("Segoe UI Symbol", 26, QFont.Weight.Bold)
+    painter.setFont(font_arrow)
+    from PySide6.QtCore import QRect as _QRect2
+    painter.setPen(QColor(0, 0, 0, 200))
+    painter.drawText(_QRect2(SIZE - 50, SIZE - 40, 48, 38),
+                     Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignBottom, arrow)
+    painter.setPen(QColor(255, 255, 255, 230))
+    painter.drawText(_QRect2(SIZE - 52, SIZE - 42, 48, 38),
+                     Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignBottom, arrow)
+
+    painter.end()
+
+    fd, tmp_path = tempfile.mkstemp(suffix=".png")
+    os.close(fd)
+    try:
+        canvas.save(tmp_path)
+        with open(tmp_path, "rb") as f:
+            png_data = f.read()
+    finally:
+        os.unlink(tmp_path)
+    return "data:image/png;base64," + base64.b64encode(png_data).decode("ascii")
+
+
+def _make_bplist(title: str, entries: List[MapEntry], image: str = "") -> dict:
     songs = []
     for e in entries:
         char = e.mode or "Standard"
@@ -425,12 +566,12 @@ def _make_bplist(title: str, entries: List[MapEntry]) -> dict:
     return {
         "playlistTitle": title,
         "playlistAuthor": "MyBeatSaberStats",
-        "image": "",
+        "image": image,
         "songs": songs,
     }
 
 
-def _save_bplist(parent: QWidget, title: str, entries: List[MapEntry], init_dir: str = "") -> Optional[str]:
+def _save_bplist(parent: QWidget, title: str, entries: List[MapEntry], init_dir: str = "", image: str = "") -> Optional[str]:
     """bplist ファイルを保存ダイアログで保存する。保存したファイルのパスを返す（キャンセル時は None）。"""
     if not entries:
         QMessageBox.information(parent, "Export", "No maps to export.")
@@ -445,7 +586,7 @@ def _save_bplist(parent: QWidget, title: str, entries: List[MapEntry], init_dir:
     if not path:
         return None
 
-    bplist = _make_bplist(title, entries)
+    bplist = _make_bplist(title, entries, image)
     try:
         Path(path).write_text(json.dumps(bplist, ensure_ascii=False, indent=2), encoding="utf-8")
         QMessageBox.information(parent, "Export Complete", f"Saved:\n{path}\n\n{len(entries)} maps")
@@ -741,7 +882,7 @@ class _BatchConfig:
     # Export style
     split_mode: str = "star"   # "single" | "star" | "category"
     # Sort
-    sort_mode: str = "star_asc"  # "star_asc" | "pp_high" | "ap_high"
+    sort_mode: str = "star_asc"  # "star_asc"|"star_desc"|"pp_high"|"pp_low"|"ap_high"|"ap_low"|"acc_high"|"acc_low"|"rank_low"|"rank_high"
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -757,7 +898,13 @@ class _BatchConfig:
             cats = [n for flag, n in [(self.cat_true, "Tr"), (self.cat_standard, "Std"), (self.cat_tech, "Tch")] if flag]
             src = f"RL[{'+'.join(cats) or 'none'}]"
         sts = "".join([s for flag, s in [(self.show_cleared, "✓"), (self.show_nf, "⚠"), (self.show_unplayed, "✗")] if flag])
-        sort_label = {"star_asc": "★Asc", "pp_high": "PP↓", "ap_high": "AP↓"}.get(self.sort_mode, self.sort_mode)
+        sort_label = {
+            "star_asc": "★Asc", "star_desc": "★Desc",
+            "pp_high": "PP↓", "pp_low": "PP↑",
+            "ap_high": "AP↓", "ap_low": "AP↑",
+            "acc_high": "Acc↓", "acc_low": "Acc↑",
+            "rank_low": "Rank↑", "rank_high": "Rank↓",
+        }.get(self.sort_mode, self.sort_mode)
         if self.source == "rl":
             return f"{self.label}  [{src} / {sts} / {self.split_mode} / {sort_label}]"
         star = f"★{self.star_min:.0f}-{self.star_max:.0f}"
@@ -765,10 +912,12 @@ class _BatchConfig:
 
 
 _BATCH_PRESETS: List[_BatchPreset] = [
-    _BatchPreset("SS — Uncleared per ★",                 "ss", "",         True,  "star_asc", "ss_uncleared",            True),
-    _BatchPreset("SS — High PP per ★",                   "ss", "",         False, "pp_high",  "ss_high_pp",              True),
-    _BatchPreset("BL — Uncleared per ★",                 "bl", "",         True,  "star_asc", "bl_uncleared",            True),
-    _BatchPreset("BL — High PP per ★",                   "bl", "",         False, "pp_high",  "bl_high_pp",              True),
+    _BatchPreset("SS — Uncleared per ★↑",                "ss", "",         True,  "star_asc", "ss_uncleared",            True),
+    _BatchPreset("SS — Uncleared All  ★↑",               "ss", "",         True,  "star_asc", "ss_uncleared_all",         False),
+    _BatchPreset("SS — High PP per ★",                  "ss", "",         False, "pp_high",  "ss_high_pp",              True),
+    _BatchPreset("BL — Uncleared per ★↑",                "bl", "",         True,  "star_asc", "bl_uncleared",            True),
+    _BatchPreset("BL — Uncleared All  ★↑",               "bl", "",         True,  "star_asc", "bl_uncleared_all",         False),
+    _BatchPreset("BL — High PP per ★",                  "bl", "",         False, "pp_high",  "bl_high_pp",              True),
     _BatchPreset("AccSaber RL — True (Uncleared)",       "rl", "true",     True,  "star_asc", "rl_true_uncleared",       False),
     _BatchPreset("AccSaber RL — True (All, High AP)",    "rl", "true",     False, "ap_high",  "rl_true_all_high_ap",     False),
     _BatchPreset("AccSaber RL — Standard (Uncleared)",   "rl", "standard", True,  "star_asc", "rl_standard_uncleared",   False),
@@ -800,11 +949,76 @@ def _apply_config_filter(maps: List[MapEntry], cfg: "_BatchConfig") -> List[MapE
         result.append(e)
     if cfg.sort_mode == "pp_high":
         result.sort(key=lambda e: (-e.player_pp, e.stars, e.song_name))
+    elif cfg.sort_mode == "pp_low":
+        result.sort(key=lambda e: (e.player_pp, e.stars, e.song_name))
     elif cfg.sort_mode == "ap_high":
         result.sort(key=lambda e: (-e.acc_rl_ap, e.stars, e.song_name))
+    elif cfg.sort_mode == "ap_low":
+        result.sort(key=lambda e: (e.acc_rl_ap, e.stars, e.song_name))
+    elif cfg.sort_mode == "acc_high":
+        result.sort(key=lambda e: (-e.player_acc, e.stars, e.song_name))
+    elif cfg.sort_mode == "acc_low":
+        result.sort(key=lambda e: (e.player_acc, e.stars, e.song_name))
+    elif cfg.sort_mode == "rank_low":
+        result.sort(key=lambda e: (e.player_rank or 999999, e.stars, e.song_name))
+    elif cfg.sort_mode == "rank_high":
+        result.sort(key=lambda e: (-(e.player_rank or 0), e.stars, e.song_name))
+    elif cfg.sort_mode == "star_desc":
+        result.sort(key=lambda e: (-e.stars, e.song_name))
     else:
         result.sort(key=lambda e: (e.stars, e.song_name))
     return result
+
+
+def _pregenerate_covers(configs: "List[_BatchConfig]") -> Dict[str, str]:
+    """必要なカバー画像を事前生成してキャッシュ辞書を返す（メインスレッドで呼ぶこと）。"""
+    cache: Dict[str, str] = {}
+    for cfg in configs:
+        sd = _sort_dir_from_mode(cfg.sort_mode)
+        if cfg.split_mode == "star":
+            for si in range(21):
+                key = f"star:{si}:{sd}"
+                if key not in cache:
+                    cache[key] = _make_playlist_cover("star", str(si), sd)
+        elif cfg.split_mode == "category":
+            for cat in ("true", "standard", "tech", "unknown"):
+                key = f"cat:{cat}:{sd}"
+                if key not in cache:
+                    cache[key] = _make_playlist_cover(cat, "", sd)
+        else:
+            key = f"default:{sd}"
+            if key not in cache:
+                cache[key] = _make_playlist_cover("default", "", sd)
+    return cache
+
+
+def _config_export_tag(cfg: "_BatchConfig") -> str:
+    """_BatchConfig のフィルタ・ソート条件からファイル名タグを生成する。"""
+    parts: List[str] = []
+    sts = []
+    if cfg.show_cleared:
+        sts.append("cleared")
+    if cfg.show_nf:
+        sts.append("nf")
+    if cfg.show_unplayed:
+        sts.append("unplayed")
+    if len(sts) < 3:
+        parts.append("+".join(sts) if sts else "none")
+    if cfg.star_min > 0.0 or cfg.star_max < 20.0:
+        parts.append(f"star{cfg.star_min:.0f}-{cfg.star_max:.0f}")
+    if cfg.source == "rl":
+        cats = [n for flag, n in [(cfg.cat_true, "T"), (cfg.cat_standard, "S"), (cfg.cat_tech, "Tc")] if flag]
+        if len(cats) < 3:
+            parts.append("+".join(cats) if cats else "nocat")
+    _sort_tags = {
+        "star_asc": "star_asc", "star_desc": "star_desc",
+        "pp_high": "pp_desc", "pp_low": "pp_asc",
+        "ap_high": "ap_desc", "ap_low": "ap_asc",
+        "acc_high": "acc_desc", "acc_low": "acc_asc",
+        "rank_low": "rank_asc", "rank_high": "rank_desc",
+    }
+    parts.append(_sort_tags.get(cfg.sort_mode, cfg.sort_mode))
+    return "_".join(parts)
 
 
 def _write_config_files(
@@ -813,16 +1027,21 @@ def _write_config_files(
     folder_path: Path,
     saved: List[str],
     errors: List[str],
+    covers: Dict[str, str],
 ) -> None:
     """_BatchConfig の split_mode に従ってファイルを書き出す。"""
+    tag = _config_export_tag(cfg)
+    fbase = f"{cfg.filename_base}_{tag}" if tag else cfg.filename_base
     if cfg.split_mode == "star":
         groups: Dict[int, List[MapEntry]] = {}
         for e in maps:
             si = max(1, math.floor(e.stars)) if e.stars > 0 else 0
             groups.setdefault(si, []).append(e)
+        _sort_dir = _sort_dir_from_mode(cfg.sort_mode)
         for si in sorted(groups.keys()):
-            fname = f"{cfg.filename_base}_{si:02d}star.bplist"
-            bplist = _make_bplist(f"{si}★ {cfg.label}", groups[si])
+            fname = f"{fbase}_{si:02d}star.bplist"
+            _img = covers.get(f"star:{si}:{_sort_dir}", "")
+            bplist = _make_bplist(f"{si}★ {cfg.label}", groups[si], _img)
             (folder_path / fname).write_text(
                 json.dumps(bplist, ensure_ascii=False, indent=2), encoding="utf-8"
             )
@@ -832,16 +1051,20 @@ def _write_config_files(
         for e in maps:
             cat = e.acc_category or "unknown"
             cat_groups.setdefault(cat, []).append(e)
+        _sort_dir = _sort_dir_from_mode(cfg.sort_mode)
         for cat in sorted(cat_groups.keys()):
-            fname = f"{cfg.filename_base}_{cat}.bplist"
-            bplist = _make_bplist(f"{cat.capitalize()} — {cfg.label}", cat_groups[cat])
+            fname = f"{fbase}_{cat}.bplist"
+            _img = covers.get(f"cat:{cat}:{_sort_dir}", "")
+            bplist = _make_bplist(f"{cat.capitalize()} — {cfg.label}", cat_groups[cat], _img)
             (folder_path / fname).write_text(
                 json.dumps(bplist, ensure_ascii=False, indent=2), encoding="utf-8"
             )
             saved.append(fname)
     else:  # "single"
-        fname = f"{cfg.filename_base}.bplist"
-        bplist = _make_bplist(cfg.label, maps)
+        fname = f"{fbase}.bplist"
+        _sort_dir = _sort_dir_from_mode(cfg.sort_mode)
+        _img = covers.get(f"default:{_sort_dir}", "")
+        bplist = _make_bplist(cfg.label, maps, _img)
         (folder_path / fname).write_text(
             json.dumps(bplist, ensure_ascii=False, indent=2), encoding="utf-8"
         )
@@ -853,6 +1076,7 @@ def _run_export_configs(
     steam_id: Optional[str],
     configs: "List[_BatchConfig]",
     folder_path: Path,
+    covers: Dict[str, str],
 ) -> None:
     """バッチ設定リストを使って最新データをロードしてエクスポートする（スレッド実行）。
     完了時: sigs.finished.emit([saved_files, errors])
@@ -896,7 +1120,7 @@ def _run_export_configs(
             try:
                 base = {"ss": ss_maps, "bl": bl_maps, "rl": rl_maps}.get(cfg.source, [])
                 maps = _apply_config_filter(list(base), cfg)
-                _write_config_files(maps, cfg, folder_path, saved_files, errors)
+                _write_config_files(maps, cfg, folder_path, saved_files, errors, covers)
             except Exception as exc:
                 errors.append(f"{cfg.label}: {exc}")
             step += 1
@@ -917,18 +1141,38 @@ _COL_DIFF = 2
 _COL_MODE = 3
 _COL_STARS = 4
 _COL_PLAYER_PP = 5
-_COL_RL_AP = 6
-_COL_PLAYER_ACC = 7
-_COL_PLAYER_RANK = 8
-_COL_AUTHOR = 9
+_COL_ACC_CAT = 6
+_COL_RL_AP = 7
+_COL_PLAYER_ACC = 8
+_COL_PLAYER_RANK = 9
 _COL_MAPPER = 10
-_COL_ACC_CAT = 11
+_COL_AUTHOR = 11
 _COL_COUNT = 12
 
 _COL_LABELS = [
-    "Status", "Song", "Difficulty", "Mode", "★", "Player PP", "AP", "Acc %", "Rank",
-    "Author", "Mapper", "Acc Category",
+    "Status", "Song", "Diff", "Mode", "★", "Player PP", "Acc Category", "AP", "Acc %", "Rank",
+    "Mapper", "Author",
 ]
+
+
+class _PresetListWidget(QListWidget):
+    """行テキストクリックでもチェックボックスをトグルできる QListWidget。"""
+
+    def mouseReleaseEvent(self, event) -> None:  # type: ignore[override]
+        item = self.itemAt(event.pos())
+        if item is not None and event.button() == Qt.MouseButton.LeftButton:
+            before = item.checkState()
+            super().mouseReleaseEvent(event)
+            # Qt が (already-selected 等の理由で) トグルしなかった場合は手動トグル
+            if item.checkState() == before:
+                new = (
+                    Qt.CheckState.Unchecked
+                    if before == Qt.CheckState.Checked
+                    else Qt.CheckState.Checked
+                )
+                item.setCheckState(new)
+        else:
+            super().mouseReleaseEvent(event)
 
 
 class PlaylistWindow(QMainWindow):
@@ -941,7 +1185,7 @@ class PlaylistWindow(QMainWindow):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Playlist")
-        self.resize(1100, 750)
+        self.resize(1400, 750)
 
         self._steam_id = steam_id
         self._all_entries: List[MapEntry] = []   # ロード済み全データ
@@ -987,7 +1231,7 @@ class PlaylistWindow(QMainWindow):
 
         # Open file
         self._open_edit = QLineEdit()
-        self._open_edit.setPlaceholderText(".bplist file path...")
+        self._open_edit.setPlaceholderText(".bplist / .json file path...")
         self._open_edit.setEnabled(False)
         self._open_edit.setMinimumWidth(240)
         self._btn_browse = QPushButton("Browse...")
@@ -1059,13 +1303,13 @@ class PlaylistWindow(QMainWindow):
 
         filter_row.addSpacing(8)
         filter_row.addWidget(QLabel("Status:"))
-        self._cb_sts_cleared = QCheckBox("Cleared ✓")
+        self._cb_sts_cleared = QCheckBox("Cleared ✔")
         self._cb_sts_cleared.setChecked(True)
         self._cb_sts_cleared.toggled.connect(self._apply_filter)
         self._cb_sts_nf = QCheckBox("NF ⚠")
         self._cb_sts_nf.setChecked(True)
         self._cb_sts_nf.toggled.connect(self._apply_filter)
-        self._cb_sts_unplayed = QCheckBox("Unplayed ✗")
+        self._cb_sts_unplayed = QCheckBox("Unplayed ✖")
         self._cb_sts_unplayed.setChecked(True)
         self._cb_sts_unplayed.toggled.connect(self._apply_filter)
         filter_row.addWidget(self._cb_sts_cleared)
@@ -1107,7 +1351,11 @@ class PlaylistWindow(QMainWindow):
         export_row.addWidget(QLabel("Style:"))
         self._export_style_grp = QButtonGroup(self)
         self._rb_exp_single = QRadioButton("Single file")
+        self._rb_exp_single.setToolTip("単一ファイルとして出力します")
+
         self._rb_exp_split = QRadioButton("Split by ★")
+        self._rb_exp_split.setToolTip("★ごとにファイルを分割して出力します")
+
         self._rb_exp_single.setChecked(True)
         self._export_style_grp.addButton(self._rb_exp_single, 0)
         self._export_style_grp.addButton(self._rb_exp_split, 1)
@@ -1165,8 +1413,8 @@ class PlaylistWindow(QMainWindow):
         # 初期列幅調整
         self._table.setColumnWidth(_COL_STATUS, 52)
         self._table.setColumnWidth(_COL_SONG, 240)
-        self._table.setColumnWidth(_COL_DIFF, 78)
-        self._table.setColumnWidth(_COL_MODE, 68)
+        self._table.setColumnWidth(_COL_DIFF, 26)
+        self._table.setColumnWidth(_COL_MODE, 42)
         self._table.setColumnWidth(_COL_STARS, 52)
         self._table.setColumnWidth(_COL_PLAYER_PP, 72)
         self._table.setColumnWidth(_COL_RL_AP, 72)
@@ -1212,7 +1460,7 @@ class PlaylistWindow(QMainWindow):
 
         _rl.addWidget(QLabel("Quick Add Presets:"))
 
-        self._preset_list_w = QListWidget()
+        self._preset_list_w = _PresetListWidget()
         self._preset_list_w.setAlternatingRowColors(True)
         for _p in _BATCH_PRESETS:
             _pi = QListWidgetItem(_p.label)
@@ -1241,6 +1489,9 @@ class PlaylistWindow(QMainWindow):
         self._btn_add_presets = QPushButton("➕ Add")
         self._btn_add_presets.clicked.connect(self._batch_add_presets)
         _preset_btn_row.addWidget(self._btn_add_presets)
+        self._btn_quick_export = QPushButton("📤 Quick Export")
+        self._btn_quick_export.clicked.connect(self._quick_export_presets)
+        _preset_btn_row.addWidget(self._btn_quick_export)
         _rl.addLayout(_preset_btn_row)
 
         self._btn_batch_export_all = QPushButton("📤 Export All")
@@ -1258,7 +1509,50 @@ class PlaylistWindow(QMainWindow):
         self._batch_refresh_queue()
 
         # スプリッタ初期サイズ: 左を広く、右パネルを 252px
-        self._splitter.setSizes([self.width() - 252, 252])
+        self._splitter.setSizes([980, 420])
+        self._load_window_state()
+
+    def _save_window_state(self) -> None:
+        try:
+            payload: dict = {}
+            if _PLAYLIST_WINDOW_PATH.exists():
+                try:
+                    payload = json.loads(_PLAYLIST_WINDOW_PATH.read_text(encoding="utf-8"))
+                except Exception:
+                    payload = {}
+            payload["splitter_sizes"] = self._splitter.sizes()
+            payload["window_width"] = self.width()
+            payload["window_height"] = self.height()
+            _PLAYLIST_WINDOW_PATH.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+        except Exception:
+            pass
+
+    def _load_window_state(self) -> None:
+        if not _PLAYLIST_WINDOW_PATH.exists():
+            return
+        try:
+            data = json.loads(_PLAYLIST_WINDOW_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            return
+        w = data.get("window_width")
+        h = data.get("window_height")
+        if isinstance(w, int) and isinstance(h, int) and w > 200 and h > 200:
+            self.resize(w, h)
+        sizes = data.get("splitter_sizes")
+        if isinstance(sizes, list) and len(sizes) == 2:
+            self._splitter.setSizes(sizes)
+
+    def closeEvent(self, event) -> None:  # type: ignore[override]
+        self._save_window_state()
+        super().closeEvent(event)
+
+    def apply_theme(self) -> None:
+        """テーマ切替後に呼び出してテーブルスタイルと行色を更新する。"""
+        self._table.setStyleSheet(table_stylesheet())
+        if self._all_entries:
+            self._refresh_table(self._filtered)
 
     # ──────────────────────────────────────────────────────────────────────────
     # ソース選択イベント
@@ -1335,11 +1629,16 @@ class PlaylistWindow(QMainWindow):
         col = self._table.horizontalHeader().sortIndicatorSection()
         order = self._table.horizontalHeader().sortIndicatorOrder()
         is_desc = (order == Qt.SortOrder.DescendingOrder)
-        if col == _COL_PLAYER_PP and is_desc:
-            return "pp_high"
-        if col == _COL_RL_AP and is_desc:
-            return "ap_high"
-        # ★ 降順やその他の列は star_asc として扱う
+        if col == _COL_PLAYER_PP:
+            return "pp_high" if is_desc else "pp_low"
+        if col == _COL_RL_AP:
+            return "ap_high" if is_desc else "ap_low"
+        if col == _COL_PLAYER_ACC:
+            return "acc_high" if is_desc else "acc_low"
+        if col == _COL_PLAYER_RANK:
+            return "rank_high" if is_desc else "rank_low"
+        if col == _COL_STARS:
+            return "star_desc" if is_desc else "star_asc"
         return "star_asc"
 
     def _make_export_tag(self) -> str:
@@ -1387,12 +1686,14 @@ class PlaylistWindow(QMainWindow):
 
         # ソート
         sort_mode = self._current_sort_mode()
-        if sort_mode == "pp_high":
-            parts.append("pp_desc")
-        elif sort_mode == "ap_high":
-            parts.append("ap_desc")
-        else:
-            parts.append("star_asc")
+        _sort_tags = {
+            "star_asc": "star_asc", "star_desc": "star_desc",
+            "pp_high": "pp_desc", "pp_low": "pp_asc",
+            "ap_high": "ap_desc", "ap_low": "ap_asc",
+            "acc_high": "acc_desc", "acc_low": "acc_asc",
+            "rank_low": "rank_asc", "rank_high": "rank_desc",
+        }
+        parts.append(_sort_tags.get(sort_mode, sort_mode))
 
         return "_".join(parts) if parts else "all"
 
@@ -1415,7 +1716,7 @@ class PlaylistWindow(QMainWindow):
         init_dir = str(Path(current).parent) if current and Path(current).exists() else self._export_dir
         path, _ = QFileDialog.getOpenFileName(
             self, "Open bplist file", init_dir,
-            "BeatSaber Playlist (*.bplist);;JSON (*.json);;All files (*)"
+            "Playlist files (*.bplist *.json);;BeatSaber Playlist (*.bplist);;JSON (*.json);;All files (*)"
         )
         if path:
             self._open_edit.setText(path)
@@ -1469,12 +1770,16 @@ class PlaylistWindow(QMainWindow):
         elif self._rb_open.isChecked():
             file_path_str = self._open_edit.text().strip()
             if not file_path_str:
-                QMessageBox.warning(self, "Open File", "Please specify a .bplist file.")
+                QMessageBox.warning(self, "Open File", "Please specify a .bplist or .json file.")
                 self._btn_load.setEnabled(True)
                 return
             p = Path(file_path_str)
             if not p.exists():
                 QMessageBox.warning(self, "Open File", f"File not found:\n{p}")
+                self._btn_load.setEnabled(True)
+                return
+            if p.suffix.lower() not in (".bplist", ".json"):
+                QMessageBox.warning(self, "Open File", "Unsupported file type. Please open a .bplist or .json file.")
                 self._btn_load.setEnabled(True)
                 return
             svc = self._svc_combo.currentData() or "none"
@@ -1566,6 +1871,17 @@ class PlaylistWindow(QMainWindow):
         if not entries:
             self._count_label.setText("0 maps")
             return
+        # AccSaber RL のときは ★ フィルタをリセット（★が意味を持たないため）
+        is_rl = self._rb_acc_rl.isChecked() or (
+            self._rb_open.isChecked() and self._svc_combo.currentData() == "accsaber_rl"
+        )
+        if is_rl:
+            self._star_min.blockSignals(True)
+            self._star_max.blockSignals(True)
+            self._star_min.setValue(0.0)
+            self._star_max.setValue(20.0)
+            self._star_min.blockSignals(False)
+            self._star_max.blockSignals(False)
         # open + AccSaber RL の場合はヘッダを Service に変更
         if self._rb_open.isChecked() and self._svc_combo.currentData() == "accsaber_rl":
             hdr_item = self._table.horizontalHeaderItem(_COL_ACC_CAT)
@@ -1672,23 +1988,14 @@ class PlaylistWindow(QMainWindow):
 
         src_tag = "ss" if self._rb_ss.isChecked() else "bl" if self._rb_bl.isChecked() else "rl"
         style_tag = ("cat" if acc_source else "split") if split else "single"
-        default_name = f"{src_tag}_{style_tag}"
+        name = f"{src_tag}_{style_tag}"
 
-        name, ok = QInputDialog.getText(
-            self, "Add to Batch",
-            "Playlist name / filename base:\n(検索条件として保存されます)",
-            text=default_name,
-        )
-        if not ok or not name.strip():
-            return
-
-        name = name.strip()
         split_mode = ("category" if acc_source else "star") if split else "single"
         sort_mode = self._current_sort_mode()
 
         cfg = _BatchConfig(
             label=name,
-            filename_base=name.replace(" ", "_"),
+            filename_base=name,
             source=src_tag,
             show_cleared=self._cb_sts_cleared.isChecked(),
             show_nf=self._cb_sts_nf.isChecked(),
@@ -1731,8 +2038,8 @@ class PlaylistWindow(QMainWindow):
                 filename_base=p.filename_base,
                 source=p.source,
                 show_cleared=not p.uncleared,
-                show_nf=not p.uncleared,
-                show_unplayed=not p.uncleared,
+                show_nf=True,
+                show_unplayed=True,
                 cat_true=cat_true,
                 cat_standard=cat_standard,
                 cat_tech=cat_tech,
@@ -1743,7 +2050,6 @@ class PlaylistWindow(QMainWindow):
 
         self._batch_save_configs()
         self._batch_refresh_queue()
-        QMessageBox.information(self, "Add Presets", f"{len(checked)} preset(s) added to queue.")
 
     def _on_export_progress(self, done: int, total: int, label: str) -> None:
         if self._batch_progress_dlg and not self._batch_progress_dlg.wasCanceled():
@@ -1757,6 +2063,7 @@ class PlaylistWindow(QMainWindow):
             self._batch_progress_dlg.close()
             self._batch_progress_dlg = None
         self._btn_batch_export_all.setEnabled(True)
+        self._btn_quick_export.setEnabled(True)
         saved: List[str] = result[0]
         errors: List[str] = result[1]
         lines = [f"{len(saved)} file(s) saved.", ""]
@@ -1772,7 +2079,72 @@ class PlaylistWindow(QMainWindow):
             self._batch_progress_dlg.close()
             self._batch_progress_dlg = None
         self._btn_batch_export_all.setEnabled(True)
+        self._btn_quick_export.setEnabled(True)
         QMessageBox.critical(self, "Export Error", msg)
+
+    def _quick_export_presets(self) -> None:
+        """チェックされたプリセットをキューに追加せず直接エクスポートする。"""
+        checked: List[_BatchPreset] = []
+        for i in range(self._preset_list_w.count()):
+            it = self._preset_list_w.item(i)
+            if it.checkState() == Qt.CheckState.Checked:
+                checked.append(it.data(Qt.ItemDataRole.UserRole))
+        if not checked:
+            QMessageBox.information(self, "Quick Export", "No presets checked.")
+            return
+
+        folder = QFileDialog.getExistingDirectory(self, "Select output folder", self._export_dir)
+        if not folder:
+            return
+        self._save_export_dir(folder)
+
+        configs: List[_BatchConfig] = []
+        for p in checked:
+            if p.source == "rl":
+                cat_true = p.rl_cat == "true"
+                cat_standard = p.rl_cat == "standard"
+                cat_tech = p.rl_cat == "tech"
+                split_mode = "single"
+            else:
+                cat_true = cat_standard = cat_tech = True
+                split_mode = "star" if p.split_by_star else "single"
+            configs.append(_BatchConfig(
+                label=p.label,
+                filename_base=p.filename_base,
+                source=p.source,
+                show_cleared=not p.uncleared,
+                show_nf=True,
+                show_unplayed=True,
+                cat_true=cat_true,
+                cat_standard=cat_standard,
+                cat_tech=cat_tech,
+                split_mode=split_mode,
+                sort_mode=p.sort_mode,
+            ))
+
+        folder_path = Path(folder)
+        steam_id = self._steam_id
+        sigs = self._export_sigs
+
+        dlg = QProgressDialog("Starting...", "Cancel", 0, len(configs), self)
+        dlg.setWindowTitle("Quick Export")
+        dlg.setMinimumWidth(420)
+        dlg.setWindowModality(Qt.WindowModality.ApplicationModal)
+        dlg.setAutoClose(False)
+        dlg.setAutoReset(False)
+        dlg.show()
+        self._batch_progress_dlg = dlg
+        self._btn_quick_export.setEnabled(False)
+
+        def _task() -> None:
+            try:
+                covers = _pregenerate_covers(configs)
+                _run_export_configs(sigs, steam_id, configs, folder_path, covers)
+            except Exception as exc:
+                sigs.error.emit(str(exc))
+
+        dlg.canceled.connect(lambda: self._btn_quick_export.setEnabled(True))
+        threading.Thread(target=_task, daemon=True).start()
 
     def _batch_export_all(self) -> None:
         """バッチ設定リストの最新データをロードして一括エクスポートする（非同期）。"""
@@ -1801,7 +2173,11 @@ class PlaylistWindow(QMainWindow):
         self._btn_batch_export_all.setEnabled(False)
 
         def _task() -> None:
-            _run_export_configs(sigs, steam_id, configs, folder_path)
+            try:
+                covers = _pregenerate_covers(configs)
+                _run_export_configs(sigs, steam_id, configs, folder_path, covers)
+            except Exception as exc:
+                sigs.error.emit(str(exc))
 
         dlg.canceled.connect(lambda: self._btn_batch_export_all.setEnabled(True))
         threading.Thread(target=_task, daemon=True).start()
@@ -1886,9 +2262,9 @@ class PlaylistWindow(QMainWindow):
             # 曲名
             table.setItem(row, _COL_SONG, QTableWidgetItem(e.song_name))
             # 難易度
-            table.setItem(row, _COL_DIFF, QTableWidgetItem(e.difficulty))
+            table.setItem(row, _COL_DIFF, _diff_item(e.difficulty))
             # モード
-            table.setItem(row, _COL_MODE, QTableWidgetItem(e.mode))
+            table.setItem(row, _COL_MODE, _mode_item(e.mode))
             # ★ (数値ソート)
             star_item = _NumItem(f"{e.stars:.2f}", e.stars)
             star_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
@@ -1976,7 +2352,9 @@ class PlaylistWindow(QMainWindow):
             return
 
         title = f"Maps ({tag})"
-        saved = _save_bplist(self, title, sorted_entries, self._export_dir)
+        _sort_dir = _sort_dir_from_mode(self._current_sort_mode())
+        image = _make_playlist_cover("default", "", _sort_dir)
+        saved = _save_bplist(self, title, sorted_entries, self._export_dir, image)
         if saved:
             self._save_export_dir(str(Path(saved).parent))
 
@@ -2013,6 +2391,7 @@ class PlaylistWindow(QMainWindow):
         groups = self._group_by_star(entries)
         saved_files: List[str] = []
         errors: List[str] = []
+        _sort_dir = _sort_dir_from_mode(self._current_sort_mode())
 
         for star_int in sorted(groups.keys()):
             group_entries = sorted(
@@ -2022,7 +2401,8 @@ class PlaylistWindow(QMainWindow):
             title = title_template.format(star=star_int)
             filename = f"{star_int:02d}star_{filename_suffix}.bplist"
             out_path = Path(folder) / filename
-            bplist = _make_bplist(title, group_entries)
+            image = _make_playlist_cover("star", str(star_int), _sort_dir)
+            bplist = _make_bplist(title, group_entries, image)
             try:
                 out_path.write_text(
                     json.dumps(bplist, ensure_ascii=False, indent=2),
@@ -2064,12 +2444,14 @@ class PlaylistWindow(QMainWindow):
 
         saved_files: List[str] = []
         errors: List[str] = []
+        _sort_dir = _sort_dir_from_mode(self._current_sort_mode())
 
         for cat in sorted(groups.keys()):
             try:
                 cat_entries = sorted(groups[cat], key=lambda e: (e.stars, e.song_name))
                 fname = folder_path / f"{cat}_{tag}.bplist"
-                bplist = _make_bplist(f"{cat.capitalize()} ({tag})", cat_entries)
+                image = _make_playlist_cover(cat, "", _sort_dir)
+                bplist = _make_bplist(f"{cat.capitalize()} ({tag})", cat_entries, image)
                 fname.write_text(
                     json.dumps(bplist, ensure_ascii=False, indent=2), encoding="utf-8"
                 )
