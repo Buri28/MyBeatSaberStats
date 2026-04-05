@@ -1258,6 +1258,67 @@ def _config_export_tag(cfg: "_BatchConfig") -> str:
     return "_".join(parts)
 
 
+_SORT_SYMBOL: Dict[str, str] = {
+    "star_asc":  "★↑",
+    "star_desc": "★↓",
+    "pp_high":   "PP↓",
+    "pp_low":    "PP↑",
+    "ap_high":   "AP↓",
+    "ap_low":    "AP↑",
+    "acc_high":  "Acc↓",
+    "acc_low":   "Acc↑",
+    "rank_low":  "Rank↑",
+    "rank_high": "Rank↓",
+}
+_CAT_LABEL: Dict[str, str] = {
+    "true": "True", "standard": "Standard", "tech": "Tech",
+}
+_SRC_LABEL: Dict[str, str] = {
+    "ss": "SS", "bl": "BL", "rl": "RL", "acc": "Acc",
+}
+
+
+def _playlist_title(
+    cfg: "_BatchConfig",
+    star_group: Optional[int] = None,
+    category: Optional[str] = None,
+) -> str:
+    """プレイリストタイトルを生成する。
+    形式: {サービス}★{番号} / {サービス} {カテゴリ}  +  {フィルター(あれば)}  +  {ソート記号}
+    """
+    src = _SRC_LABEL.get(cfg.source, cfg.source.upper())
+    sort_sym = _SORT_SYMBOL.get(cfg.sort_mode, cfg.sort_mode)
+
+    # --- カテゴリ / ★ 部分 ---
+    if star_group is not None:
+        head = f"{src}★{star_group}"
+    elif category is not None:
+        head = f"{src} {_CAT_LABEL.get(category, category.capitalize())}"
+    else:  # single
+        if cfg.source in ("rl", "acc"):
+            rl_cats = [c for c, f in [("true", cfg.cat_true), ("standard", cfg.cat_standard), ("tech", cfg.cat_tech)] if f]
+            if len(rl_cats) == 1:
+                head = f"{src} {_CAT_LABEL.get(rl_cats[0], rl_cats[0].capitalize())}"
+            else:
+                head = src
+        else:
+            head = src
+
+    # --- フィルター部分（全ステータスが有効な場合は省略）---
+    filter_parts: List[str] = []
+    if not (cfg.show_cleared and cfg.show_nf and cfg.show_unplayed):
+        if cfg.show_nf:
+            filter_parts.append("NF")
+        if cfg.show_unplayed:
+            filter_parts.append("Unplayed")
+        if cfg.show_cleared:
+            filter_parts.append("Cleared")
+    filter_str = "+".join(filter_parts)
+
+    parts = [p for p in [head, filter_str, sort_sym] if p]
+    return " ".join(parts)
+
+
 def _write_config_files(
     maps: List[MapEntry],
     cfg: "_BatchConfig",
@@ -1281,7 +1342,7 @@ def _write_config_files(
         for si in sorted(groups.keys()):
             fname = f"{fbase}_{si:02d}star.bplist"
             _img = covers.get(f"star:{si}:{_sort_dir}:{cfg.source}", "")
-            bplist = _make_bplist(f"{si}★ {cfg.label}", groups[si], _img)
+            bplist = _make_bplist(_playlist_title(cfg, star_group=si), groups[si], _img)
             (folder_path / fname).write_text(
                 json.dumps(bplist, ensure_ascii=False, indent=2), encoding="utf-8"
             )
@@ -1295,7 +1356,7 @@ def _write_config_files(
         for cat in sorted(cat_groups.keys()):
             fname = f"{fbase}_{cat.capitalize()}.bplist"
             _img = covers.get(f"cat:{cat}:{_sort_dir}:{cfg.source}", "")
-            bplist = _make_bplist(f"{cat.capitalize()} — {cfg.label}", cat_groups[cat], _img)
+            bplist = _make_bplist(_playlist_title(cfg, category=cat), cat_groups[cat], _img)
             (folder_path / fname).write_text(
                 json.dumps(bplist, ensure_ascii=False, indent=2), encoding="utf-8"
             )
@@ -1309,7 +1370,7 @@ def _write_config_files(
             _img = covers.get(f"acc_single:{cfg.source}:{_rl_ct}:{_sort_dir}", "")
         else:
             _img = covers.get(f"default:{_sort_dir}:{cfg.source}", "")
-        bplist = _make_bplist(cfg.label, maps, _img)
+        bplist = _make_bplist(_playlist_title(cfg), maps, _img)
         (folder_path / fname).write_text(
             json.dumps(bplist, ensure_ascii=False, indent=2), encoding="utf-8"
         )
