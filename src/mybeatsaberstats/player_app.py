@@ -59,7 +59,10 @@ from .collector.collector import (
     _read_cache_fetched_at,
 )
 from mybeatsaberstats.collector.map_store import MapStore
-from .playlist_view import PlaylistWindow
+from .playlist_view import PlaylistWindow, _make_playlist_cover as _make_cover, \
+    load_accsaber_reloaded_maps as _rl_load_maps_with_scores, \
+    _apply_config_filter as _rl_apply_filter, _BatchConfig as _RLBatchConfig, \
+    _make_bplist as _rl_make_bplist
 
 
 def _format_bplist(bplist: dict) -> str:
@@ -1432,8 +1435,7 @@ class PlayerWindow(QMainWindow):
         QTimer.singleShot(0, _restore_splitters)
 
     def _on_export_rl_unplayed(self) -> None:
-        """BeatLeader/ScoreSaber スコアを参照し、未プレイの AccSaber Reloaded 譜面を bplist ファイルに出力する。"""
-        import requests as _requests
+        """playlist_view の AccSaber Reloaded ローダーを使い、未クリア譜面を bplist に出力する。"""
         from PySide6.QtWidgets import QFileDialog
 
         steam_id = self._current_player_id()
@@ -1441,100 +1443,9 @@ class PlayerWindow(QMainWindow):
             QMessageBox.warning(self, "AccSaber Reloaded", "No player selected.")
             return
 
-        ss_id, bl_id = _get_player_ids_from_index(steam_id)
+        _, bl_id = _get_player_ids_from_index(steam_id)
 
-        # AccSaber Reloaded で無効なモディファイア（これらを含むスコアはプレイ済みと見なさない）
-        # 出典: PlatformScoreMapper.java BANNED_MODIFIER_CODES
-        # NO=No Obstacles, NB=No Bombs, SS=Slower Song, SC=Super Cut, SN=Small Notes
-        _rl_invalid_mods = frozenset({"NO", "NB", "SS", "SC", "SN"})
-
-        # BeatLeader スコアキャッシュから played_set / played_bl_ids を収集
-        played_set: set = set()
-        played_bl_ids: set = set()
-        bl_scores_path = BASE_DIR / "cache" / f"beatleader_player_scores_{bl_id}.json"
-        if bl_scores_path.exists():
-            try:
-                bl_data = json.loads(bl_scores_path.read_text(encoding="utf-8"))
-                for score_val in (bl_data.get("scores") or {}).values():
-                    mods = str((score_val.get("score") or {}).get("modifiers") or "")
-                    if mods and frozenset(t.strip().upper() for t in mods.split(",")) & _rl_invalid_mods:
-                        continue
-                    lb = score_val.get("leaderboard") or {}
-                    lb_id_val = lb.get("id")
-                    if lb_id_val:
-                        played_bl_ids.add(str(lb_id_val))
-                    song_hash = (lb.get("song") or {}).get("hash", "").lower()
-                    diff_obj = lb.get("difficulty") or {}
-                    mode = diff_obj.get("modeName", "Standard")
-                    diff_name = diff_obj.get("difficultyName", "")
-                    if song_hash and diff_name:
-                        played_set.add((song_hash, mode, diff_name))
-            except Exception:  # noqa: BLE001
-                pass
-
-        # ScoreSaber スコアキャッシュから played_set / played_ss_ids を収集
-        _ss_diff_map = {1: "Easy", 3: "Normal", 5: "Hard", 7: "Expert", 9: "ExpertPlus"}
-        _ss_mode_to_char = {
-            "SoloStandard": "Standard", "SoloOneSaber": "OneSaber",
-            "SoloNoArrows": "NoArrows", "SoloLightShow": "Lightshow",
-            "Solo360Degree": "360Degree", "Solo90Degree": "90Degree",
-        }
-        played_ss_ids: set = set()
-        ss_scores_path = BASE_DIR / "cache" / f"scoresaber_player_scores_{ss_id}.json"
-        if ss_scores_path.exists():
-            try:
-                ss_data = json.loads(ss_scores_path.read_text(encoding="utf-8"))
-                for score_val in (ss_data.get("scores") or {}).values():
-                    mods = str((score_val.get("score") or {}).get("modifiers") or "")
-                    if mods and frozenset(t.strip().upper() for t in mods.split(",")) & _rl_invalid_mods:
-                        continue
-                    lb = score_val.get("leaderboard") or {}
-                    ss_lb_id = lb.get("id")
-                    if ss_lb_id:
-                        played_ss_ids.add(str(ss_lb_id))
-                    song_hash = lb.get("songHash", "").lower()
-                    diff_obj = lb.get("difficulty") or {}
-                    diff_num = diff_obj.get("difficulty")
-                    game_mode = diff_obj.get("gameMode", "SoloStandard")
-                    diff_name = _ss_diff_map.get(int(diff_num)) if diff_num is not None else None
-                    char = _ss_mode_to_char.get(game_mode, game_mode.replace("Solo", ""))
-                    if song_hash and diff_name:
-                        played_set.add((song_hash, char, diff_name))
-            except Exception:  # noqa: BLE001
-                pass
-
-        # API から全マップを取得
-        cancelled = {"value": False}
-        progress = QProgressDialog("Fetching AccSaber Reloaded map list...", "Cancel", 0, 100, self)
-        progress.setWindowTitle("AccSaber Reloaded Unplayed")
-        progress.setWindowModality(Qt.WindowModality.WindowModal)
-        progress.canceled.connect(lambda: cancelled.__setitem__("value", True))
-        progress.show()
-
-        try:
-            session = _requests.Session()
-
-            def _on_page(current: int, total: int) -> None:
-                if cancelled["value"]:
-                    raise RuntimeError("CANCELLED")
-                progress.setLabelText(
-                    f"Fetching AccSaber Reloaded map list... ({current}/{total} pages)"
-                )
-                progress.setValue(int(current / max(total, 1) * 100))
-                QApplication.processEvents()
-
-            all_maps = _rl_fetch_all_maps(session=session, on_progress=_on_page)
-        except RuntimeError:
-            progress.close()
-            return
-        except Exception as exc:  # noqa: BLE001
-            progress.close()
-            QMessageBox.warning(self, "AccSaber Reloaded", f"Failed to fetch map list:\n{exc}")
-            return
-        finally:
-            progress.close()
-
-        # 保存先フォルダを選択（前回の保存先を初期表示）
+        # 保存先フォルダを選択
         _last_dir = self._load_last_rl_unplayed_dir()
         _initial_dir = Path(_last_dir) if _last_dir else Path.home()
         if not _initial_dir.exists() or not _initial_dir.is_dir():
@@ -1544,14 +1455,11 @@ class PlayerWindow(QMainWindow):
         )
         if not save_dir:
             return
-
         self._save_last_rl_unplayed_dir(save_dir)
-
         save_dir_path = Path(save_dir)
 
-        # 保存処理中の体感フリーズを避けるため進捗を表示する
         save_cancelled = {"value": False}
-        save_progress = QProgressDialog("Preparing unplayed map export...", "Cancel", 0, 8, self)
+        save_progress = QProgressDialog("Loading AccSaber Reloaded maps...", "Cancel", 0, 5, self)
         save_progress.setWindowTitle("AccSaber Reloaded Unplayed")
         save_progress.setWindowModality(Qt.WindowModality.WindowModal)
         save_progress.canceled.connect(lambda: save_cancelled.__setitem__("value", True))
@@ -1562,80 +1470,49 @@ class PlayerWindow(QMainWindow):
             save_progress.setValue(step)
             QApplication.processEvents()
 
-        _set_save_step(0, "Preparing unplayed map export...")
         saved_files: list[str] = []
-        hint_lines: list[str] = []
 
         try:
-            # AccSaber RL の総難易度数 (all_maps から集計) と rankedPlays を比較するための準備
-            _rl_cat_uuid_to_name = {v: k for k, v in _RL_CATEGORY_IDS.items() if k in ("true", "standard", "tech")}
-            total_rl_diffs_per_cat: Dict[str, int] = {"true": 0, "standard": 0, "tech": 0}
-            for _song in all_maps:
+            _set_save_step(0, "Loading AccSaber Reloaded maps with player scores...")
+
+            def _on_prog(d: int, t: int, label: str) -> None:
+                if save_cancelled["value"]:
+                    raise RuntimeError("CANCELLED")
+                _set_save_step(0, label)
+
+            sid = bl_id or steam_id
+            rl_entries = _rl_load_maps_with_scores(sid, "all", on_progress=_on_prog)
+
+            for idx, cat in enumerate(("true", "standard", "tech"), start=1):
                 if save_cancelled["value"]:
                     return
-                for _diff in _song.get("difficulties", []):
-                    if not _diff.get("active", False):
-                        continue
-                    _cat = _rl_cat_uuid_to_name.get(_diff.get("categoryId", ""))
-                    if _cat:
-                        total_rl_diffs_per_cat[_cat] += 1
-            _set_save_step(1, "Fetching AccSaber Reloaded player scores...")
-
-            # RL スコア API からプレイ済み難易度 UUID を取得（BL/SS キャッシュより高精度）
-            try:
-                rl_scored_diff_ids = _rl_fetch_scored_diff_ids(bl_id or "", session)
-            except Exception:  # noqa: BLE001
-                rl_scored_diff_ids = {}
-
-            _set_save_step(2, "Collecting ranked plays info...")
-
-            # AccSaber RL のプレイヤー rankedPlays を取得（国別フィルターで高速化）
-            country = self._ss_country_by_id.get(ss_id or "")
-            try:
-                rl_player_cats = _rl_fetch_player(bl_id or "", country, session)
-            except Exception:  # noqa: BLE001
-                rl_player_cats = {}
-
-            bplist_by_cat: Dict[str, list] = {}
-            ndiffs_by_cat: Dict[str, int] = {}
-            for idx, cat in enumerate(("true", "standard", "tech"), start=3):
-                if save_cancelled["value"]:
-                    return
-                _set_save_step(idx, f"Building {cat} unplayed list...")
-                _rl_ids = rl_scored_diff_ids.get(cat) if rl_scored_diff_ids else None
-                bplist = _rl_build_unplayed_bplist(all_maps, played_set, cat, played_bl_ids, played_ss_ids, _rl_ids)
-                songs = bplist.get("songs", [])
-                bplist_by_cat[cat] = songs
-                n_diffs = sum(len(s.get("difficulties", [])) for s in songs)
-                ndiffs_by_cat[cat] = n_diffs
-                if not songs:
-                    continue
+                _set_save_step(idx, f"Building {cat.capitalize()} unplayed list...")
+                cfg = _RLBatchConfig(
+                    label=f"AccSaber RL Unplayed - {cat.capitalize()}",
+                    filename_base="",
+                    source="rl",
+                    show_cleared=False,
+                    show_nf=True,
+                    show_unplayed=True,
+                    cat_true=(cat == "true"),
+                    cat_standard=(cat == "standard"),
+                    cat_tech=(cat == "tech"),
+                    star_min=0.0, star_max=20.0,
+                    split_mode="single",
+                    sort_mode="star_asc",
+                )
+                filtered = _rl_apply_filter(list(rl_entries), cfg)
+                image = _make_cover(cat, "", "asc", "rl")
+                bplist = _rl_make_bplist(f"AccSaber Reloaded Unplayed - {cat.capitalize()}", filtered, image)
                 filename = f"accsaber_reloaded_unplayed_{cat}.bplist"
                 out_path = save_dir_path / filename
-                _set_save_step(idx, f"Saving {filename}...")
                 out_path.write_text(_format_bplist(bplist), encoding="utf-8")
-                saved_files.append(f"{filename}  ({n_diffs} difficulties in {len(songs)} songs)")
-            _set_save_step(7, "Finalizing...")
+                n_maps = len(filtered)
+                saved_files.append(f"{filename}  ({n_maps} maps)")
 
-            # rankedPlays 比較ノートを作成（AccSaber RL の diff 数と bplist の diff 数を比較）
-            for cat in ("true", "standard", "tech"):
-                cat_entry = rl_player_cats.get(cat)
-                if cat_entry is None:
-                    continue
-                ranked_plays = cat_entry.ranked_plays
-                total = total_rl_diffs_per_cat.get(cat, 0)
-                if total <= 0:
-                    continue
-                expected_unplayed = total - ranked_plays
-                actual_unplayed_diffs = ndiffs_by_cat.get(cat, 0)
-                label = cat.capitalize()
-                if expected_unplayed != actual_unplayed_diffs:
-                    hint_lines.append(
-                        f"  [{label}] AccSaber RL: {ranked_plays}/{total} played "
-                        f"→ expected {expected_unplayed} unplayed diffs, got {actual_unplayed_diffs}"
-                    )
-
-            _set_save_step(7, "Done")
+            _set_save_step(4, "Done")
+        except RuntimeError:
+            return
         except Exception as exc:  # noqa: BLE001
             QMessageBox.warning(self, "AccSaber Reloaded Unplayed", f"Failed to save unplayed maps:\n{exc}")
             return
@@ -1643,15 +1520,12 @@ class PlayerWindow(QMainWindow):
             save_progress.close()
 
         if saved_files:
-            msg = "Saved the following files:\n" + "\n".join(saved_files)
-            if hint_lines:
-                msg += "\n\nNote (AccSaber RL sync may be pending):\n" + "\n".join(hint_lines)
-            QMessageBox.information(self, "AccSaber Reloaded Unplayed", msg)
-        else:
             QMessageBox.information(
                 self, "AccSaber Reloaded Unplayed",
-                "No unplayed maps found.",
+                "Saved the following files:\n" + "\n".join(saved_files),
             )
+        else:
+            QMessageBox.information(self, "AccSaber Reloaded Unplayed", "No unplayed maps found.")
 
     def _take_snapshot_for_current_player(self) -> bool:
         """Snapshot 取得時に任意の SteamID と取得オプションを選択できるダイアログを表示する。
