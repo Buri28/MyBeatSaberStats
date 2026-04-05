@@ -399,6 +399,9 @@ def load_bplist_maps(
     elif service == "accsaber_rl":
         ranked = load_accsaber_reloaded_maps(steam_id, "all", on_progress=on_progress)
         idx = _build_ss_hash_index(ranked)
+    elif service == "accsaber":
+        ranked = load_accsaber_maps(steam_id, "all", on_progress=on_progress)
+        idx = _build_ss_hash_index(ranked)
     else:
         idx = {}
         ranked = []
@@ -1508,6 +1511,7 @@ class PlaylistWindow(QMainWindow):
         self._svc_combo.addItem("None", userData="none")
         self._svc_combo.addItem("ScoreSaber", userData="scoresaber")
         self._svc_combo.addItem("BeatLeader", userData="beatleader")
+        self._svc_combo.addItem("AccSaber", userData="accsaber")
         self._svc_combo.addItem("AccSaber RL", userData="accsaber_rl")
         self._svc_combo.setEnabled(False)
         self._svc_combo.currentIndexChanged.connect(self._on_svc_combo_changed)
@@ -2046,6 +2050,22 @@ class PlaylistWindow(QMainWindow):
         if path:
             self._open_edit.setText(path)
             self._save_export_dir(str(Path(path).parent))
+            # ファイル名の先頭でサービスを自動選択
+            stem = Path(path).stem.lower()
+            if stem.startswith("ss"):
+                svc = "scoresaber"
+            elif stem.startswith("bl"):
+                svc = "beatleader"
+            elif stem.startswith("rl") or stem.startswith("accsaber_reloaded"):
+                svc = "accsaber_rl"
+            elif stem.startswith("accsaber") or stem.startswith("as_"):
+                svc = "accsaber"
+            else:
+                svc = None
+            if svc is not None:
+                idx = self._svc_combo.findData(svc)
+                if idx >= 0:
+                    self._svc_combo.setCurrentIndex(idx)
 
     # ──────────────────────────────────────────────────────────────────────────
     # データ読み込み
