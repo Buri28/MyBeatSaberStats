@@ -1142,10 +1142,10 @@ class _BatchConfig:
 
 
 _BATCH_PRESETS: List[_BatchPreset] = [
-    _BatchPreset("SS — Uncleared All",                   "ss", "", True,  "star_asc", "All", False),
+    _BatchPreset("SS — Uncleared All",                   "ss", "", True,  "star_asc", "", False),
     _BatchPreset("SS — Uncleared per ★",                 "ss", "", True,  "star_asc", "",    True),
     _BatchPreset("SS — High PP per ★",                   "ss", "", False, "pp_high",  "",    True),
-    _BatchPreset("BL — Uncleared All",                   "bl", "", True,  "star_asc", "All", False),
+    _BatchPreset("BL — Uncleared All",                   "bl", "", True,  "star_asc", "", False),
     _BatchPreset("BL — Uncleared per ★",                 "bl", "", True,  "star_asc", "",    True),
     _BatchPreset("BL — High PP per ★",                   "bl", "", False, "pp_high",  "",    True),
     _BatchPreset("AccSaber RL — Uncleared per Category", "rl", "", True,  "star_asc", "",    True),
@@ -1266,7 +1266,9 @@ def _write_config_files(
     """_BatchConfig の split_mode に従ってファイルを書き出す。"""
     tag = _config_export_tag(cfg)
     src_pfx = _BATCH_SRC_PREFIX.get(cfg.source, cfg.source.upper())
-    fbase = "_".join(p for p in [src_pfx, cfg.filename_base, tag] if p)
+    _legacy = {"All", "single", "split", "cat"}
+    fname_base = "" if cfg.filename_base in _legacy else cfg.filename_base
+    fbase = "_".join(p for p in [src_pfx, fname_base, tag] if p)
     if cfg.split_mode == "star":
         groups: Dict[int, List[MapEntry]] = {}
         for e in maps:
@@ -1639,6 +1641,9 @@ class PlaylistWindow(QMainWindow):
         export_row.addStretch()
 
         self._btn_export = QPushButton("📤 Export")
+        self._btn_export.setStyleSheet(
+            "QPushButton { font-weight: bold; padding: 2px 8px; }"
+        )
         self._btn_export.setToolTip(
             "Content と Style の条件に従って bplist を出力します。\n"
             "フィルタ中の範囲が対象です。\n"
@@ -1698,9 +1703,21 @@ class PlaylistWindow(QMainWindow):
         _right_w = QWidget()
         _right_w.setMinimumWidth(180)
         _rl = QVBoxLayout(_right_w)
-        _rl.setSpacing(6)
+        _rl.setSpacing(4)
         _rl.setContentsMargins(4, 4, 4, 4)
         self.__cols.addWidget(_right_w)
+
+        # 右パネル内を縦スプリッタで分割 (上: Batch Queue / 下: Quick Presets)
+        _right_splitter = QSplitter(Qt.Orientation.Vertical)
+        _right_splitter.setChildrenCollapsible(False)
+        _rl.addWidget(_right_splitter)
+
+        # ── 上ペイン: Batch Export ──
+        _top_pane = QWidget()
+        _top_layout = QVBoxLayout(_top_pane)
+        _top_layout.setSpacing(6)
+        _top_layout.setContentsMargins(0, 0, 0, 0)
+        _right_splitter.addWidget(_top_pane)
 
         _batch_title_row = QHBoxLayout()
         _batch_title = QLabel("Batch Export")
@@ -1711,13 +1728,13 @@ class PlaylistWindow(QMainWindow):
         self._btn_preview_cover.setToolTip("出力フォルダを選んで .bplist のカバー画像を一覧表示します")
         self._btn_preview_cover.clicked.connect(self._show_cover_preview)
         _batch_title_row.addWidget(self._btn_preview_cover)
-        _rl.addLayout(_batch_title_row)
+        _top_layout.addLayout(_batch_title_row)
 
         self._batch_queue_list = QListWidget()
         self._batch_queue_list.setAlternatingRowColors(True)
         self._batch_queue_list.setWordWrap(True)
         self._batch_queue_list.setToolTip("一括出力待ちのプレイリスト一覧")
-        _rl.addWidget(self._batch_queue_list, 1)
+        _top_layout.addWidget(self._batch_queue_list, 1)
 
         _queue_btn_row = QHBoxLayout()
         self._batch_count_label = QLabel("0 items")
@@ -1731,9 +1748,28 @@ class PlaylistWindow(QMainWindow):
         _btn_bq_clear.setFixedWidth(46)
         _btn_bq_clear.clicked.connect(self._batch_clear)
         _queue_btn_row.addWidget(_btn_bq_clear)
-        _rl.addLayout(_queue_btn_row)
+        _top_layout.addLayout(_queue_btn_row)
 
-        _rl.addWidget(QLabel("Quick Presets:"))
+        _export_all_btn_row = QHBoxLayout()
+        self._btn_batch_export_all = QPushButton("📤 Export All")
+        self._btn_batch_export_all.clicked.connect(self._batch_export_all)
+        self._btn_batch_export_all.setFixedHeight(26)
+        self._btn_batch_export_all.setStyleSheet(
+            "QPushButton { background-color: #1a6b3a; color: white; font-weight: bold; font-size: 12px; border-radius: 4px; }"
+            "QPushButton:hover { background-color: #1e8046; }"
+            "QPushButton:disabled { background-color: #444; color: #888; }"
+        )
+        _export_all_btn_row.addWidget(self._btn_batch_export_all)
+        _top_layout.addLayout(_export_all_btn_row)
+
+        # ── 下ペイン: Quick Presets ──
+        _bot_pane = QWidget()
+        _bot_layout = QVBoxLayout(_bot_pane)
+        _bot_layout.setSpacing(6)
+        _bot_layout.setContentsMargins(0, 0, 0, 0)
+        _right_splitter.addWidget(_bot_pane)
+
+        _bot_layout.addWidget(QLabel("Quick Presets:"))
 
         self._preset_list_w = _PresetListWidget()
         self._preset_list_w.setAlternatingRowColors(True)
@@ -1743,7 +1779,7 @@ class PlaylistWindow(QMainWindow):
             _pi.setCheckState(Qt.CheckState.Unchecked)
             _pi.setData(Qt.ItemDataRole.UserRole, _p)
             self._preset_list_w.addItem(_pi)
-        _rl.addWidget(self._preset_list_w)
+        _bot_layout.addWidget(self._preset_list_w, 1)
 
         _preset_btn_row = QHBoxLayout()
         _btn_pa = QPushButton("All")
@@ -1764,14 +1800,18 @@ class PlaylistWindow(QMainWindow):
         self._btn_add_presets = QPushButton("➕ Add")
         self._btn_add_presets.clicked.connect(self._batch_add_presets)
         _preset_btn_row.addWidget(self._btn_add_presets)
+        _bot_layout.addLayout(_preset_btn_row)
         self._btn_quick_export = QPushButton("📤 Quick Export")
         self._btn_quick_export.clicked.connect(self._quick_export_presets)
-        _preset_btn_row.addWidget(self._btn_quick_export)
-        _rl.addLayout(_preset_btn_row)
+        self._btn_quick_export.setFixedHeight(26)
+        self._btn_quick_export.setStyleSheet(
+            "QPushButton { background-color: #1a4a6b; color: white; font-weight: bold; font-size: 12px; border-radius: 4px; }"
+            "QPushButton:hover { background-color: #1e5a80; }"
+            "QPushButton:disabled { background-color: #444; color: #888; }"
+        )
+        _bot_layout.addWidget(self._btn_quick_export)
 
-        self._btn_batch_export_all = QPushButton("📤 Export All")
-        self._btn_batch_export_all.clicked.connect(self._batch_export_all)
-        _rl.addWidget(self._btn_batch_export_all)
+        _right_splitter.setSizes([300, 200])
 
         # ── バッチ状態 ──
         self._export_dir: str = self._load_export_dir()
@@ -2291,9 +2331,9 @@ class PlaylistWindow(QMainWindow):
         else:
             src_tag = "rl"
         src_label = _BATCH_SRC_PREFIX.get(src_tag, src_tag.upper())
-        display_style = ("cat" if is_acc_any else "split") if split else "All"
-        filename_base = "" if split else "All"
-        name = f"{src_label}_{display_style}"
+        display_style = ("cat" if is_acc_any else "split") if split else ""
+        filename_base = ""
+        name = "_".join(p for p in [src_label, display_style] if p)
 
         split_mode = ("category" if is_acc_any else "star") if split else "single"
         sort_mode = self._current_sort_mode()
