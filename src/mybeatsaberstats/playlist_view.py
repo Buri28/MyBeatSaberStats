@@ -2154,6 +2154,8 @@ class PlaylistWindow(QMainWindow):
             hdr_item = self._table.horizontalHeaderItem(_COL_ACC_CAT)
             if hdr_item is not None:
                 hdr_item.setText("Service")
+            # プレイリストの曲順で表示するためソートをリセット
+            self._table.horizontalHeader().setSortIndicator(-1, Qt.SortOrder.AscendingOrder)
             self._apply_filter()
 
     def _start_async_load(self, worker_fn) -> None:
@@ -2245,6 +2247,9 @@ class PlaylistWindow(QMainWindow):
             hdr_item = self._table.horizontalHeaderItem(_COL_ACC_CAT)
             if hdr_item is not None:
                 hdr_item.setText("Service")
+        # Open モード: プレイリストの曲順で表示するためソートをリセット
+        if self._rb_open.isChecked():
+            self._table.horizontalHeader().setSortIndicator(-1, Qt.SortOrder.AscendingOrder)
         self._apply_filter()
 
     def _on_load_error(self, msg: str) -> None:
@@ -2322,6 +2327,16 @@ class PlaylistWindow(QMainWindow):
         self._batch_refresh_queue()
 
     def _batch_clear(self) -> None:
+        if not self._batch_configs:
+            return
+        ans = QMessageBox.question(
+            self, "Clear Queue",
+            f"Clear all {len(self._batch_configs)} items from the queue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if ans != QMessageBox.StandardButton.Yes:
+            return
         self._batch_configs.clear()
         self._batch_save_configs()
         self._batch_refresh_queue()
