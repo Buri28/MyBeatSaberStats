@@ -18,13 +18,15 @@ from typing import Callable, Dict, List, Optional, Tuple
 import requests
 
 from PySide6.QtCore import Qt, QObject, Signal
-from PySide6.QtGui import QColor, QImage, QPainter, QFont
+from PySide6.QtGui import QColor, QImage, QPainter, QFont, QPixmap
+from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
     QDialog,
     QDoubleSpinBox,
     QFileDialog,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
@@ -37,6 +39,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QRadioButton,
     QButtonGroup,
+    QScrollArea,
     QSizePolicy,
     QSpinBox,
     QSplitter,
@@ -64,6 +67,7 @@ SOURCE_OPEN = "Open File"
 # ステータス表示
 STATUS_CLEARED = "✔"
 STATUS_NF = "⚠NF"
+STATUS_WARN = "⚠"    # NF 以外のモディファイアによる未公認クリア
 STATUS_UNPLAYED = "✖"
 
 # 難易度の表示順
@@ -99,13 +103,19 @@ class MapEntry:
     source: str             # "scoresaber" | "beatleader" | "open"
     acc_category: str = ""  # AccSaber / AccSaber Reloaded のカテゴリ (true/standard/tech)
     acc_rl_ap: float = 0.0  # AccSaber Reloaded AP (0 = 未取得 / 未プレイ)
+    acc_complexity: float = 0.0  # AccSaber / AccSaber Reloaded の Complexity
+    player_mods: str = ""   # 実際に使用したモディファイア文字列 (例: "NF", "SC", "NF,SC")
 
     @property
     def status_str(self) -> str:
         if self.cleared:
             return STATUS_CLEARED
         if self.nf_clear:
-            return STATUS_NF
+            mods_upper = self.player_mods.upper()
+            if not self.player_mods or "NF" in mods_upper:
+                return STATUS_NF
+            # SC 等の NF 以外のモディファイアで無効化されている場合
+            return f"{STATUS_WARN}{self.player_mods}"
         return STATUS_UNPLAYED
 
     @property
@@ -147,44 +157,51 @@ def _mode_from_gamemode(game_mode: str) -> str:
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _ss_player_score_info(scores: Dict, lb_id: str, max_score_from_map: int = 0
-                          ) -> Tuple[float, bool, bool, float, int]:
-    """SS player scores から (player_pp, cleared, nf_clear, acc, rank) を返す。"""
+                          ) -> Tuple[float, bool, bool, float, int, str]:
+    """SS player scores から (player_pp, cleared, nf_clear, acc, rank, mods) を返す。"""
     entry = scores.get(str(lb_id))
     if not entry:
-        return 0.0, False, False, 0.0, 0
+        return 0.0, False, False, 0.0, 0, ""
     sc = entry.get("score", {})
     player_pp = float(sc.get("pp") or 0)
     base_score = int(sc.get("baseScore") or 0)
     modifiers = (sc.get("modifiers") or "").upper()
+    # SS modifiers は "NFSC" のように連結されているので 2 文字ずつカンマ区切りに正規化
+    mods_str = ",".join(modifiers[i:i+2] for i in range(0, len(modifiers), 2)) if modifiers else ""
     rank = int(sc.get("rank") or 0)
     # 精度算出 (max_score が 0 の場合は 0%)
     acc = (base_score / max_score_from_map * 100.0) if max_score_from_map > 0 and base_score > 0 else 0.0
     has_nf = "NF" in modifiers
     cleared = base_score > 0 and not has_nf
     nf_clear = base_score > 0 and has_nf
-    return player_pp, cleared, nf_clear, acc, rank
+    return player_pp, cleared, nf_clear, acc, rank, mods_str
 
 
 def _bl_player_score_info(scores: Dict, map_id: str
-                          ) -> Tuple[float, bool, bool, float, int]:
-    """BL player scores から (player_pp, cleared, nf_clear, acc, rank) を返す。"""
+                          ) -> Tuple[float, bool, bool, float, int, str]:
+    """BL player scores から (player_pp, cleared, nf_clear, acc, rank, mods) を返す。"""
     entry = scores.get(str(map_id))
     if not entry:
-        return 0.0, False, False, 0.0, 0
+        return 0.0, False, False, 0.0, 0, ""
     player_pp = float(entry.get("pp") or 0)
     base_score = int(entry.get("baseScore") or 0)
     modifiers = (entry.get("modifiers") or "").upper()
+    # BL modifiers は "NF,SC" 形式だが念のため正規化
+    mods_str = ",".join(m.strip() for m in modifiers.replace(",", " ").split() if m.strip()) if modifiers else ""
     accuracy = float(entry.get("accuracy") or 0)
     rank = int(entry.get("rank") or 0)
     acc = accuracy * 100.0 if accuracy else 0.0
     has_nf = "NF" in modifiers
     cleared = base_score > 0 and not has_nf
     nf_clear = base_score > 0 and has_nf
-    return player_pp, cleared, nf_clear, acc, rank
+    return player_pp, cleared, nf_clear, acc, rank, mods_str
 
 
-def load_ss_maps(steam_id: Optional[str] = None) -> List[MapEntry]:
-    """ScoreSaber ランクマップをキャッシュから読み込む。"""
+def load_ss_maps(steam_id: Optional[str] = None, filter_stars: bool = True) -> List[MapEntry]:
+    """ScoreSaber ランクマップをキャッシュから読み込む。
+
+    filter_stars=False にすると stars=0 のマップも返す（AccSaber 用）。
+    """
     path = _CACHE_DIR / "scoresaber_ranked_maps.json"
     if not path.exists():
         return []
@@ -218,7 +235,7 @@ def load_ss_maps(steam_id: Optional[str] = None) -> List[MapEntry]:
     entries: List[MapEntry] = []
     for lb_id_str, m in maps_dict.items():
         stars = float(m.get("stars") or 0)
-        if stars <= 0:
+        if filter_stars and stars <= 0:
             continue
 
         diff_info = m.get("difficulty", {})
@@ -227,7 +244,7 @@ def load_ss_maps(steam_id: Optional[str] = None) -> List[MapEntry]:
         game_mode = diff_info.get("gameMode") or "SoloStandard"
         max_score = int(m.get("maxScore") or 0)
 
-        player_pp, cleared, nf_clear, acc, rank = _ss_player_score_info(
+        player_pp, cleared, nf_clear, acc, rank, mods = _ss_player_score_info(
             ss_scores, lb_id_str, max_score
         )
 
@@ -247,6 +264,7 @@ def load_ss_maps(steam_id: Optional[str] = None) -> List[MapEntry]:
             player_rank=rank,
             leaderboard_id=lb_id_str,
             source="scoresaber",
+            player_mods=mods,
         ))
 
     return entries
@@ -289,7 +307,7 @@ def load_bl_maps(steam_id: Optional[str] = None) -> List[MapEntry]:
         map_id = str(m.get("id") or "")
         stars = float(diff.get("stars") or 0)
 
-        player_pp, cleared, nf_clear, acc, rank = _bl_player_score_info(bl_scores, map_id)
+        player_pp, cleared, nf_clear, acc, rank, mods = _bl_player_score_info(bl_scores, map_id)
 
         entries.append(MapEntry(
             song_name=song.get("name") or "",
@@ -307,9 +325,38 @@ def load_bl_maps(steam_id: Optional[str] = None) -> List[MapEntry]:
             player_rank=rank,
             leaderboard_id=map_id,
             source="beatleader",
+            player_mods=mods,
         ))
 
     return entries
+
+
+def _build_ss_score_hash_index(
+    ss_scores: Dict[str, dict],
+) -> Dict[Tuple[str, str, str], Tuple[float, bool, bool, float, int, str]]:
+    """SS player scores キャッシュから (hash, mode, diff) → (pp, cleared, nf_clear, acc, rank, mods) を構築。
+
+    SS ranked maps に含まれない Easy 等のマップもカバーするため AccSaber 用途で使用。
+    """
+    idx: Dict[Tuple[str, str, str], Tuple[float, bool, bool, float, int, str]] = {}
+    for lb_id_str, entry in ss_scores.items():
+        lb = entry.get("leaderboard", {})
+        song_hash = (lb.get("songHash") or "").upper()
+        if not song_hash:
+            continue
+        diff_info = lb.get("difficulty", {})
+        diff_raw = diff_info.get("difficultyRaw") or ""
+        diff_num = int(diff_info.get("difficulty") or 0)
+        game_mode = diff_info.get("gameMode") or "SoloStandard"
+        diff_name = _diff_from_raw(diff_raw, diff_num)
+        mode = _mode_from_gamemode(game_mode)
+        max_score = int(lb.get("maxScore") or 0)
+        pp, cleared, nf_clear, acc, rank, mods = _ss_player_score_info(ss_scores, lb_id_str, max_score)
+        key = (song_hash, mode, diff_name)
+        # クリア済み優先、同キーに複数スコアがあれば最高 pp を保持
+        if key not in idx or (cleared and not idx[key][1]) or pp > idx[key][0]:
+            idx[key] = (pp, cleared, nf_clear, acc, rank, mods)
+    return idx
 
 
 def _build_ss_hash_index(entries: List[MapEntry]) -> Dict[Tuple[str, str, str], MapEntry]:
@@ -463,15 +510,16 @@ def _make_playlist_cover(
     cover_type: str,  # "star" | "true" | "standard" | "tech" | "default"
     label: str = "",  # "star" 時は星数文字列
     sort_dir: str = "asc",  # "asc" | "desc"
+    source: str = "",  # "ss" | "bl" | "rl" | ""
 ) -> str:
     """プレイリストカバー画像を生成し data:image/png;base64,... を返す。
 
     cover_type:
-        "star"     → app_icon + ★N (黄)
-        "true"     → accsaberreloaded_logo + T (緑)
-        "standard" → accsaberreloaded_logo + S (青)
+        "star"     → SS: scoresaber_logo.svg / BL: beatleader_logo.jpg + ★N (黄)
+        "true"     → accsaberreloaded_logo + Tr (緑)
+        "standard" → accsaberreloaded_logo + St (青)
         "tech"     → accsaberreloaded_logo + Tc (赤)
-        "default"  → app_icon のみ
+        "default"  → SS/BL ロゴ or app_icon のみ
     sort_dir: "asc" → ⇧, "desc" → ⇩
     """
     SIZE = 256
@@ -479,10 +527,25 @@ def _make_playlist_cover(
     # ベース画像選択
     if cover_type in ("true", "standard", "tech"):
         base_path = RESOURCES_DIR / "accsaberreloaded_logo.png"
+    elif source == "ss":
+        base_path = RESOURCES_DIR / "scoresaber_logo.svg"
+    elif source == "bl":
+        base_path = RESOURCES_DIR / "beatleader_logo.jpg"
+    elif source == "acc":
+        base_path = RESOURCES_DIR / "asssaber_logo.webp"
+    elif source == "rl":
+        base_path = RESOURCES_DIR / "accsaberreloaded_logo.png"
     else:
         base_path = RESOURCES_DIR / "app_icon.png"
 
-    if base_path.exists():
+    if str(base_path).endswith(".svg") and base_path.exists():
+        renderer = QSvgRenderer(str(base_path))
+        base_img = QImage(SIZE, SIZE, QImage.Format.Format_ARGB32)
+        base_img.fill(QColor(30, 30, 30))
+        _svg_painter = QPainter(base_img)
+        renderer.render(_svg_painter)
+        _svg_painter.end()
+    elif base_path.exists():
         base_img = QImage(str(base_path))
         base_img = base_img.scaled(
             SIZE, SIZE,
@@ -503,11 +566,11 @@ def _make_playlist_cover(
 
     # カテゴリ・ラベル設定
     if cover_type == "true":
-        main_text, text_color = "T", QColor(0, 220, 80)
+        main_text, text_color = "True", QColor(0, 220, 80)
     elif cover_type == "standard":
-        main_text, text_color = "S", QColor(80, 180, 255)
+        main_text, text_color = "Std", QColor(80, 180, 255)
     elif cover_type == "tech":
-        main_text, text_color = "Tc", QColor(255, 80, 80)
+        main_text, text_color = "Tech", QColor(255, 80, 80)
     elif cover_type == "star":
         main_text, text_color = f"\u2605{label}", QColor(255, 220, 0)
     else:
@@ -516,23 +579,37 @@ def _make_playlist_cover(
     arrow = "\u21e7" if sort_dir == "asc" else "\u21e9"
 
     if main_text:
-        bar_h = SIZE // 3
-        painter.fillRect(0, SIZE - bar_h, SIZE, bar_h, QColor(0, 0, 0, 180))
-        font_main = QFont("Segoe UI", 60, QFont.Weight.Black)
-        painter.setFont(font_main)
-        rect_main = Qt.AlignmentFlag.AlignCenter
-        # 影
-        painter.setPen(QColor(0, 0, 0, 220))
         from PySide6.QtCore import QRect as _QRect
-        painter.drawText(_QRect(2, SIZE - bar_h + 2, SIZE, bar_h - 18), rect_main, main_text)
+        from PySide6.QtGui import QFontMetrics as _QFM
+        bar_h = SIZE // 2  # 128px — テキストが確実に入る高さ
+        painter.fillRect(0, SIZE - bar_h, SIZE, bar_h, QColor(0, 0, 0, 190))
+        # フォントサイズをテキストが収まるよう自動調整（ピクセル単位）
+        text_area = _QRect(8, SIZE - bar_h + 8, SIZE - 16, bar_h - 16)
+        px = 72  # 開始ピクセルサイズ
+        font_main = QFont("Segoe UI", 1, QFont.Weight.Black)
+        font_main.setPixelSize(px)
+        while px > 8:
+            fm = _QFM(font_main)
+            br = fm.boundingRect(main_text)
+            if br.width() <= text_area.width() and br.height() <= text_area.height():
+                break
+            px -= 2
+            font_main.setPixelSize(px)
+        painter.setFont(font_main)
+        # 影
+        painter.setPen(QColor(0, 0, 0, 230))
+        painter.drawText(_QRect(text_area.x() + 2, text_area.y() + 2,
+                                text_area.width(), text_area.height()),
+                         Qt.AlignmentFlag.AlignCenter, main_text)
         # 本体
         painter.setPen(text_color)
-        painter.drawText(_QRect(0, SIZE - bar_h, SIZE, bar_h - 18), rect_main, main_text)
+        painter.drawText(text_area, Qt.AlignmentFlag.AlignCenter, main_text)
 
     # ソート矢印（右下隅）
-    font_arrow = QFont("Segoe UI Symbol", 26, QFont.Weight.Bold)
-    painter.setFont(font_arrow)
     from PySide6.QtCore import QRect as _QRect2
+    font_arrow = QFont("Segoe UI Symbol", 1, QFont.Weight.Bold)
+    font_arrow.setPixelSize(28)
+    painter.setFont(font_arrow)
     painter.setPen(QColor(0, 0, 0, 200))
     painter.drawText(_QRect2(SIZE - 50, SIZE - 40, 48, 38),
                      Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignBottom, arrow)
@@ -589,7 +666,6 @@ def _save_bplist(parent: QWidget, title: str, entries: List[MapEntry], init_dir:
     bplist = _make_bplist(title, entries, image)
     try:
         Path(path).write_text(json.dumps(bplist, ensure_ascii=False, indent=2), encoding="utf-8")
-        QMessageBox.information(parent, "Export Complete", f"Saved:\n{path}\n\n{len(entries)} maps")
         return path
     except Exception as e:
         QMessageBox.critical(parent, "Save Error", str(e))
@@ -601,25 +677,95 @@ def load_accsaber_maps(
     category: str = "all",
     on_progress=None,
 ) -> List[MapEntry]:
-    """AccSaber のカテゴリプレイリストを API から取得し SS ランク情報を付与する。
+    """AccSaber のカテゴリプレイリストを API から取得し AccSaber/SS クリア情報を付与する。
 
     category: "all" | "true" | "standard" | "tech"
     on_progress(done: int, total: int, label: str) — 進捗コールバック（省略可）
+
+    クリア判定の優先順位:
+      1. AccSaber player scores API — SC 等の無効モディファイアを除外した公式クリア
+      2. SS/BL player scores — AccSaber スコア取得不可時のフォールバック
     """
     _PLAYLIST_URLS: Dict[str, str] = {
         "true":     "https://accsaber.com/api/playlists/true",
         "standard": "https://accsaber.com/api/playlists/standard",
         "tech":     "https://accsaber.com/api/playlists/tech",
     }
+    _ACC_DIFF_NORM = {
+        "easy": "Easy", "normal": "Normal", "hard": "Hard",
+        "expert": "Expert", "expertplus": "ExpertPlus", "expert+": "ExpertPlus",
+    }
     cats = ["true", "standard", "tech"] if category == "all" else [category]
 
-    # SS ランクマップキャッシュを読み込んでインデックス化
-    ss_ranked = load_ss_maps(steam_id)
-    ss_index = _build_ss_hash_index(ss_ranked)
+    session = requests.Session()
+
+    # AccSaber ranked-maps から (hash.upper(), diff) → complexity インデックスを構築
+    complexity_index: Dict[Tuple[str, str], float] = {}
+    try:
+        rm = session.get("https://accsaber.com/api/ranked-maps", timeout=30)
+        if rm.status_code == 200:
+            for m in rm.json():
+                h = (m.get("songHash") or "").upper()
+                dn = _ACC_DIFF_NORM.get((m.get("difficulty") or "").lower(), m.get("difficulty") or "")
+                c = m.get("complexity") or 0.0
+                if h and dn:
+                    complexity_index[(h, dn)] = float(c)
+    except Exception:
+        pass
+
+    # AccSaber プレイヤースコアを取得し (hash, diff) → cleared/nf セットを構築
+    # AccSaber は SC (SmallCubes) 等の特定モディファイアをスコアとしてカウントしないため
+    # SS player scores とは独立して AccSaber 公式クリア判定を行う。
+    acc_score_cleared: set = set()   # (hash.upper(), diff) — AccSaber 正規クリア
+    acc_score_nf: set = set()         # (hash.upper(), diff) — NF クリア
+    acc_player_scores_available = False
+    if steam_id:
+        try:
+            ar = session.get(
+                f"https://accsaber.com/api/players/{steam_id}/scores?pageSize=2000",
+                timeout=15,
+            )
+            if ar.status_code == 200:
+                for asc in ar.json():
+                    h = (asc.get("songHash") or "").upper()
+                    dn = _ACC_DIFF_NORM.get((asc.get("difficulty") or "").lower(), asc.get("difficulty", ""))
+                    mods = (asc.get("mods") or "").upper()
+                    if "NF" in mods:
+                        acc_score_nf.add((h, dn))
+                    else:
+                        acc_score_cleared.add((h, dn))
+                acc_player_scores_available = True
+        except Exception:
+            pass
+
+    # SS player scores — pp/acc/rank 表示用、および AccSaber 取得不可時のフォールバック
+    ss_scores_raw: Dict[str, dict] = {}
+    if steam_id:
+        sp = _CACHE_DIR / f"scoresaber_player_scores_{steam_id}.json"
+        if sp.exists():
+            try:
+                sd = json.loads(sp.read_text(encoding="utf-8"))
+                ss_scores_raw = sd.get("scores", {})
+            except Exception:
+                pass
+    ss_score_idx = _build_ss_score_hash_index(ss_scores_raw)
+
+    # BL ランクマップキャッシュを読み込んでインデックス化（フォールバック用）
+    bl_ranked = load_bl_maps()
+    bl_index = _build_bl_hash_index(bl_ranked)
+
+    bl_scores: Dict[str, dict] = {}
+    if steam_id:
+        bp = _CACHE_DIR / f"beatleader_player_scores_{steam_id}.json"
+        if bp.exists():
+            try:
+                bd = json.loads(bp.read_text(encoding="utf-8"))
+                bl_scores = bd.get("scores", {})
+            except Exception:
+                pass
 
     from dataclasses import replace as _dc_replace
 
-    session = requests.Session()
     # key → (entry, [cat, ...]) で複数カテゴリを集積する
     seen_entries: Dict[Tuple[str, str, str], MapEntry] = {}
     seen_cats: Dict[Tuple[str, str, str], List[str]] = {}
@@ -638,22 +784,72 @@ def load_accsaber_maps(
             diffs = song.get("difficulties") or []
             for d in diffs:
                 char = d.get("characteristic") or "Standard"
-                diff_name = d.get("name") or "ExpertPlus"
+                diff_name = _ACC_DIFF_NORM.get((d.get("name") or "").lower(), d.get("name") or "ExpertPlus")
                 key = (s_hash, char, diff_name)
                 if key not in seen_entries:
-                    if key in ss_index:
-                        e = ss_index[key]
-                        seen_entries[key] = _dc_replace(e, source="accsaber", acc_category=cat)
-                    else:
-                        seen_entries[key] = MapEntry(
-                            song_name=s_name, song_author="", mapper="",
-                            song_hash=s_hash, difficulty=diff_name, mode=char,
-                            stars=0.0, max_pp=0.0, player_pp=0.0,
-                            cleared=False, nf_clear=False,
-                            player_acc=0.0, player_rank=0,
-                            leaderboard_id="", source="accsaber",
-                            acc_category=cat,
+                    # SS player scores から pp/acc/rank 取得 (モディファイア有スコアも含む)
+                    ss_info = ss_score_idx.get(key)
+                    ss_pp = 0.0
+                    ss_cleared = ss_nf = False
+                    ss_acc = 0.0
+                    ss_rank = 0
+                    ss_mods = ""
+                    if ss_info:
+                        ss_pp, ss_cleared, ss_nf, ss_acc, ss_rank, ss_mods = ss_info
+
+                    # BL スコア取得 (フォールバック用)
+                    bl_entry = bl_index.get(key)
+                    bl_pp = 0.0
+                    bl_cleared = bl_nf = False
+                    bl_acc_val = 0.0
+                    bl_rank = 0
+                    bl_stars = 0.0
+                    bl_mods = ""
+                    if bl_entry:
+                        bl_pp, bl_cleared, bl_nf, bl_acc_val, bl_rank, bl_mods = _bl_player_score_info(
+                            bl_scores, bl_entry.leaderboard_id
                         )
+                        bl_stars = bl_entry.stars
+
+                    # クリア判定: AccSaber 公式スコアを優先
+                    key_hd = (s_hash, diff_name)  # AccSaber API にはモード情報なし
+                    if acc_player_scores_available:
+                        if key_hd in acc_score_cleared:
+                            final_cleared, final_nf, final_mods = True, False, ""
+                        elif key_hd in acc_score_nf:
+                            final_cleared, final_nf, final_mods = False, True, "NF"
+                        else:
+                            # AccSaber にスコアなし — SS/BL でプレイ済みなら「要再プレイ」扱い
+                            if ss_cleared or ss_nf:
+                                final_cleared, final_nf, final_mods = False, True, ss_mods
+                            elif bl_cleared or bl_nf:
+                                final_cleared, final_nf, final_mods = False, True, bl_mods
+                            else:
+                                final_cleared, final_nf, final_mods = False, False, ""
+                    else:
+                        # AccSaber スコア取得不可 → SS/BL フォールバック
+                        if ss_cleared or ss_nf:
+                            final_cleared, final_nf, final_mods = ss_cleared, ss_nf, ss_mods
+                        elif bl_cleared or bl_nf:
+                            final_cleared, final_nf, final_mods = bl_cleared, bl_nf, bl_mods
+                        else:
+                            final_cleared, final_nf, final_mods = False, False, ""
+
+                    final_pp = ss_pp or bl_pp
+                    final_acc = ss_acc or bl_acc_val
+                    final_rank = ss_rank or bl_rank
+
+                    seen_entries[key] = MapEntry(
+                        song_name=s_name, song_author="", mapper="",
+                        song_hash=s_hash, difficulty=diff_name, mode=char,
+                        stars=bl_stars, max_pp=0.0, player_pp=final_pp,
+                        cleared=final_cleared, nf_clear=final_nf,
+                        player_acc=final_acc, player_rank=final_rank,
+                        leaderboard_id="", source="accsaber",
+                        acc_category=cat,
+                        acc_complexity=complexity_index.get((s_hash, diff_name), 0.0),
+                        player_mods=final_mods,
+                    )
                     seen_cats[key] = [cat]
                 else:
                     seen_cats[key].append(cat)
@@ -768,6 +964,17 @@ def load_accsaber_reloaded_maps(
             except Exception:
                 pass
 
+    # SS プレイヤースコアを読み込む（BL スコアが無い場合のフォールバック）
+    ss_scores: Dict[str, dict] = {}
+    if steam_id:
+        sp = _CACHE_DIR / f"scoresaber_player_scores_{steam_id}.json"
+        if sp.exists():
+            try:
+                sd = json.loads(sp.read_text(encoding="utf-8"))
+                ss_scores = sd.get("scores", {})
+            except Exception:
+                pass
+
     # BL ランクマップキャッシュを hash インデックス化（スター取得用）
     bl_ranked = load_bl_maps()
     bl_index = _build_bl_hash_index(bl_ranked)
@@ -797,7 +1004,21 @@ def load_accsaber_reloaded_maps(
 
             # BL leaderboard ID でプレイヤースコアを取得
             bl_lb_id = str(diff.get("blLeaderboardId") or "")
-            player_pp, cleared, nf_clear, acc, rank = _bl_player_score_info(bl_scores, bl_lb_id)
+            complexity = float(diff.get("complexity") or 0.0)
+            player_pp, cleared, nf_clear, acc, rank, score_mods = _bl_player_score_info(bl_scores, bl_lb_id)
+
+            # BL 未クリア or NF の場合は SS スコアをフォールバックとして確認
+            # (BL が NF でも SS に正規クリアがあれば cleared=True に上書きする)
+            if not cleared and ss_scores:
+                ss_lb_id = str(diff.get("ssLeaderboardId") or "")
+                if ss_lb_id:
+                    _, ss_cleared, ss_nf, ss_acc, ss_rank, ss_mods = _ss_player_score_info(ss_scores, ss_lb_id)
+                    if ss_cleared or ss_nf:
+                        cleared = ss_cleared
+                        nf_clear = ss_nf
+                        acc = ss_acc or acc
+                        rank = ss_rank or rank
+                        score_mods = ss_mods
 
             # RL AP・rank（mapDifficultyId による精定値）
             rl_diff_id = diff.get("id") or ""
@@ -827,6 +1048,8 @@ def load_accsaber_reloaded_maps(
                 source="accsaber_reloaded",
                 acc_category=acc_cat,
                 acc_rl_ap=ap,
+                acc_complexity=complexity,
+                player_mods=score_mods,
             ))
 
     if on_progress:
@@ -847,6 +1070,10 @@ class _LoadSignals(QObject):
 # ──────────────────────────────────────────────────────────────────────────────
 # バッチエクスポート
 # ──────────────────────────────────────────────────────────────────────────────
+
+_BATCH_SRC_PREFIX: Dict[str, str] = {
+    "ss": "SS", "bl": "BL", "acc": "AS", "rl": "RL", "pl": "PL",
+}
 
 @dataclass
 class _BatchPreset:
@@ -897,33 +1124,32 @@ class _BatchConfig:
         if self.source == "rl":
             cats = [n for flag, n in [(self.cat_true, "Tr"), (self.cat_standard, "Std"), (self.cat_tech, "Tch")] if flag]
             src = f"RL[{'+'.join(cats) or 'none'}]"
+        elif self.source == "acc":
+            cats = [n for flag, n in [(self.cat_true, "Tr"), (self.cat_standard, "Std"), (self.cat_tech, "Tch")] if flag]
+            src = f"Acc[{'+'.join(cats) or 'none'}]"
         sts = "".join([s for flag, s in [(self.show_cleared, "✓"), (self.show_nf, "⚠"), (self.show_unplayed, "✗")] if flag])
         sort_label = {
-            "star_asc": "★Asc", "star_desc": "★Desc",
-            "pp_high": "PP↓", "pp_low": "PP↑",
-            "ap_high": "AP↓", "ap_low": "AP↑",
-            "acc_high": "Acc↓", "acc_low": "Acc↑",
-            "rank_low": "Rank↑", "rank_high": "Rank↓",
+            "star_asc": "StarAsc", "star_desc": "StarDesc",
+            "pp_high": "PPDesc", "pp_low": "PPAsc",
+            "ap_high": "APDesc", "ap_low": "APAsc",
+            "acc_high": "AccDesc", "acc_low": "AccAsc",
+            "rank_low": "RankAsc", "rank_high": "RankDesc",
         }.get(self.sort_mode, self.sort_mode)
-        if self.source == "rl":
+        if self.source in ("rl", "acc"):
             return f"{self.label}  [{src} / {sts} / {self.split_mode} / {sort_label}]"
-        star = f"★{self.star_min:.0f}-{self.star_max:.0f}"
+        star = f"★{self.star_min:g}-{self.star_max:g}"
         return f"{self.label}  [{src} / {sts} / {star} / {self.split_mode} / {sort_label}]"
 
 
 _BATCH_PRESETS: List[_BatchPreset] = [
-    _BatchPreset("SS — Uncleared per ★↑",                "ss", "",         True,  "star_asc", "ss_uncleared",            True),
-    _BatchPreset("SS — Uncleared All  ★↑",               "ss", "",         True,  "star_asc", "ss_uncleared_all",         False),
-    _BatchPreset("SS — High PP per ★",                  "ss", "",         False, "pp_high",  "ss_high_pp",              True),
-    _BatchPreset("BL — Uncleared per ★↑",                "bl", "",         True,  "star_asc", "bl_uncleared",            True),
-    _BatchPreset("BL — Uncleared All  ★↑",               "bl", "",         True,  "star_asc", "bl_uncleared_all",         False),
-    _BatchPreset("BL — High PP per ★",                  "bl", "",         False, "pp_high",  "bl_high_pp",              True),
-    _BatchPreset("AccSaber RL — True (Uncleared)",       "rl", "true",     True,  "star_asc", "rl_true_uncleared",       False),
-    _BatchPreset("AccSaber RL — True (All, High AP)",    "rl", "true",     False, "ap_high",  "rl_true_all_high_ap",     False),
-    _BatchPreset("AccSaber RL — Standard (Uncleared)",   "rl", "standard", True,  "star_asc", "rl_standard_uncleared",   False),
-    _BatchPreset("AccSaber RL — Standard (All, High AP)","rl", "standard", False, "ap_high",  "rl_standard_all_high_ap", False),
-    _BatchPreset("AccSaber RL — Tech (Uncleared)",       "rl", "tech",     True,  "star_asc", "rl_tech_uncleared",       False),
-    _BatchPreset("AccSaber RL — Tech (All, High AP)",    "rl", "tech",     False, "ap_high",  "rl_tech_all_high_ap",     False),
+    _BatchPreset("SS — Uncleared All",                   "ss", "", True,  "star_asc", "All", False),
+    _BatchPreset("SS — Uncleared per ★",                 "ss", "", True,  "star_asc", "",    True),
+    _BatchPreset("SS — High PP per ★",                   "ss", "", False, "pp_high",  "",    True),
+    _BatchPreset("BL — Uncleared All",                   "bl", "", True,  "star_asc", "All", False),
+    _BatchPreset("BL — Uncleared per ★",                 "bl", "", True,  "star_asc", "",    True),
+    _BatchPreset("BL — High PP per ★",                   "bl", "", False, "pp_high",  "",    True),
+    _BatchPreset("AccSaber RL — Uncleared per Category", "rl", "", True,  "star_asc", "",    True),
+    _BatchPreset("AccSaber RL — High AP per Category",   "rl", "", False, "ap_high",  "",    True),
 ]
 
 
@@ -939,7 +1165,7 @@ def _apply_config_filter(maps: List[MapEntry], cfg: "_BatchConfig") -> List[MapE
             continue
         if not e.played and not cfg.show_unplayed:
             continue
-        if cfg.source == "rl":
+        if cfg.source in ("rl", "acc"):
             if e.acc_category == "true" and not cfg.cat_true:
                 continue
             if e.acc_category == "standard" and not cfg.cat_standard:
@@ -977,18 +1203,26 @@ def _pregenerate_covers(configs: "List[_BatchConfig]") -> Dict[str, str]:
         sd = _sort_dir_from_mode(cfg.sort_mode)
         if cfg.split_mode == "star":
             for si in range(21):
-                key = f"star:{si}:{sd}"
+                key = f"star:{si}:{sd}:{cfg.source}"
                 if key not in cache:
-                    cache[key] = _make_playlist_cover("star", str(si), sd)
+                    cache[key] = _make_playlist_cover("star", str(si), sd, cfg.source)
         elif cfg.split_mode == "category":
             for cat in ("true", "standard", "tech", "unknown"):
-                key = f"cat:{cat}:{sd}"
+                key = f"cat:{cat}:{sd}:{cfg.source}"
                 if key not in cache:
-                    cache[key] = _make_playlist_cover(cat, "", sd)
+                    cache[key] = _make_playlist_cover(cat, "", sd, cfg.source)
         else:
-            key = f"default:{sd}"
-            if key not in cache:
-                cache[key] = _make_playlist_cover("default", "", sd)
+            if cfg.source in ("rl", "acc"):
+                # RL/Acc single: cat フラグが1つだけ True ならそのカテゴリテキストを使用
+                _rl_cats = [c for c, f in [("true", cfg.cat_true), ("standard", cfg.cat_standard), ("tech", cfg.cat_tech)] if f]
+                _rl_ct = _rl_cats[0] if len(_rl_cats) == 1 else "default"
+                key = f"acc_single:{cfg.source}:{_rl_ct}:{sd}"
+                if key not in cache:
+                    cache[key] = _make_playlist_cover(_rl_ct, "", sd, cfg.source)
+            else:
+                key = f"default:{sd}:{cfg.source}"
+                if key not in cache:
+                    cache[key] = _make_playlist_cover("default", "", sd, cfg.source)
     return cache
 
 
@@ -997,25 +1231,25 @@ def _config_export_tag(cfg: "_BatchConfig") -> str:
     parts: List[str] = []
     sts = []
     if cfg.show_cleared:
-        sts.append("cleared")
+        sts.append("Cleared")
     if cfg.show_nf:
-        sts.append("nf")
+        sts.append("NF")
     if cfg.show_unplayed:
-        sts.append("unplayed")
+        sts.append("Unplayed")
     if len(sts) < 3:
         parts.append("+".join(sts) if sts else "none")
     if cfg.star_min > 0.0 or cfg.star_max < 20.0:
-        parts.append(f"star{cfg.star_min:.0f}-{cfg.star_max:.0f}")
-    if cfg.source == "rl":
+        parts.append(f"star{cfg.star_min:g}-{cfg.star_max:g}")
+    if cfg.source in ("rl", "acc"):
         cats = [n for flag, n in [(cfg.cat_true, "T"), (cfg.cat_standard, "S"), (cfg.cat_tech, "Tc")] if flag]
         if len(cats) < 3:
             parts.append("+".join(cats) if cats else "nocat")
     _sort_tags = {
-        "star_asc": "star_asc", "star_desc": "star_desc",
-        "pp_high": "pp_desc", "pp_low": "pp_asc",
-        "ap_high": "ap_desc", "ap_low": "ap_asc",
-        "acc_high": "acc_desc", "acc_low": "acc_asc",
-        "rank_low": "rank_asc", "rank_high": "rank_desc",
+        "star_asc": "StarAsc", "star_desc": "StarDesc",
+        "pp_high": "PPDesc", "pp_low": "PPAsc",
+        "ap_high": "APDesc", "ap_low": "APAsc",
+        "acc_high": "AccDesc", "acc_low": "AccAsc",
+        "rank_low": "RankAsc", "rank_high": "RankDesc",
     }
     parts.append(_sort_tags.get(cfg.sort_mode, cfg.sort_mode))
     return "_".join(parts)
@@ -1031,7 +1265,8 @@ def _write_config_files(
 ) -> None:
     """_BatchConfig の split_mode に従ってファイルを書き出す。"""
     tag = _config_export_tag(cfg)
-    fbase = f"{cfg.filename_base}_{tag}" if tag else cfg.filename_base
+    src_pfx = _BATCH_SRC_PREFIX.get(cfg.source, cfg.source.upper())
+    fbase = "_".join(p for p in [src_pfx, cfg.filename_base, tag] if p)
     if cfg.split_mode == "star":
         groups: Dict[int, List[MapEntry]] = {}
         for e in maps:
@@ -1040,21 +1275,21 @@ def _write_config_files(
         _sort_dir = _sort_dir_from_mode(cfg.sort_mode)
         for si in sorted(groups.keys()):
             fname = f"{fbase}_{si:02d}star.bplist"
-            _img = covers.get(f"star:{si}:{_sort_dir}", "")
+            _img = covers.get(f"star:{si}:{_sort_dir}:{cfg.source}", "")
             bplist = _make_bplist(f"{si}★ {cfg.label}", groups[si], _img)
             (folder_path / fname).write_text(
                 json.dumps(bplist, ensure_ascii=False, indent=2), encoding="utf-8"
             )
             saved.append(fname)
     elif cfg.split_mode == "category":
-        cat_groups: Dict[str, List[MapEntry]] = {}
+        cat_groups: Dict[str, List[MapEntry]] = {"true": [], "standard": [], "tech": []}
         for e in maps:
             cat = e.acc_category or "unknown"
             cat_groups.setdefault(cat, []).append(e)
         _sort_dir = _sort_dir_from_mode(cfg.sort_mode)
         for cat in sorted(cat_groups.keys()):
-            fname = f"{fbase}_{cat}.bplist"
-            _img = covers.get(f"cat:{cat}:{_sort_dir}", "")
+            fname = f"{fbase}_{cat.capitalize()}.bplist"
+            _img = covers.get(f"cat:{cat}:{_sort_dir}:{cfg.source}", "")
             bplist = _make_bplist(f"{cat.capitalize()} — {cfg.label}", cat_groups[cat], _img)
             (folder_path / fname).write_text(
                 json.dumps(bplist, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -1063,7 +1298,12 @@ def _write_config_files(
     else:  # "single"
         fname = f"{fbase}.bplist"
         _sort_dir = _sort_dir_from_mode(cfg.sort_mode)
-        _img = covers.get(f"default:{_sort_dir}", "")
+        if cfg.source in ("rl", "acc"):
+            _rl_cats = [c for c, f in [("true", cfg.cat_true), ("standard", cfg.cat_standard), ("tech", cfg.cat_tech)] if f]
+            _rl_ct = _rl_cats[0] if len(_rl_cats) == 1 else "default"
+            _img = covers.get(f"acc_single:{cfg.source}:{_rl_ct}:{_sort_dir}", "")
+        else:
+            _img = covers.get(f"default:{_sort_dir}:{cfg.source}", "")
         bplist = _make_bplist(cfg.label, maps, _img)
         (folder_path / fname).write_text(
             json.dumps(bplist, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -1084,12 +1324,14 @@ def _run_export_configs(
     has_ss = any(c.source == "ss" for c in configs)
     has_bl = any(c.source == "bl" for c in configs)
     has_rl = any(c.source == "rl" for c in configs)
+    has_acc = any(c.source == "acc" for c in configs)
 
     ss_maps: List[MapEntry] = []
     bl_maps: List[MapEntry] = []
     rl_maps: List[MapEntry] = []
+    acc_maps: List[MapEntry] = []
 
-    n_load = (1 if has_ss else 0) + (1 if has_bl else 0) + (1 if has_rl else 0)
+    n_load = (1 if has_ss else 0) + (1 if has_bl else 0) + (1 if has_rl else 0) + (1 if has_acc else 0)
     total = n_load + len(configs)
     step = 0
 
@@ -1111,6 +1353,15 @@ def _run_export_configs(
             sigs.progress.emit(step, total, "Fetching AccSaber RL maps...")
             rl_maps = load_accsaber_reloaded_maps(steam_id, "all", on_progress=_rl_prog)
             step += 1
+        if has_acc:
+            _acc_step = step
+
+            def _acc_prog(d: int, t: int, label: str) -> None:
+                sigs.progress.emit(_acc_step, total, label)
+
+            sigs.progress.emit(step, total, "Fetching AccSaber maps...")
+            acc_maps = load_accsaber_maps(steam_id, "all", on_progress=_acc_prog)
+            step += 1
 
         saved_files: List[str] = []
         errors: List[str] = []
@@ -1118,7 +1369,7 @@ def _run_export_configs(
         for cfg in configs:
             sigs.progress.emit(step, total, f"Exporting: {cfg.label}...")
             try:
-                base = {"ss": ss_maps, "bl": bl_maps, "rl": rl_maps}.get(cfg.source, [])
+                base = {"ss": ss_maps, "bl": bl_maps, "rl": rl_maps, "acc": acc_maps}.get(cfg.source, [])
                 maps = _apply_config_filter(list(base), cfg)
                 _write_config_files(maps, cfg, folder_path, saved_files, errors, covers)
             except Exception as exc:
@@ -1145,13 +1396,14 @@ _COL_ACC_CAT = 6
 _COL_RL_AP = 7
 _COL_PLAYER_ACC = 8
 _COL_PLAYER_RANK = 9
-_COL_MAPPER = 10
-_COL_AUTHOR = 11
-_COL_COUNT = 12
+_COL_MOD = 10
+_COL_MAPPER = 11
+_COL_AUTHOR = 12
+_COL_COUNT = 13
 
 _COL_LABELS = [
     "Status", "Song", "Diff", "Mode", "★", "Player PP", "Acc Category", "AP", "Acc %", "Rank",
-    "Mapper", "Author",
+    "Mods", "Mapper", "Author",
 ]
 
 
@@ -1213,21 +1465,32 @@ class PlaylistWindow(QMainWindow):
 
         # ─ Source ───────────────────────────────────────────────────
         src_group = QGroupBox("Source")
-        src_layout = QHBoxLayout(src_group)
-        src_layout.setSpacing(8)
+        src_vbox = QVBoxLayout(src_group)
+        src_vbox.setSpacing(4)
+        src_vbox.setContentsMargins(6, 16, 6, 4)
 
         self._src_group = QButtonGroup(self)
         self._rb_ss = QRadioButton(SOURCE_SS)
         self._rb_bl = QRadioButton(SOURCE_BL)
+        self._rb_acc = QRadioButton(SOURCE_ACC)
         self._rb_acc_rl = QRadioButton(SOURCE_ACC_RL)
         self._rb_open = QRadioButton(SOURCE_OPEN)
         self._rb_ss.setChecked(True)
 
-        for i, rb in enumerate([self._rb_ss, self._rb_bl, self._rb_acc_rl, self._rb_open]):
+        # 1行目: ScoreSaber / BeatLeader / AccSaber / AccSaber RL
+        src_row1 = QHBoxLayout()
+        src_row1.setSpacing(8)
+        for i, rb in enumerate([self._rb_ss, self._rb_bl, self._rb_acc, self._rb_acc_rl]):
             self._src_group.addButton(rb, i)
-            src_layout.addWidget(rb)
+            src_row1.addWidget(rb)
+        src_row1.addStretch()
+        src_vbox.addLayout(src_row1)
 
-        src_layout.addSpacing(8)
+        # 2行目: Open File + ファイル操作 + Load ボタン
+        src_row2 = QHBoxLayout()
+        src_row2.setSpacing(8)
+        self._src_group.addButton(self._rb_open, 4)
+        src_row2.addWidget(self._rb_open)
 
         # Open file
         self._open_edit = QLineEdit()
@@ -1246,11 +1509,11 @@ class PlaylistWindow(QMainWindow):
         self._svc_combo.addItem("AccSaber RL", userData="accsaber_rl")
         self._svc_combo.setEnabled(False)
         self._svc_combo.currentIndexChanged.connect(self._on_svc_combo_changed)
-        src_layout.addWidget(self._open_edit)
-        src_layout.addWidget(self._btn_browse)
-        src_layout.addWidget(self._svc_label)
-        src_layout.addWidget(self._svc_combo)
-        src_layout.addStretch()
+        src_row2.addWidget(self._open_edit)
+        src_row2.addWidget(self._btn_browse)
+        src_row2.addWidget(self._svc_label)
+        src_row2.addWidget(self._svc_combo)
+        src_row2.addStretch()
 
         self._btn_load = QPushButton("⏵  Load")
         self._btn_load.setMinimumHeight(28)
@@ -1263,7 +1526,8 @@ class PlaylistWindow(QMainWindow):
             " QPushButton:disabled { background-color: #555; color: #aaa; }"
         )
         self._btn_load.clicked.connect(self._load_data)
-        src_layout.addWidget(self._btn_load)
+        src_row2.addWidget(self._btn_load)
+        src_vbox.addLayout(src_row2)
 
         self._src_group.buttonToggled.connect(self._on_source_changed)
         root.addWidget(src_group)
@@ -1278,6 +1542,9 @@ class PlaylistWindow(QMainWindow):
         self._search_edit.setPlaceholderText("Search by song / author / mapper...")
         self._search_edit.setMinimumWidth(180)
         self._search_edit.textChanged.connect(self._apply_filter)
+        self._search_edit.textChanged.connect(
+            lambda text: self._btn_add_to_batch.setVisible(not text.strip())
+        )
         filter_row.addWidget(self._search_edit)
 
         self._star_label = QLabel("★")
@@ -1415,11 +1682,12 @@ class PlaylistWindow(QMainWindow):
         self._table.setColumnWidth(_COL_SONG, 240)
         self._table.setColumnWidth(_COL_DIFF, 26)
         self._table.setColumnWidth(_COL_MODE, 42)
-        self._table.setColumnWidth(_COL_STARS, 52)
+        self._table.setColumnWidth(_COL_STARS, 64)
         self._table.setColumnWidth(_COL_PLAYER_PP, 72)
         self._table.setColumnWidth(_COL_RL_AP, 72)
         self._table.setColumnWidth(_COL_PLAYER_ACC, 64)
         self._table.setColumnWidth(_COL_PLAYER_RANK, 52)
+        self._table.setColumnWidth(_COL_MOD, 68)
         self._table.setColumnWidth(_COL_AUTHOR, 140)
         self._table.setColumnWidth(_COL_MAPPER, 120)
         self._table.setColumnWidth(_COL_ACC_CAT, 90)
@@ -1434,9 +1702,16 @@ class PlaylistWindow(QMainWindow):
         _rl.setContentsMargins(4, 4, 4, 4)
         self.__cols.addWidget(_right_w)
 
+        _batch_title_row = QHBoxLayout()
         _batch_title = QLabel("Batch Export")
         _batch_title.setStyleSheet("font-weight: bold; font-size: 13px;")
-        _rl.addWidget(_batch_title)
+        _batch_title_row.addWidget(_batch_title)
+        _batch_title_row.addStretch()
+        self._btn_preview_cover = QPushButton("🖼️ Playlist Covers")
+        self._btn_preview_cover.setToolTip("出力フォルダを選んで .bplist のカバー画像を一覧表示します")
+        self._btn_preview_cover.clicked.connect(self._show_cover_preview)
+        _batch_title_row.addWidget(self._btn_preview_cover)
+        _rl.addLayout(_batch_title_row)
 
         self._batch_queue_list = QListWidget()
         self._batch_queue_list.setAlternatingRowColors(True)
@@ -1458,7 +1733,7 @@ class PlaylistWindow(QMainWindow):
         _queue_btn_row.addWidget(_btn_bq_clear)
         _rl.addLayout(_queue_btn_row)
 
-        _rl.addWidget(QLabel("Quick Add Presets:"))
+        _rl.addWidget(QLabel("Quick Presets:"))
 
         self._preset_list_w = _PresetListWidget()
         self._preset_list_w.setAlternatingRowColors(True)
@@ -1578,17 +1853,17 @@ class PlaylistWindow(QMainWindow):
 
     def _update_filter_export_ui(self) -> None:
         """現在のソース/サービス設定に応じて Filter・Export の表示状態を更新する。"""
-        is_rl = self._rb_acc_rl.isChecked() or (
+        is_acc = self._rb_acc.isChecked() or self._rb_acc_rl.isChecked() or (
             self._rb_open.isChecked() and self._svc_combo.currentData() == "accsaber_rl"
         )
-        # AccSaber RL ではカテゴリ別分割なので Split ラベルを切り替え
-        self._rb_exp_split.setText("Split by Category (True / Standard / Tech)" if is_rl else "Split by ★")
-        # Category filter チェックボックスは AccSaber RL のときのみ表示
+        # AccSaber / AccSaber RL ではカテゴリ別分割なので Split ラベルを切り替え
+        self._rb_exp_split.setText("Split by Category (True / Standard / Tech)" if is_acc else "Split by ★")
+        # Category filter チェックボックスは AccSaber / AccSaber RL のときのみ表示
         for w in [self._cat_filter_label, self._cb_cat_true, self._cb_cat_standard, self._cb_cat_tech]:
-            w.setVisible(is_rl)
-        # ★レンジは AccSaber RL では非表示
+            w.setVisible(is_acc)
+        # ★レンジは AccSaber / AccSaber RL では非表示
         for w in [self._star_label, self._star_min, self._star_sep_label, self._star_max]:
-            w.setVisible(not is_rl)
+            w.setVisible(not is_acc)
 
     def _on_svc_combo_changed(self) -> None:
         """サービスコンボ変更時に Filter/Export UI とテーブルヘッダを更新する。"""
@@ -1601,9 +1876,12 @@ class PlaylistWindow(QMainWindow):
             pp_label, acc_label, rank_label = "SS PP", "Acc %", "SS Rank"
         elif self._rb_bl.isChecked():
             pp_label, acc_label, rank_label = "BL PP", "Acc %", "BL Rank"
+        elif self._rb_acc.isChecked():
+            # AccSaber は SS スコアを基本とし BL をフォールバック
+            pp_label, acc_label, rank_label = "SS PP", "Acc %", "SS Rank"
         elif self._rb_acc_rl.isChecked():
-            # RL は BL PP を流用・Rank は AccSaber RL のマップ内順位
-            pp_label, acc_label, rank_label = "BL PP", "Acc %", "RL Rank"
+            # RL は BL/SS PP を使用・Rank は AccSaber RL のマップ内順位
+            pp_label, acc_label, rank_label = "PP", "Acc %", "RL Rank"
         else:
             # open モード: service コンボで決まる
             svc = self._svc_combo.currentData() or "none"
@@ -1612,7 +1890,7 @@ class PlaylistWindow(QMainWindow):
             elif svc == "beatleader":
                 pp_label, acc_label, rank_label = "BL PP", "Acc %", "BL Rank"
             elif svc == "accsaber_rl":
-                pp_label, acc_label, rank_label = "BL PP", "Acc %", "RL Rank"
+                pp_label, acc_label, rank_label = "PP", "Acc %", "RL Rank"
             else:
                 pp_label, acc_label, rank_label = "Player PP", "Acc %", "Rank"
         for col, label in [
@@ -1623,6 +1901,13 @@ class PlaylistWindow(QMainWindow):
             item = self._table.horizontalHeaderItem(col)
             if item is not None:
                 item.setText(label)
+        # AccSaber / AccSaber RL 時は★列を Category に切り替え
+        is_acc_mode = self._rb_acc.isChecked() or self._rb_acc_rl.isChecked() or (
+            self._rb_open.isChecked() and self._svc_combo.currentData() == "accsaber_rl"
+        )
+        star_hdr = self._table.horizontalHeaderItem(_COL_STARS)
+        if star_hdr is not None:
+            star_hdr.setText("Cmplx" if is_acc_mode else "★")
 
     def _current_sort_mode(self) -> str:
         """テーブルヘッダの現在のソート状態から sort_mode を返す。"""
@@ -1672,8 +1957,8 @@ class PlaylistWindow(QMainWindow):
         if s_min > 0.0 or s_max < 20.0:
             parts.append(f"star{s_min:.0f}-{s_max:.0f}")
 
-        # RL カテゴリ
-        if self._rb_acc_rl.isChecked():
+        # AccSaber / AccSaber RL カテゴリ
+        if self._rb_acc.isChecked() or self._rb_acc_rl.isChecked():
             cat_parts: List[str] = []
             if self._cb_cat_true.isChecked():
                 cat_parts.append("T")
@@ -1763,6 +2048,10 @@ class PlaylistWindow(QMainWindow):
                 return
             self._apply_filter()
 
+        elif self._rb_acc.isChecked():
+            self._setWindowTitle_source(SOURCE_ACC)
+            self._start_async_load(lambda sig: self._run_load_acc(sig, steam_id, "all"))
+
         elif self._rb_acc_rl.isChecked():
             self._setWindowTitle_source(SOURCE_ACC_RL)
             self._start_async_load(lambda sig: self._run_load_acc_rl(sig, steam_id, "all"))
@@ -1842,6 +2131,15 @@ class PlaylistWindow(QMainWindow):
             sigs.progress.emit(done, total, label)
         try:
             entries = load_bplist_maps(bplist_path, "accsaber_rl", steam_id, on_progress=_progress)
+            sigs.finished.emit(entries)
+        except Exception as exc:
+            sigs.error.emit(str(exc))
+
+    def _run_load_acc(self, sigs: _LoadSignals, steam_id: Optional[str], category: str) -> None:
+        def _progress(done: int, total: int, label: str) -> None:
+            sigs.progress.emit(done, total, label)
+        try:
+            entries = load_accsaber_maps(steam_id, category, on_progress=_progress)
             sigs.finished.emit(entries)
         except Exception as exc:
             sigs.error.emit(str(exc))
@@ -1976,33 +2274,40 @@ class PlaylistWindow(QMainWindow):
 
         search_text = self._search_edit.text().strip()
         if search_text:
-            QMessageBox.warning(
-                self, "Add to Batch",
-                f"検索テキスト「{search_text}」はバッチ条件に保存できません。\n"
-                "クリアしてから Add to Batch してください。"
-            )
             return
 
         split = self._rb_exp_split.isChecked()
-        acc_source = self._rb_acc_rl.isChecked()
+        is_acc_any = self._rb_acc.isChecked() or self._rb_acc_rl.isChecked()
 
-        src_tag = "ss" if self._rb_ss.isChecked() else "bl" if self._rb_bl.isChecked() else "rl"
-        style_tag = ("cat" if acc_source else "split") if split else "single"
-        name = f"{src_tag}_{style_tag}"
+        if self._rb_ss.isChecked():
+            src_tag = "ss"
+        elif self._rb_bl.isChecked():
+            src_tag = "bl"
+        elif self._rb_acc.isChecked():
+            src_tag = "acc"
+        elif self._rb_open.isChecked():
+            svc = self._svc_combo.currentData()
+            src_tag = {"scoresaber": "ss", "beatleader": "bl", "accsaber_rl": "rl"}.get(svc, "pl")
+        else:
+            src_tag = "rl"
+        src_label = _BATCH_SRC_PREFIX.get(src_tag, src_tag.upper())
+        display_style = ("cat" if is_acc_any else "split") if split else "All"
+        filename_base = "" if split else "All"
+        name = f"{src_label}_{display_style}"
 
-        split_mode = ("category" if acc_source else "star") if split else "single"
+        split_mode = ("category" if is_acc_any else "star") if split else "single"
         sort_mode = self._current_sort_mode()
 
         cfg = _BatchConfig(
             label=name,
-            filename_base=name,
+            filename_base=filename_base,
             source=src_tag,
             show_cleared=self._cb_sts_cleared.isChecked(),
             show_nf=self._cb_sts_nf.isChecked(),
             show_unplayed=self._cb_sts_unplayed.isChecked(),
-            cat_true=self._cb_cat_true.isChecked() if acc_source else True,
-            cat_standard=self._cb_cat_standard.isChecked() if acc_source else True,
-            cat_tech=self._cb_cat_tech.isChecked() if acc_source else True,
+            cat_true=self._cb_cat_true.isChecked() if is_acc_any else True,
+            cat_standard=self._cb_cat_standard.isChecked() if is_acc_any else True,
+            cat_tech=self._cb_cat_tech.isChecked() if is_acc_any else True,
             star_min=self._star_min.value(),
             star_max=self._star_max.value(),
             split_mode=split_mode,
@@ -2024,17 +2329,24 @@ class PlaylistWindow(QMainWindow):
             return
 
         for p in checked:
-            if p.source == "rl":
-                cat_true = p.rl_cat == "true"
-                cat_standard = p.rl_cat == "standard"
-                cat_tech = p.rl_cat == "tech"
-                split_mode = "single"
+            src_pfx = _BATCH_SRC_PREFIX.get(p.source, p.source.upper())
+            if p.source in ("rl", "acc"):
+                if p.split_by_star and not p.rl_cat:
+                    split_mode = "category"
+                    cat_true = cat_standard = cat_tech = True
+                else:
+                    split_mode = "single"
+                    cat_true = p.rl_cat == "true"
+                    cat_standard = p.rl_cat == "standard"
+                    cat_tech = p.rl_cat == "tech"
             else:
                 cat_true = cat_standard = cat_tech = True
                 split_mode = "star" if p.split_by_star else "single"
+            split_code = {"star": "split", "category": "cat", "single": "single"}.get(split_mode, split_mode)
+            batch_label = f"{src_pfx}_{split_code}"
 
             cfg = _BatchConfig(
-                label=p.label,
+                label=batch_label,
                 filename_base=p.filename_base,
                 source=p.source,
                 show_cleared=not p.uncleared,
@@ -2066,13 +2378,12 @@ class PlaylistWindow(QMainWindow):
         self._btn_quick_export.setEnabled(True)
         saved: List[str] = result[0]
         errors: List[str] = result[1]
-        lines = [f"{len(saved)} file(s) saved.", ""]
-        lines += [f"  {f}" for f in saved[:40]]
-        if len(saved) > 40:
-            lines.append(f"  ... and {len(saved) - 40} more")
-        if errors:
-            lines += ["", "Errors:"] + [f"  {e}" for e in errors]
-        QMessageBox.information(self, "Export Complete", "\n".join(lines))
+        self._show_bplist_covers_dialog(
+            f"Export Complete — {len(saved)} file(s)",
+            self._export_dir,
+            saved,
+            errors,
+        )
 
     def _on_export_error(self, msg: str) -> None:
         if self._batch_progress_dlg:
@@ -2100,16 +2411,23 @@ class PlaylistWindow(QMainWindow):
 
         configs: List[_BatchConfig] = []
         for p in checked:
-            if p.source == "rl":
-                cat_true = p.rl_cat == "true"
-                cat_standard = p.rl_cat == "standard"
-                cat_tech = p.rl_cat == "tech"
-                split_mode = "single"
+            src_pfx = _BATCH_SRC_PREFIX.get(p.source, p.source.upper())
+            if p.source in ("rl", "acc"):
+                if p.split_by_star and not p.rl_cat:
+                    split_mode = "category"
+                    cat_true = cat_standard = cat_tech = True
+                else:
+                    split_mode = "single"
+                    cat_true = p.rl_cat == "true"
+                    cat_standard = p.rl_cat == "standard"
+                    cat_tech = p.rl_cat == "tech"
             else:
                 cat_true = cat_standard = cat_tech = True
                 split_mode = "star" if p.split_by_star else "single"
+            split_code = {"star": "split", "category": "cat", "single": "single"}.get(split_mode, split_mode)
+            batch_label = f"{src_pfx}_{split_code}"
             configs.append(_BatchConfig(
-                label=p.label,
+                label=batch_label,
                 filename_base=p.filename_base,
                 source=p.source,
                 show_cleared=not p.uncleared,
@@ -2183,6 +2501,114 @@ class PlaylistWindow(QMainWindow):
         threading.Thread(target=_task, daemon=True).start()
 
     # ──────────────────────────────────────────────────────────────────────────
+    # カバー画像プレビュー
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def _show_bplist_covers_dialog(
+        self,
+        title: str,
+        folder: str,
+        filenames: List[str],
+        errors: List[str],
+    ) -> None:
+        """保存済み .bplist ファイルのカバー画像をサムネイルグリッドで表示する。"""
+        import base64 as _b64
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle(title)
+        dlg.resize(720, 540)
+
+        outer = QVBoxLayout(dlg)
+        outer.setSpacing(8)
+        outer.setContentsMargins(12, 12, 12, 12)
+
+        summary_lbl = QLabel(f"{len(filenames)} file(s) saved to:\n{folder}")
+        summary_lbl.setWordWrap(True)
+        outer.addWidget(summary_lbl)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        grid_widget = QWidget()
+        grid = QGridLayout(grid_widget)
+        grid.setSpacing(10)
+        grid.setContentsMargins(8, 8, 8, 8)
+        scroll.setWidget(grid_widget)
+
+        COLS = 5
+        THUMB = 100
+
+        for idx, fname in enumerate(filenames):
+            fpath = Path(folder) / fname
+            pm = QPixmap()
+            try:
+                data = json.loads(fpath.read_text(encoding="utf-8"))
+                img_data = data.get("image", "")
+                if img_data.startswith("data:"):
+                    raw = _b64.b64decode(img_data.split(",", 1)[1])
+                    pm.loadFromData(raw)
+            except Exception:
+                pass
+
+            img_lbl = QLabel()
+            if not pm.isNull():
+                img_lbl.setPixmap(
+                    pm.scaled(THUMB, THUMB,
+                              Qt.AspectRatioMode.KeepAspectRatio,
+                              Qt.TransformationMode.SmoothTransformation)
+                )
+            else:
+                img_lbl.setText("(no image)")
+            img_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            img_lbl.setFixedSize(THUMB + 4, THUMB + 4)
+            img_lbl.setStyleSheet("border: 1px solid #555; background: #1a1a1a;")
+
+            short = fname if len(fname) <= 22 else fname[:10] + "…" + fname[-10:]
+            name_lbl = QLabel(short)
+            name_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            name_lbl.setWordWrap(True)
+            name_lbl.setMaximumWidth(THUMB + 4)
+            name_lbl.setToolTip(fname)
+
+            cell = QWidget()
+            cell_layout = QVBoxLayout(cell)
+            cell_layout.setSpacing(2)
+            cell_layout.setContentsMargins(0, 0, 0, 0)
+            cell_layout.addWidget(img_lbl)
+            cell_layout.addWidget(name_lbl)
+
+            r, c = divmod(idx, COLS)
+            grid.addWidget(cell, r, c)
+
+        outer.addWidget(scroll, 1)
+
+        if errors:
+            err_lbl = QLabel("Errors:\n" + "\n".join(errors[:10]))
+            err_lbl.setStyleSheet("color: #ff6666;")
+            err_lbl.setWordWrap(True)
+            outer.addWidget(err_lbl)
+
+        btn_ok = QPushButton("OK")
+        btn_ok.setDefault(True)
+        btn_ok.clicked.connect(dlg.accept)
+        outer.addWidget(btn_ok, 0, Qt.AlignmentFlag.AlignRight)
+
+        dlg.exec()
+
+    def _show_cover_preview(self) -> None:
+        """出力フォルダを選択して .bplist ファイルのカバー画像を一覧表示する。"""
+        folder = QFileDialog.getExistingDirectory(
+            self, "Select export folder to preview", self._export_dir
+        )
+        if not folder:
+            return
+        bplist_files = sorted(f.name for f in Path(folder).glob("*.bplist"))
+        if not bplist_files:
+            QMessageBox.information(self, "Preview", "No .bplist files found in the selected folder.")
+            return
+        self._show_bplist_covers_dialog(f"Cover Preview — {Path(folder).name}", folder, bplist_files, [])
+
+    # ──────────────────────────────────────────────────────────────────────────
     # フィルタ
     # ──────────────────────────────────────────────────────────────────────────
 
@@ -2194,7 +2620,7 @@ class PlaylistWindow(QMainWindow):
         show_cleared = self._cb_sts_cleared.isChecked()
         show_nf = self._cb_sts_nf.isChecked()
         show_unplayed = self._cb_sts_unplayed.isChecked()
-        rl_mode = self._rb_acc_rl.isChecked()
+        rl_mode = self._rb_acc.isChecked() or self._rb_acc_rl.isChecked()
         cat_filter: Optional[set] = None
         if rl_mode:
             allowed: set = set()
@@ -2246,6 +2672,9 @@ class PlaylistWindow(QMainWindow):
         _cleared_bg = QColor(0x26, 0x49, 0x30, 180) if is_dark() else QColor(0xC8, 0xE6, 0xC9)
         _nf_bg = QColor(0x5C, 0x4A, 0x1A, 180) if is_dark() else QColor(0xFF, 0xF3, 0xCD)
         _unplayed_bg = QColor(0x4A, 0x2A, 0x2A, 180) if is_dark() else QColor(0xFF, 0xCC, 0xCC)
+        _is_acc_mode = self._rb_acc.isChecked() or self._rb_acc_rl.isChecked() or (
+            self._rb_open.isChecked() and self._svc_combo.currentData() == "accsaber_rl"
+        )
 
         for row, e in enumerate(entries):
             # ステータス
@@ -2265,10 +2694,15 @@ class PlaylistWindow(QMainWindow):
             table.setItem(row, _COL_DIFF, _diff_item(e.difficulty))
             # モード
             table.setItem(row, _COL_MODE, _mode_item(e.mode))
-            # ★ (数値ソート)
-            star_item = _NumItem(f"{e.stars:.2f}", e.stars)
-            star_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            table.setItem(row, _COL_STARS, star_item)
+            # ★ / Complexity
+            if _is_acc_mode:
+                star_item = _NumItem(f"{e.acc_complexity:.1f}" if e.acc_complexity > 0 else "-", e.acc_complexity)
+                star_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                table.setItem(row, _COL_STARS, star_item)
+            else:
+                star_item = _NumItem(f"{e.stars:.2f}", e.stars)
+                star_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                table.setItem(row, _COL_STARS, star_item)
             # Player PP
             pp_item = _NumItem(
                 f"{e.player_pp:.1f}" if e.player_pp > 0 else "-",
@@ -2301,6 +2735,10 @@ class PlaylistWindow(QMainWindow):
             table.setItem(row, _COL_AUTHOR, QTableWidgetItem(e.song_author))
             # マッパー
             table.setItem(row, _COL_MAPPER, QTableWidgetItem(e.mapper))
+            # Mod (SC, NF, etc.)
+            mod_item = QTableWidgetItem(e.player_mods)
+            mod_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            table.setItem(row, _COL_MOD, mod_item)
             # Acc区分 / Service (openモード時はサービスマッチ表示)
             if e.source in ("scoresaber", "beatleader", "accsaber_reloaded"):
                 svc_label = {"scoresaber": "SS", "beatleader": "BL", "accsaber_reloaded": "RL"}.get(e.source, e.source)
@@ -2353,10 +2791,15 @@ class PlaylistWindow(QMainWindow):
 
         title = f"Maps ({tag})"
         _sort_dir = _sort_dir_from_mode(self._current_sort_mode())
-        image = _make_playlist_cover("default", "", _sort_dir)
+        src = "ss" if self._rb_ss.isChecked() else "bl" if self._rb_bl.isChecked() else "rl"
+        image = _make_playlist_cover("default", "", _sort_dir, src)
         saved = _save_bplist(self, title, sorted_entries, self._export_dir, image)
         if saved:
-            self._save_export_dir(str(Path(saved).parent))
+            folder = str(Path(saved).parent)
+            self._save_export_dir(folder)
+            self._show_bplist_covers_dialog(
+                "Export Complete", folder, [Path(saved).name], []
+            )
 
     # ── ★別分割出力 共通ヘルパー ─────────────────────────────────────────
 
@@ -2389,7 +2832,7 @@ class PlaylistWindow(QMainWindow):
         self._save_export_dir(folder)
 
         groups = self._group_by_star(entries)
-        saved_files: List[str] = []
+        saved_fnames: List[str] = []
         errors: List[str] = []
         _sort_dir = _sort_dir_from_mode(self._current_sort_mode())
 
@@ -2408,14 +2851,16 @@ class PlaylistWindow(QMainWindow):
                     json.dumps(bplist, ensure_ascii=False, indent=2),
                     encoding="utf-8",
                 )
-                saved_files.append(f"  ★{star_int}: {len(group_entries)} maps → {filename}")
+                saved_fnames.append(filename)
             except Exception as exc:
                 errors.append(f"★{star_int}: {exc}")
 
-        summary_lines = [f"Folder: {folder}", f"{len(saved_files)} files saved", ""] + saved_files
-        if errors:
-            summary_lines += ["", "Errors:"] + [f"  {e}" for e in errors]
-        QMessageBox.information(self, "Export Complete", "\n".join(summary_lines))
+        self._show_bplist_covers_dialog(
+            f"Export Complete — {len(saved_fnames)} file(s)",
+            folder,
+            saved_fnames,
+            errors,
+        )
 
     def _export_per_star_all(self, tag: str = "all") -> None:
         """全マップを ★ ごとに別ファイル (PP 降順) で出力する。"""
@@ -2442,7 +2887,7 @@ class PlaylistWindow(QMainWindow):
             cat = e.acc_category or "unknown"
             groups.setdefault(cat, []).append(e)
 
-        saved_files: List[str] = []
+        saved_fnames: List[str] = []
         errors: List[str] = []
         _sort_dir = _sort_dir_from_mode(self._current_sort_mode())
 
@@ -2455,11 +2900,13 @@ class PlaylistWindow(QMainWindow):
                 fname.write_text(
                     json.dumps(bplist, ensure_ascii=False, indent=2), encoding="utf-8"
                 )
-                saved_files.append(f"  {cat}: {len(cat_entries)} maps → {fname.name}")
+                saved_fnames.append(fname.name)
             except Exception as exc:
                 errors.append(f"{cat}: {exc}")
 
-        summary = [f"Folder: {folder}", f"{len(saved_files)} files saved", ""] + saved_files
-        if errors:
-            summary += ["", "Errors:"] + [f"  {e}" for e in errors]
-        QMessageBox.information(self, "Export Complete", "\n".join(summary))
+        self._show_bplist_covers_dialog(
+            f"Export Complete — {len(saved_fnames)} file(s)",
+            folder,
+            saved_fnames,
+            errors,
+        )
