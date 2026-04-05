@@ -1862,7 +1862,7 @@ class PlaylistWindow(QMainWindow):
         _preset_btn_row.addWidget(_btn_pa)
         _preset_btn_row.addWidget(_btn_pn)
         _preset_btn_row.addStretch()
-        self._btn_add_presets = QPushButton("➕ Add")
+        self._btn_add_presets = QPushButton("➕ Add to Batch")
         self._btn_add_presets.clicked.connect(self._batch_add_presets)
         _preset_btn_row.addWidget(self._btn_add_presets)
         _bot_layout.addLayout(_preset_btn_row)
