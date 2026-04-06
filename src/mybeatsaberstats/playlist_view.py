@@ -105,6 +105,7 @@ class MapEntry:
     acc_rl_ap: float = 0.0  # AccSaber Reloaded AP (0 = 未取得 / 未プレイ)
     acc_complexity: float = 0.0  # AccSaber / AccSaber Reloaded の Complexity
     player_mods: str = ""   # 実際に使用したモディファイア文字列 (例: "NF", "SC", "NF,SC")
+    score_source: str = ""  # スコア表示元: "BL" | "SS" | "AS" | ""
 
     @property
     def status_str(self) -> str:
@@ -265,6 +266,7 @@ def load_ss_maps(steam_id: Optional[str] = None, filter_stars: bool = True) -> L
             leaderboard_id=lb_id_str,
             source="scoresaber",
             player_mods=mods,
+            score_source="SS",
         ))
 
     return entries
@@ -326,6 +328,7 @@ def load_bl_maps(steam_id: Optional[str] = None) -> List[MapEntry]:
             leaderboard_id=map_id,
             source="beatleader",
             player_mods=mods,
+            score_source="BL",
         ))
 
     return entries
@@ -721,6 +724,7 @@ def load_accsaber_maps(
     # SS player scores とは独立して AccSaber 公式クリア判定を行う。
     acc_score_cleared: set = set()   # (hash.upper(), diff) — AccSaber 正規クリア
     acc_score_nf: set = set()         # (hash.upper(), diff) — NF クリア
+    acc_score_ap: Dict[Tuple[str, str], Tuple[float, int]] = {}  # (hash, diff) → (ap, rank)
     acc_player_scores_available = False
     if steam_id:
         try:
@@ -737,6 +741,12 @@ def load_accsaber_maps(
                         acc_score_nf.add((h, dn))
                     else:
                         acc_score_cleared.add((h, dn))
+                    ap = float(asc.get("ap") or 0)
+                    rank = int(asc.get("rank") or 0)
+                    if ap > 0 and h and dn:
+                        key_ap: Tuple[str, str] = (h, dn)
+                        if ap > acc_score_ap.get(key_ap, (0.0, 0))[0]:
+                            acc_score_ap[key_ap] = (ap, rank)
                 acc_player_scores_available = True
         except Exception:
             pass
@@ -842,16 +852,32 @@ def load_accsaber_maps(
                     final_acc = ss_acc or bl_acc_val
                     final_rank = ss_rank or bl_rank
 
+                    acc_ap_entry = acc_score_ap.get(key_hd, (0.0, 0))
+                    final_acc_ap = acc_ap_entry[0]
+                    final_acc_rank = acc_ap_entry[1]
+
+                    if acc_player_scores_available and (key_hd in acc_score_cleared or key_hd in acc_score_nf):
+                        final_score_src = "AS"
+                    elif ss_pp > 0 or ss_cleared or ss_nf:
+                        final_score_src = "SS"
+                    elif bl_pp > 0 or bl_cleared or bl_nf:
+                        final_score_src = "BL"
+                    else:
+                        final_score_src = ""
+
                     seen_entries[key] = MapEntry(
                         song_name=s_name, song_author="", mapper="",
                         song_hash=s_hash, difficulty=diff_name, mode=char,
                         stars=bl_stars, max_pp=0.0, player_pp=final_pp,
                         cleared=final_cleared, nf_clear=final_nf,
-                        player_acc=final_acc, player_rank=final_rank,
+                        player_acc=final_acc,
+                        player_rank=final_acc_rank if final_acc_rank else final_rank,
                         leaderboard_id="", source="accsaber",
                         acc_category=cat,
+                        acc_rl_ap=final_acc_ap,
                         acc_complexity=complexity_index.get((s_hash, diff_name), 0.0),
                         player_mods=final_mods,
+                        score_source=final_score_src,
                     )
                     seen_cats[key] = [cat]
                 else:
@@ -1008,20 +1034,41 @@ def load_accsaber_reloaded_maps(
             # BL leaderboard ID でプレイヤースコアを取得
             bl_lb_id = str(diff.get("blLeaderboardId") or "")
             complexity = float(diff.get("complexity") or 0.0)
-            player_pp, cleared, nf_clear, acc, rank, score_mods = _bl_player_score_info(bl_scores, bl_lb_id)
+            bl_pp, bl_cleared, bl_nf, bl_acc, bl_rank_val, bl_mods = _bl_player_score_info(bl_scores, bl_lb_id)
+            bl_has_any_score = bl_pp > 0 or bl_cleared or bl_nf
 
-            # BL 未クリア or NF の場合は SS スコアをフォールバックとして確認
-            # (BL が NF でも SS に正規クリアがあれば cleared=True に上書きする)
-            if not cleared and ss_scores:
-                ss_lb_id = str(diff.get("ssLeaderboardId") or "")
-                if ss_lb_id:
-                    _, ss_cleared, ss_nf, ss_acc, ss_rank, ss_mods = _ss_player_score_info(ss_scores, ss_lb_id)
-                    if ss_cleared or ss_nf:
-                        cleared = ss_cleared
-                        nf_clear = ss_nf
-                        acc = ss_acc or acc
-                        rank = ss_rank or rank
-                        score_mods = ss_mods
+            # SS スコアも常に取得する
+            # AccSaber Reloaded は BL/SS の精度を比較して高い方を採用するだけで
+            # モディファイアによる無効化は行わない
+            ss_lb_id = str(diff.get("ssLeaderboardId") or "")
+            ss_pp_v = 0.0
+            ss_cleared = ss_nf = False
+            ss_acc_v = 0.0
+            ss_rank_v = 0
+            ss_mods_v = ""
+            if ss_lb_id and ss_scores:
+                ss_max_score = int(
+                    (ss_scores.get(str(ss_lb_id), {}).get("leaderboard") or {}).get("maxScore") or 0
+                )
+                ss_pp_v, ss_cleared, ss_nf, ss_acc_v, ss_rank_v, ss_mods_v = _ss_player_score_info(
+                    ss_scores, ss_lb_id, ss_max_score
+                )
+
+            # (cleared=2 > nf=1 > unplayed=0, acc) のタプル比較で高い方を採用
+            use_ss = (
+                (2 if ss_cleared else 1 if ss_nf else 0, ss_acc_v) >
+                (2 if bl_cleared else 1 if bl_nf else 0, bl_acc)
+            )
+            if use_ss:
+                cleared, nf_clear, acc, rank, score_mods, player_pp = (
+                    ss_cleared, ss_nf, ss_acc_v, ss_rank_v, ss_mods_v, ss_pp_v
+                )
+                score_src = "SS"
+            else:
+                cleared, nf_clear, acc, rank, score_mods, player_pp = (
+                    bl_cleared, bl_nf, bl_acc, bl_rank_val, bl_mods, bl_pp
+                )
+                score_src = "BL" if bl_has_any_score else ""
 
             # RL AP・rank（mapDifficultyId による精定値）
             rl_diff_id = diff.get("id") or ""
@@ -1053,6 +1100,7 @@ def load_accsaber_reloaded_maps(
                 acc_rl_ap=ap,
                 acc_complexity=complexity,
                 player_mods=score_mods,
+                score_source=score_src,
             ))
 
     if on_progress:
@@ -1456,19 +1504,19 @@ _COL_STATUS = 0
 _COL_SONG = 1
 _COL_DIFF = 2
 _COL_MODE = 3
-_COL_STARS = 4
-_COL_PLAYER_PP = 5
-_COL_ACC_CAT = 6
-_COL_RL_AP = 7
+_COL_ACC_CAT = 4
+_COL_SERVICE = 5     # スコア元サービス表示 (BL / SS / AS)
+_COL_PLAYER_RANK = 6
+_COL_STARS = 7
 _COL_PLAYER_ACC = 8
-_COL_PLAYER_RANK = 9
+_COL_PLAYER_PP = 9
 _COL_MOD = 10
 _COL_MAPPER = 11
 _COL_AUTHOR = 12
 _COL_COUNT = 13
 
 _COL_LABELS = [
-    "Status", "Song", "Diff", "Mode", "★", "Player PP", "Acc Category", "AP", "Acc %", "Rank",
+    "Status", "Song", "Diff", "Mode", "Acc Category", "Service", "Rank", "★", "Acc %", "Player PP",
     "Mods", "Mapper", "Author",
 ]
 
@@ -1752,15 +1800,15 @@ class PlaylistWindow(QMainWindow):
         self._table.setColumnWidth(_COL_SONG, 240)
         self._table.setColumnWidth(_COL_DIFF, 26)
         self._table.setColumnWidth(_COL_MODE, 42)
-        self._table.setColumnWidth(_COL_STARS, 64)
-        self._table.setColumnWidth(_COL_PLAYER_PP, 72)
-        self._table.setColumnWidth(_COL_RL_AP, 72)
-        self._table.setColumnWidth(_COL_PLAYER_ACC, 64)
+        self._table.setColumnWidth(_COL_ACC_CAT, 90)
+        self._table.setColumnWidth(_COL_SERVICE, 48)
         self._table.setColumnWidth(_COL_PLAYER_RANK, 52)
+        self._table.setColumnWidth(_COL_STARS, 64)
+        self._table.setColumnWidth(_COL_PLAYER_ACC, 64)
+        self._table.setColumnWidth(_COL_PLAYER_PP, 72)
         self._table.setColumnWidth(_COL_MOD, 68)
         self._table.setColumnWidth(_COL_AUTHOR, 140)
         self._table.setColumnWidth(_COL_MAPPER, 120)
-        self._table.setColumnWidth(_COL_ACC_CAT, 90)
 
         root.addWidget(self._table, 1)
 
@@ -1978,24 +2026,20 @@ class PlaylistWindow(QMainWindow):
     def _update_score_headers(self) -> None:
         """ソースに応じて PP / Acc % / Rank 列のヘッダを切り替える。"""
         if self._rb_ss.isChecked():
-            pp_label, acc_label, rank_label = "SS PP", "Acc %", "SS Rank"
+            pp_label, acc_label, rank_label = "SS PP", "Acc %", "Rank"
         elif self._rb_bl.isChecked():
-            pp_label, acc_label, rank_label = "BL PP", "Acc %", "BL Rank"
-        elif self._rb_acc.isChecked():
-            # AccSaber は SS スコアを基本とし BL をフォールバック
-            pp_label, acc_label, rank_label = "SS PP", "Acc %", "SS Rank"
-        elif self._rb_acc_rl.isChecked():
-            # RL は BL/SS PP を使用・Rank は AccSaber RL のマップ内順位
-            pp_label, acc_label, rank_label = "PP", "Acc %", "RL Rank"
+            pp_label, acc_label, rank_label = "BL PP", "Acc %", "Rank"
+        elif self._rb_acc.isChecked() or self._rb_acc_rl.isChecked():
+            pp_label, acc_label, rank_label = "AP", "Acc %", "Rank"
         else:
             # open モード: service コンボで決まる
             svc = self._svc_combo.currentData() or "none"
             if svc == "scoresaber":
-                pp_label, acc_label, rank_label = "SS PP", "Acc %", "SS Rank"
+                pp_label, acc_label, rank_label = "SS PP", "Acc %", "Rank"
             elif svc == "beatleader":
-                pp_label, acc_label, rank_label = "BL PP", "Acc %", "BL Rank"
-            elif svc == "accsaber_rl":
-                pp_label, acc_label, rank_label = "PP", "Acc %", "RL Rank"
+                pp_label, acc_label, rank_label = "BL PP", "Acc %", "Rank"
+            elif svc in ("accsaber", "accsaber_rl"):
+                pp_label, acc_label, rank_label = "AP", "Acc %", "Rank"
             else:
                 pp_label, acc_label, rank_label = "Player PP", "Acc %", "Rank"
         for col, label in [
@@ -2008,7 +2052,7 @@ class PlaylistWindow(QMainWindow):
                 item.setText(label)
         # AccSaber / AccSaber RL 時は★列を Category に切り替え
         is_acc_mode = self._rb_acc.isChecked() or self._rb_acc_rl.isChecked() or (
-            self._rb_open.isChecked() and self._svc_combo.currentData() == "accsaber_rl"
+            self._rb_open.isChecked() and self._svc_combo.currentData() in ("accsaber_rl", "accsaber")
         )
         star_hdr = self._table.horizontalHeaderItem(_COL_STARS)
         if star_hdr is not None:
@@ -2020,9 +2064,11 @@ class PlaylistWindow(QMainWindow):
         order = self._table.horizontalHeader().sortIndicatorOrder()
         is_desc = (order == Qt.SortOrder.DescendingOrder)
         if col == _COL_PLAYER_PP:
+            # AccSaber/RL モードでは AP 表示のため ap ソートモードを返す
+            hdr = self._table.horizontalHeaderItem(_COL_PLAYER_PP)
+            if hdr and hdr.text() == "AP":
+                return "ap_high" if is_desc else "ap_low"
             return "pp_high" if is_desc else "pp_low"
-        if col == _COL_RL_AP:
-            return "ap_high" if is_desc else "ap_low"
         if col == _COL_PLAYER_ACC:
             return "acc_high" if is_desc else "acc_low"
         if col == _COL_PLAYER_RANK:
@@ -2809,7 +2855,7 @@ class PlaylistWindow(QMainWindow):
         _nf_bg = QColor(0x5C, 0x4A, 0x1A, 180) if is_dark() else QColor(0xFF, 0xF3, 0xCD)
         _unplayed_bg = QColor(0x4A, 0x2A, 0x2A, 180) if is_dark() else QColor(0xFF, 0xCC, 0xCC)
         _is_acc_mode = self._rb_acc.isChecked() or self._rb_acc_rl.isChecked() or (
-            self._rb_open.isChecked() and self._svc_combo.currentData() == "accsaber_rl"
+            self._rb_open.isChecked() and self._svc_combo.currentData() in ("accsaber_rl", "accsaber")
         )
 
         for row, e in enumerate(entries):
@@ -2839,20 +2885,23 @@ class PlaylistWindow(QMainWindow):
                 star_item = _NumItem(f"{e.stars:.2f}", e.stars)
                 star_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                 table.setItem(row, _COL_STARS, star_item)
-            # Player PP
-            pp_item = _NumItem(
-                f"{e.player_pp:.1f}" if e.player_pp > 0 else "-",
-                e.player_pp,
-            )
+            # Player PP / AP (AccSaber・AccSaberRL モードは acc_rl_ap を表示)
+            if _is_acc_mode:
+                pp_item = _NumItem(
+                    f"{e.acc_rl_ap:.2f}" if e.acc_rl_ap > 0 else "-",
+                    e.acc_rl_ap,
+                )
+            else:
+                pp_item = _NumItem(
+                    f"{e.player_pp:.1f}" if e.player_pp > 0 else "-",
+                    e.player_pp,
+                )
             pp_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             table.setItem(row, _COL_PLAYER_PP, pp_item)
-            # RL AP
-            ap_item = _NumItem(
-                f"{e.acc_rl_ap:.2f}" if e.acc_rl_ap > 0 else "-",
-                e.acc_rl_ap,
-            )
-            ap_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            table.setItem(row, _COL_RL_AP, ap_item)
+            # Service
+            svc_item = QTableWidgetItem(e.score_source if e.score_source else "-")
+            svc_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            table.setItem(row, _COL_SERVICE, svc_item)
             # Acc
             acc_item = _NumItem(
                 f"{e.player_acc:.2f}%" if e.player_acc > 0 else "-",
@@ -2875,17 +2924,17 @@ class PlaylistWindow(QMainWindow):
             mod_item = QTableWidgetItem(e.player_mods)
             mod_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             table.setItem(row, _COL_MOD, mod_item)
-            # Acc区分 / Service (openモード時はサービスマッチ表示)
-            if e.source in ("scoresaber", "beatleader", "accsaber_reloaded"):
-                svc_label = {"scoresaber": "SS", "beatleader": "BL", "accsaber_reloaded": "RL"}.get(e.source, e.source)
-                if e.source == "accsaber_reloaded" and e.acc_category:
-                    _cat_disp = {"true": "True", "standard": "Standard", "tech": "Tech"}.get(e.acc_category, e.acc_category)
-                    svc_label = f"RL/{_cat_disp}"
-            elif e.source == "open":
-                svc_label = "-"
+            # Acc区分 / Service
+            _CAT_DISPLAY = {"true": "True", "standard": "Standard", "tech": "Tech"}
+            if self._rb_open.isChecked():
+                svc_disp = {"scoresaber": "SS", "beatleader": "BL", "accsaber_reloaded": "RL"}.get(e.source, e.source)
+                cat_text = svc_disp
+            elif e.source in ("scoresaber", "beatleader"):
+                cat_text = "-"
             else:
-                svc_label = ""
-            cat_text = svc_label if self._rb_open.isChecked() else e.acc_category
+                raw_cat = e.acc_category or ""
+                cats = raw_cat.split("/")
+                cat_text = "/".join(_CAT_DISPLAY.get(c, c.capitalize()) for c in cats) if raw_cat else ""
             table.setItem(row, _COL_ACC_CAT, QTableWidgetItem(cat_text))
 
         table.setSortingEnabled(True)
