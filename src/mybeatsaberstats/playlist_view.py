@@ -9,6 +9,7 @@ import base64
 import json
 import math
 import os
+import re
 import tempfile
 import threading
 from dataclasses import dataclass, field, asdict
@@ -17,8 +18,8 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 import requests
 
-from PySide6.QtCore import Qt, QObject, Signal
-from PySide6.QtGui import QColor, QImage, QPainter, QFont, QPixmap
+from PySide6.QtCore import Qt, QObject, Signal, QUrl
+from PySide6.QtGui import QColor, QImage, QPainter, QFont, QPixmap, QDesktopServices
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -1161,6 +1162,10 @@ class _BatchConfig:
     split_mode: str = "star"   # "single" | "star" | "category"
     # Sort
     sort_mode: str = "star_asc"  # "star_asc"|"star_desc"|"pp_high"|"pp_low"|"ap_high"|"ap_low"|"acc_high"|"acc_low"|"rank_low"|"rank_high"
+    # Song filter
+    song_filter: str = ""
+    # Enabled
+    enabled: bool = True
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -1186,10 +1191,11 @@ class _BatchConfig:
             "acc_high": "AccDesc", "acc_low": "AccAsc",
             "rank_low": "RankAsc", "rank_high": "RankDesc",
         }.get(self.sort_mode, self.sort_mode)
+        q_tag = f" \U0001f50d\"{self.song_filter}\"" if self.song_filter else ""
         if self.source in ("rl", "acc"):
-            return f"{self.label}  [{src} / {sts} / {self.split_mode} / {sort_label}]"
+            return f"{self.label}  [{src} / {sts} / {self.split_mode} / {sort_label}]{q_tag}"
         star = f"★{self.star_min:g}-{self.star_max:g}"
-        return f"{self.label}  [{src} / {sts} / {star} / {self.split_mode} / {sort_label}]"
+        return f"{self.label}  [{src} / {sts} / {star} / {self.split_mode} / {sort_label}]{q_tag}"
 
 
 _BATCH_PRESETS: List[_BatchPreset] = [
@@ -1206,8 +1212,14 @@ _BATCH_PRESETS: List[_BatchPreset] = [
 
 def _apply_config_filter(maps: List[MapEntry], cfg: "_BatchConfig") -> List[MapEntry]:
     """_BatchConfig のフィルタ条件をマップリストに適用してソート済みリストを返す。"""
+    q = cfg.song_filter.lower() if cfg.song_filter else ""
+    keywords = q.split() if q else []
     result: List[MapEntry] = []
     for e in maps:
+        if keywords:
+            targets = (e.song_name.lower(), e.song_author.lower(), e.mapper.lower())
+            if not all(any(kw in t for t in targets) for kw in keywords):
+                continue
         if e.stars < cfg.star_min or e.stars > cfg.star_max:
             continue
         if e.cleared and not cfg.show_cleared:
@@ -1295,6 +1307,10 @@ def _config_export_tag(cfg: "_BatchConfig") -> str:
         cats = [n for flag, n in [(cfg.cat_true, "T"), (cfg.cat_standard, "S"), (cfg.cat_tech, "Tc")] if flag]
         if len(cats) < 3:
             parts.append("+".join(cats) if cats else "nocat")
+    if cfg.song_filter:
+        safe_q = re.sub(r'[\\/:*?"<>|]', '', cfg.song_filter).strip().replace(' ', '-')[:20]
+        if safe_q:
+            parts.append(safe_q)
     _sort_tags = {
         "star_asc": "StarAsc", "star_desc": "StarDesc",
         "pp_high": "PPDesc", "pp_low": "PPAsc",
@@ -1362,6 +1378,10 @@ def _playlist_title(
         if cfg.show_cleared:
             filter_parts.append("Cleared")
     filter_str = "+".join(filter_parts)
+
+    if cfg.song_filter:
+        filter_parts.append(f'"{cfg.song_filter}"')
+        filter_str = "+".join(filter_parts)
 
     parts = [p for p in [head, filter_str, sort_sym] if p]
     return " ".join(parts)
@@ -1655,11 +1675,9 @@ class PlaylistWindow(QMainWindow):
         filter_row.addWidget(QLabel("🔍 Song:"))
         self._search_edit = QLineEdit()
         self._search_edit.setPlaceholderText("Search by song / author / mapper...")
+        self._search_edit.setToolTip("スペース区切りで複数キーワードのAND検索ができます\n例: \"good pp\" → \"good\" と \"pp\" を両方含む曲")
         self._search_edit.setMinimumWidth(180)
         self._search_edit.textChanged.connect(self._apply_filter)
-        self._search_edit.textChanged.connect(
-            lambda text: self._btn_add_to_batch.setVisible(not text.strip())
-        )
         filter_row.addWidget(self._search_edit)
 
         self._star_label = QLabel("★")
@@ -1846,19 +1864,27 @@ class PlaylistWindow(QMainWindow):
         self._batch_queue_list = QListWidget()
         self._batch_queue_list.setAlternatingRowColors(True)
         self._batch_queue_list.setWordWrap(True)
-        self._batch_queue_list.setToolTip("一括出力待ちのプレイリスト一覧")
+        self._batch_queue_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self._batch_queue_list.setToolTip("チェックした項目のみ出力されます（行選択でRemove対象）")
         _top_layout.addWidget(self._batch_queue_list, 1)
 
         _queue_btn_row = QHBoxLayout()
         self._batch_count_label = QLabel("0 items")
         _queue_btn_row.addWidget(self._batch_count_label)
+        _btn_bq_all = QPushButton("All")
+        _btn_bq_all.setToolTip("すべてを有効化")
+        _btn_bq_all.clicked.connect(lambda: self._batch_set_all_enabled(True))
+        _queue_btn_row.addWidget(_btn_bq_all)
+        _btn_bq_none = QPushButton("None")
+        _btn_bq_none.setToolTip("すべてを無効化")
+        _btn_bq_none.clicked.connect(lambda: self._batch_set_all_enabled(False))
+        _queue_btn_row.addWidget(_btn_bq_none)
         _queue_btn_row.addStretch()
         _btn_bq_remove = QPushButton("Remove")
-        _btn_bq_remove.setFixedWidth(62)
+        _btn_bq_remove.setToolTip("選択行を削除")
         _btn_bq_remove.clicked.connect(self._batch_remove_selected)
         _queue_btn_row.addWidget(_btn_bq_remove)
         _btn_bq_clear = QPushButton("Clear")
-        _btn_bq_clear.setFixedWidth(46)
         _btn_bq_clear.clicked.connect(self._batch_clear)
         _queue_btn_row.addWidget(_btn_bq_clear)
         _top_layout.addLayout(_queue_btn_row)
@@ -1896,13 +1922,11 @@ class PlaylistWindow(QMainWindow):
 
         _preset_btn_row = QHBoxLayout()
         _btn_pa = QPushButton("All")
-        _btn_pa.setFixedWidth(36)
         _btn_pa.clicked.connect(
             lambda: [self._preset_list_w.item(i).setCheckState(Qt.CheckState.Checked)
                      for i in range(self._preset_list_w.count())]
         )
         _btn_pn = QPushButton("None")
-        _btn_pn.setFixedWidth(44)
         _btn_pn.clicked.connect(
             lambda: [self._preset_list_w.item(i).setCheckState(Qt.CheckState.Unchecked)
                      for i in range(self._preset_list_w.count())]
@@ -1934,6 +1958,7 @@ class PlaylistWindow(QMainWindow):
         self._export_sigs.error.connect(self._on_export_error)
         self._export_sigs.progress.connect(self._on_export_progress)
         self._batch_progress_dlg: Optional[QProgressDialog] = None
+        self._batch_queue_list.itemChanged.connect(self._on_batch_item_changed)
         self._batch_refresh_queue()
 
         # スプリッタ初期サイズ: 左を広く、右パネルを 252px
@@ -2415,13 +2440,32 @@ class PlaylistWindow(QMainWindow):
         except Exception:
             pass
 
+    def _batch_set_all_enabled(self, enabled: bool) -> None:
+        """\u3059\u3079\u3066\u306e\u30d0\u30c3\u30c1\u8a2d\u5b9a\u306e enabled \u3092\u4e00\u62ec\u5909\u66f4\u3057\u3066\u4fdd\u5b58\u3059\u308b\u3002"""
+        for cfg in self._batch_configs:
+            cfg.enabled = enabled
+        self._batch_save_configs()
+        self._batch_refresh_queue()
+
     def _batch_refresh_queue(self) -> None:
         """バッチキューの表示を更新する。"""
+        self._batch_queue_list.blockSignals(True)
         self._batch_queue_list.clear()
         for cfg in self._batch_configs:
-            self._batch_queue_list.addItem(cfg.display_text())
+            item = QListWidgetItem(cfg.display_text())
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Checked if cfg.enabled else Qt.CheckState.Unchecked)
+            self._batch_queue_list.addItem(item)
         n = len(self._batch_configs)
         self._batch_count_label.setText(f"{n} item{'s' if n != 1 else ''}")
+        self._batch_queue_list.blockSignals(False)
+
+    def _on_batch_item_changed(self, item: QListWidgetItem) -> None:
+        """チェックボックスの変化を _BatchConfig.enabled に反映して保存する。"""
+        row = self._batch_queue_list.row(item)
+        if 0 <= row < len(self._batch_configs):
+            self._batch_configs[row].enabled = (item.checkState() == Qt.CheckState.Checked)
+            self._batch_save_configs()
 
     def _batch_remove_selected(self) -> None:
         rows = sorted(
@@ -2455,8 +2499,6 @@ class PlaylistWindow(QMainWindow):
             return
 
         search_text = self._search_edit.text().strip()
-        if search_text:
-            return
 
         split = self._rb_exp_split.isChecked()
         is_acc_any = self._rb_acc.isChecked() or self._rb_acc_rl.isChecked()
@@ -2494,13 +2536,14 @@ class PlaylistWindow(QMainWindow):
             star_max=self._star_max.value(),
             split_mode=split_mode,
             sort_mode=sort_mode,
+            song_filter=search_text,
         )
         self._batch_configs.append(cfg)
         self._batch_save_configs()
         self._batch_refresh_queue()
 
     def _batch_add_presets(self) -> None:
-        """チェックされたプリセットをバッチキューに追加する（即時・データロード不要）。"""
+        """チェックされたプリセットをバッチキューに追加する（即時・データロード不要）。同一設定は追加しない。"""
         checked: List[_BatchPreset] = []
         for i in range(self._preset_list_w.count()):
             it = self._preset_list_w.item(i)
@@ -2510,6 +2553,7 @@ class PlaylistWindow(QMainWindow):
             QMessageBox.information(self, "Add Presets", "No presets checked.")
             return
 
+        added = 0
         for p in checked:
             src_pfx = _BATCH_SRC_PREFIX.get(p.source, p.source.upper())
             if p.source in ("rl", "acc"):
@@ -2540,8 +2584,27 @@ class PlaylistWindow(QMainWindow):
                 split_mode=split_mode,
                 sort_mode=p.sort_mode,
             )
+            # 同一設定が已存在する場合はスキップ
+            def _is_duplicate(existing: _BatchConfig, new: _BatchConfig) -> bool:
+                return (
+                    existing.source == new.source and
+                    existing.split_mode == new.split_mode and
+                    existing.sort_mode == new.sort_mode and
+                    existing.show_cleared == new.show_cleared and
+                    existing.show_nf == new.show_nf and
+                    existing.show_unplayed == new.show_unplayed and
+                    existing.cat_true == new.cat_true and
+                    existing.cat_standard == new.cat_standard and
+                    existing.cat_tech == new.cat_tech
+                )
+            if any(_is_duplicate(e, cfg) for e in self._batch_configs):
+                continue
             self._batch_configs.append(cfg)
+            added += 1
 
+        if added == 0:
+            QMessageBox.information(self, "Add Presets", "All selected presets are already in the queue.")
+            return
         self._batch_save_configs()
         self._batch_refresh_queue()
 
@@ -2648,8 +2711,10 @@ class PlaylistWindow(QMainWindow):
 
     def _batch_export_all(self) -> None:
         """バッチ設定リストの最新データをロードして一括エクスポートする（非同期）。"""
-        if not self._batch_configs:
-            QMessageBox.information(self, "Export All", "Batch queue is empty.")
+        configs = [c for c in self._batch_configs if c.enabled]
+        if not configs:
+            QMessageBox.information(self, "Export All",
+                "No items checked in batch queue." if self._batch_configs else "Batch queue is empty.")
             return
 
         folder = QFileDialog.getExistingDirectory(self, "Select output folder", self._export_dir)
@@ -2658,7 +2723,6 @@ class PlaylistWindow(QMainWindow):
         self._save_export_dir(folder)
 
         folder_path = Path(folder)
-        configs = list(self._batch_configs)
         steam_id = self._steam_id
         sigs = self._export_sigs
 
@@ -2697,16 +2761,26 @@ class PlaylistWindow(QMainWindow):
         import base64 as _b64
 
         dlg = QDialog(self)
-        dlg.setWindowTitle(title)
+        dlg.setWindowTitle("Export Complete" if title.startswith("Export Complete") else title)
         dlg.resize(720, 540)
 
         outer = QVBoxLayout(dlg)
         outer.setSpacing(8)
         outer.setContentsMargins(12, 12, 12, 12)
 
-        summary_lbl = QLabel(f"{len(filenames)} file(s) saved to:\n{folder}")
+        title_lbl = QLabel(title)
+        title_lbl.setStyleSheet("font-weight: bold; font-size: 13px;")
+        outer.addWidget(title_lbl)
+
+        folder_row = QHBoxLayout()
+        summary_lbl = QLabel(f"{len(filenames)} file(s) saved to:  {folder}")
         summary_lbl.setWordWrap(True)
-        outer.addWidget(summary_lbl)
+        folder_row.addWidget(summary_lbl, 1)
+        btn_open_folder = QPushButton("Open Folder")
+        btn_open_folder.setFixedWidth(100)
+        btn_open_folder.clicked.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(folder)))
+        folder_row.addWidget(btn_open_folder)
+        outer.addLayout(folder_row)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -2745,7 +2819,7 @@ class PlaylistWindow(QMainWindow):
             img_lbl.setFixedSize(THUMB + 4, THUMB + 4)
             img_lbl.setStyleSheet("border: 1px solid #555; background: #1a1a1a;")
 
-            short = fname if len(fname) <= 22 else fname[:10] + "…" + fname[-10:]
+            short = fname if len(fname) <= 16 else fname[:7] + "…" + fname[-7:]
             name_lbl = QLabel(short)
             name_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
             name_lbl.setWordWrap(True)
@@ -2770,10 +2844,13 @@ class PlaylistWindow(QMainWindow):
             err_lbl.setWordWrap(True)
             outer.addWidget(err_lbl)
 
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
         btn_ok = QPushButton("OK")
         btn_ok.setDefault(True)
         btn_ok.clicked.connect(dlg.accept)
-        outer.addWidget(btn_ok, 0, Qt.AlignmentFlag.AlignRight)
+        btn_row.addWidget(btn_ok)
+        outer.addLayout(btn_row)
 
         dlg.exec()
 
@@ -2797,6 +2874,7 @@ class PlaylistWindow(QMainWindow):
     def _apply_filter(self) -> None:
         """フィルタ条件に従ってテーブルを更新する。"""
         text = self._search_edit.text().strip().lower()
+        keywords = text.split() if text else []
         star_min = self._star_min.value()
         star_max = self._star_max.value()
         show_cleared = self._cb_sts_cleared.isChecked()
@@ -2820,11 +2898,10 @@ class PlaylistWindow(QMainWindow):
             if e.stars < star_min or e.stars > star_max:
                 continue
             # テキストフィルタ
-            if text and not any(
-                text in f.lower()
-                for f in [e.song_name, e.song_author, e.mapper]
-            ):
-                continue
+            if keywords:
+                targets = (e.song_name.lower(), e.song_author.lower(), e.mapper.lower())
+                if not all(any(kw in t for t in targets) for kw in keywords):
+                    continue
             # ステータスフィルタ
             if e.cleared and not show_cleared:
                 continue
