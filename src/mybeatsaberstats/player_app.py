@@ -625,9 +625,14 @@ class _ClickableColHover(QObject):
                 inner.paint(painter, option, index)
                 if index.row() == hover_ref._hover_row:
                     painter.save()
-                    glow = QColor(255, 255, 255, 55) if is_dark() else QColor(255, 255, 255, 90)
+                    if is_dark():
+                        glow = QColor(255, 255, 255, 55)
+                        border = QColor(100, 180, 255, 190)
+                    else:
+                        glow = QColor(0, 0, 0, 28)
+                        border = QColor(60, 120, 220, 160)
                     painter.fillRect(option.rect, glow)
-                    painter.setPen(QPen(QColor(100, 180, 255, 190), 1))
+                    painter.setPen(QPen(border, 1))
                     painter.drawRect(option.rect.adjusted(0, 0, -1, -1))
                     painter.restore()
 
