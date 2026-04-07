@@ -22,6 +22,9 @@ _PLAYLIST_URLS: Dict[str, str] = {
 _PLAYLIST_MAP_COUNTS_CACHE: Optional[Tuple[Dict[str, int], Dict[str, Optional[str]], Dict[str, bool]]] = None
 _PLAYLIST_COUNTS_CACHE_FILE: Path = BASE_DIR / "cache" / "accsaber_playlist_counts.json"
 
+# AccSaber マップデータ（ranked-maps + カテゴリ別プレイリスト）のキャッシュファイル
+_ACCSABER_MAPS_CACHE_FILE: Path = BASE_DIR / "cache" / "accsaber_maps.json"
+
 
 def _load_playlist_file_cache() -> Dict[str, Dict]:
     """ファイルキャッシュから前回の総譜面数を読み込む。
@@ -372,3 +375,128 @@ def get_accsaber_playlist_map_counts(session: Optional[requests.Session] = None)
     """互換 API: 総譜面数のみを返す。"""
     counts, _, _ = get_accsaber_playlist_map_counts_with_meta(session)
     return counts
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# AccSaber マップデータキャッシュ (ranked-maps + カテゴリ別プレイリスト)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def fetch_and_save_accsaber_maps_cache(
+    session: Optional[requests.Session] = None,
+) -> None:
+    """AccSaber の ranked-maps と全カテゴリプレイリストをキャッシュファイルに保存する。
+
+    Snapshot 取得時に呼び出す。プレイリスト作成時は load_accsaber_maps_cache() で読む。
+    accsaber_maps.json に以下の形式で保存する::
+
+        {
+            "fetched_at": "2026-04-07T12:00:00Z",
+            "ranked_maps": [...],
+            "playlists": {
+                "true": {"songs": [...]},
+                "standard": {"songs": [...]},
+                "tech": {"songs": [...]}
+            }
+        }
+    """
+    if session is None:
+        session = requests.Session()
+
+    now_z = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    # ranked-maps (complexity 取得用)
+    ranked_maps: List[dict] = []
+    try:
+        resp = session.get("https://accsaber.com/api/ranked-maps", timeout=30)
+        if resp.status_code == 200:
+            ranked_maps = resp.json()
+    except Exception:  # noqa: BLE001
+        pass
+
+    # カテゴリ別プレイリスト
+    playlists: Dict[str, dict] = {}
+    for cat, url in _PLAYLIST_URLS.items():
+        try:
+            resp = session.get(url, timeout=30)
+            resp.raise_for_status()
+            playlists[cat] = resp.json()
+        except Exception:  # noqa: BLE001
+            pass
+
+    data = {
+        "fetched_at": now_z,
+        "ranked_maps": ranked_maps,
+        "playlists": playlists,
+    }
+    try:
+        _ACCSABER_MAPS_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _ACCSABER_MAPS_CACHE_FILE.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def load_accsaber_maps_cache() -> Optional[Dict]:
+    """accsaber_maps.json キャッシュを読み込んで返す。
+
+    ファイルが存在しないか形式が不正な場合は None を返す。
+    """
+    try:
+        data = json.loads(_ACCSABER_MAPS_CACHE_FILE.read_text(encoding="utf-8"))
+        if isinstance(data, dict) and "playlists" in data:
+            return data
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# AccSaber プレイヤースコアキャッシュ
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _accsaber_player_scores_cache_path(steam_id: str) -> Path:
+    return BASE_DIR / "cache" / f"accsaber_player_scores_{steam_id}.json"
+
+
+def fetch_and_save_player_scores_cache(
+    steam_id: str,
+    session: Optional[requests.Session] = None,
+) -> None:
+    """AccSaber プレイヤースコアを取得してキャッシュファイルに保存する。
+
+    Snapshot 取得時に呼び出す。プレイリスト作成時は load_player_scores_from_cache() で読む。
+    """
+    if not steam_id:
+        return
+    if session is None:
+        session = requests.Session()
+    try:
+        resp = session.get(
+            f"https://accsaber.com/api/players/{steam_id}/scores?pageSize=2000",
+            timeout=30,
+        )
+        if resp.status_code != 200:
+            return
+        scores = resp.json()
+        if not isinstance(scores, list):
+            return
+        now_z = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        data = {"fetched_at": now_z, "scores": scores}
+        path = _accsaber_player_scores_cache_path(steam_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def load_player_scores_from_cache(steam_id: str) -> Optional[List[dict]]:
+    """キャッシュから AccSaber プレイヤースコアリストを返す。なければ None。"""
+    try:
+        path = _accsaber_player_scores_cache_path(steam_id)
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(data, dict) and isinstance(data.get("scores"), list):
+            return data["scores"]
+    except Exception:  # noqa: BLE001
+        pass
+    return None

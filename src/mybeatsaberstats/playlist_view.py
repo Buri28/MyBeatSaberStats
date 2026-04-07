@@ -706,19 +706,26 @@ def load_accsaber_maps(
 
     session = requests.Session()
 
+    # キャッシュからマップデータを読み込む（Snapshot 時に保存済みの場合）
+    from .accsaber import load_accsaber_maps_cache as _load_acc_cache
+    _acc_cache = _load_acc_cache()
+
     # AccSaber ranked-maps から (hash.upper(), diff) → complexity インデックスを構築
     complexity_index: Dict[Tuple[str, str], float] = {}
-    try:
-        rm = session.get("https://accsaber.com/api/ranked-maps", timeout=30)
-        if rm.status_code == 200:
-            for m in rm.json():
-                h = (m.get("songHash") or "").upper()
-                dn = _ACC_DIFF_NORM.get((m.get("difficulty") or "").lower(), m.get("difficulty") or "")
-                c = m.get("complexity") or 0.0
-                if h and dn:
-                    complexity_index[(h, dn)] = float(c)
-    except Exception:
-        pass
+    _ranked_maps_src: List[dict] = (_acc_cache.get("ranked_maps") if _acc_cache else None) or []
+    if not _ranked_maps_src:
+        try:
+            rm = session.get("https://accsaber.com/api/ranked-maps", timeout=30)
+            if rm.status_code == 200:
+                _ranked_maps_src = rm.json()
+        except Exception:
+            pass
+    for m in _ranked_maps_src:
+        h = (m.get("songHash") or "").upper()
+        dn = _ACC_DIFF_NORM.get((m.get("difficulty") or "").lower(), m.get("difficulty") or "")
+        c = m.get("complexity") or 0.0
+        if h and dn:
+            complexity_index[(h, dn)] = float(c)
 
     # AccSaber プレイヤースコアを取得し (hash, diff) → cleared/nf セットを構築
     # AccSaber は SC (SmallCubes) 等の特定モディファイアをスコアとしてカウントしないため
@@ -728,29 +735,34 @@ def load_accsaber_maps(
     acc_score_ap: Dict[Tuple[str, str], Tuple[float, int]] = {}  # (hash, diff) → (ap, rank)
     acc_player_scores_available = False
     if steam_id:
-        try:
-            ar = session.get(
-                f"https://accsaber.com/api/players/{steam_id}/scores?pageSize=2000",
-                timeout=15,
-            )
-            if ar.status_code == 200:
-                for asc in ar.json():
-                    h = (asc.get("songHash") or "").upper()
-                    dn = _ACC_DIFF_NORM.get((asc.get("difficulty") or "").lower(), asc.get("difficulty", ""))
-                    mods = (asc.get("mods") or "").upper()
-                    if "NF" in mods:
-                        acc_score_nf.add((h, dn))
-                    else:
-                        acc_score_cleared.add((h, dn))
-                    ap = float(asc.get("ap") or 0)
-                    rank = int(asc.get("rank") or 0)
-                    if ap > 0 and h and dn:
-                        key_ap: Tuple[str, str] = (h, dn)
-                        if ap > acc_score_ap.get(key_ap, (0.0, 0))[0]:
-                            acc_score_ap[key_ap] = (ap, rank)
-                acc_player_scores_available = True
-        except Exception:
-            pass
+        from .accsaber import load_player_scores_from_cache as _load_acc_score_cache
+        _acc_score_list = _load_acc_score_cache(steam_id)
+        if _acc_score_list is None:
+            try:
+                ar = session.get(
+                    f"https://accsaber.com/api/players/{steam_id}/scores?pageSize=2000",
+                    timeout=15,
+                )
+                if ar.status_code == 200:
+                    _acc_score_list = ar.json()
+            except Exception:
+                _acc_score_list = None
+        if _acc_score_list is not None:
+            for asc in _acc_score_list:
+                h = (asc.get("songHash") or "").upper()
+                dn = _ACC_DIFF_NORM.get((asc.get("difficulty") or "").lower(), asc.get("difficulty", ""))
+                mods = (asc.get("mods") or "").upper()
+                if "NF" in mods:
+                    acc_score_nf.add((h, dn))
+                else:
+                    acc_score_cleared.add((h, dn))
+                ap = float(asc.get("ap") or 0)
+                rank = int(asc.get("rank") or 0)
+                if ap > 0 and h and dn:
+                    key_ap: Tuple[str, str] = (h, dn)
+                    if ap > acc_score_ap.get(key_ap, (0.0, 0))[0]:
+                        acc_score_ap[key_ap] = (ap, rank)
+            acc_player_scores_available = True
 
     # SS player scores — pp/acc/rank 表示用、および AccSaber 取得不可時のフォールバック
     ss_scores_raw: Dict[str, dict] = {}
@@ -786,11 +798,15 @@ def load_accsaber_maps(
 
     for i, cat in enumerate(cats):
         if on_progress:
-            on_progress(i, len(cats), f"Fetching AccSaber {cat}...")
-        url = _PLAYLIST_URLS[cat]
-        resp = session.get(url, timeout=30)
-        resp.raise_for_status()
-        bplist_data = resp.json()
+            on_progress(i, len(cats), f"Loading AccSaber {cat}...")
+        _cached_playlists: Dict[str, dict] = (_acc_cache.get("playlists") if _acc_cache else None) or {}
+        if cat in _cached_playlists:
+            bplist_data = _cached_playlists[cat]
+        else:
+            url = _PLAYLIST_URLS[cat]
+            resp = session.get(url, timeout=30)
+            resp.raise_for_status()
+            bplist_data = resp.json()
         songs = bplist_data.get("songs") or []
         for song in songs:
             s_hash = (song.get("hash") or "").upper()
@@ -901,13 +917,34 @@ def _fetch_rl_ap_index(
     player_id: str,
     session: Optional[requests.Session] = None,
 ) -> Dict[str, Tuple[float, int]]:
-    """AccSaber Reloaded プレイヤーの mapDifficultyId → (ap, rank) インデックスを取得する。"""
+    """AccSaber Reloaded プレイヤーの mapDifficultyId → (ap, rank) インデックスを取得する。
+
+    キャッシュが存在する場合はキャッシュから読み込む。
+    """
     if not player_id:
         return {}
+
+    def _build_index(scores: list) -> Dict[str, Tuple[float, int]]:
+        result: Dict[str, Tuple[float, int]] = {}
+        for score in scores:
+            diff_id = score.get("mapDifficultyId")
+            ap = float(score.get("ap") or 0)
+            rank = int(score.get("rank") or 0)
+            if diff_id and ap > 0:
+                prev_ap = result.get(diff_id, (0.0, 0))[0]
+                if prev_ap < ap:
+                    result[diff_id] = (ap, rank)
+        return result
+
+    from .accsaber_reloaded import load_player_scores_from_cache as _load_rl_score_cache
+    _cached = _load_rl_score_cache(player_id)
+    if _cached is not None:
+        return _build_index(_cached)
+
     if session is None:
         session = requests.Session()
     from .accsaber_reloaded import BASE_URL as _RL_BASE, _PAGE_SIZE as _RL_PAGE
-    result: Dict[str, Tuple[float, int]] = {}
+    all_scores: list = []
     page = 0
     while True:
         resp = session.get(
@@ -917,19 +954,11 @@ def _fetch_rl_ap_index(
         )
         resp.raise_for_status()
         data = resp.json()
-        for score in data.get("content", []):
-            diff_id = score.get("mapDifficultyId")
-            ap = float(score.get("ap") or 0)
-            rank = int(score.get("rank") or 0)
-            if diff_id and ap > 0:
-                # 同一難易度に複数スコアがある場合は最大APを保持
-                prev_ap = result.get(diff_id, (0.0, 0))[0]
-                if prev_ap < ap:
-                    result[diff_id] = (ap, rank)
+        all_scores.extend(data.get("content", []))
         if data.get("last", True):
             break
         page += 1
-    return result
+    return _build_index(all_scores)
 
 
 def load_accsaber_reloaded_maps(
@@ -960,15 +989,19 @@ def load_accsaber_reloaded_maps(
         uuid = _NON_OVERALL_IDS.get(category, "")
         target_cat_uuids = {uuid} if uuid else set()
 
-    # AccSaber Reloaded の全マップを取得
+    # AccSaber Reloaded の全マップを取得（キャッシュ優先）
     session = requests.Session()
 
     def _rl_progress(page: int, total: int) -> None:
         if on_progress:
             on_progress(page, total, f"Fetching AccSaber Reloaded maps... {page}/{total}")
 
-    from .accsaber_reloaded import fetch_all_maps_full
-    all_maps = fetch_all_maps_full(session=session, on_progress=_rl_progress)
+    from .accsaber_reloaded import fetch_all_maps_full, load_all_maps_from_cache as _load_rl_cache
+    all_maps = _load_rl_cache()
+    if all_maps is None:
+        all_maps = fetch_all_maps_full(session=session, on_progress=_rl_progress)
+    elif on_progress:
+        on_progress(1, 1, "Loaded AccSaber Reloaded maps from cache")
 
     # RL プレイヤースコア (AP, rank) を mapDifficultyId でインデックス化
     # mapDifficultyId -> (ap, rank)
