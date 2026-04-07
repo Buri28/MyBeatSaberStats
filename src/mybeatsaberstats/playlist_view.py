@@ -520,7 +520,8 @@ _MODE_INFO: Dict[str, str] = {
 
 def _diff_item(difficulty: str) -> QTableWidgetItem:
     short, color = _DIFF_INFO.get(difficulty, (difficulty[:4], QColor("#aaaaaa")))
-    item = QTableWidgetItem(short)
+    _diff_val = {"Easy": 1, "Normal": 3, "Hard": 5, "Expert": 7, "ExpertPlus": 9}
+    item = _NumItem(short, float(_diff_val.get(difficulty, 0)))
     item.setBackground(color)
     item.setForeground(QColor("#DDDDDD") if is_dark() else QColor("#000000"))
     item.setToolTip(difficulty)
@@ -1344,7 +1345,7 @@ def _apply_config_filter(maps: List[MapEntry], cfg: "_BatchConfig") -> List[MapE
     elif cfg.sort_mode == "song_asc":
         result.sort(key=lambda e: e.song_name.lower())
     elif cfg.sort_mode in ("diff_desc", "diff_asc"):
-        _dord = {"Easy": 1, "Normal": 2, "Hard": 3, "Expert": 4, "ExpertPlus": 5}
+        _dord = {"Easy": 1, "Normal": 3, "Hard": 5, "Expert": 7, "ExpertPlus": 9}
         result.sort(key=lambda e: _dord.get(e.difficulty, 0), reverse=(cfg.sort_mode == "diff_desc"))
     elif cfg.sort_mode == "mode_desc":
         result.sort(key=lambda e: e.mode.lower(), reverse=True)
