@@ -51,10 +51,37 @@ from PySide6.QtWidgets import (
     QProgressDialog,
     QApplication,
     QCheckBox,
+    QProxyStyle,
+    QStyle,
+    QStyleOptionHeader,
 )
 
 from .snapshot import BASE_DIR, RESOURCES_DIR
 from .theme import is_dark, table_stylesheet
+
+
+class _SwapSortArrowStyle(QProxyStyle):
+    """ソート矢印を昇順=↑、降順=↓ の直感的表示にするプロキシスタイル。
+
+    Qt デフォルトは昇順=↓、降順=↑ となっているため逆転する。
+    """
+
+    def drawPrimitive(self, element, option, painter, widget=None) -> None:
+        if (
+            element == QStyle.PrimitiveElement.PE_IndicatorHeaderArrow
+            and isinstance(option, QStyleOptionHeader)
+        ):
+            opt = QStyleOptionHeader(option)
+            si = opt.sortIndicator  # type: ignore[attr-defined]
+            SortDown = QStyleOptionHeader.SortIndicator.SortDown  # type: ignore[attr-defined]
+            SortUp = QStyleOptionHeader.SortIndicator.SortUp  # type: ignore[attr-defined]
+            if si == SortDown:
+                opt.sortIndicator = SortUp  # type: ignore[attr-defined]
+            elif si == SortUp:
+                opt.sortIndicator = SortDown  # type: ignore[attr-defined]
+            super().drawPrimitive(element, opt, painter, widget)
+        else:
+            super().drawPrimitive(element, option, painter, widget)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # ソース定数
@@ -106,6 +133,7 @@ class MapEntry:
     acc_rl_ap: float = 0.0  # AccSaber Reloaded AP (0 = 未取得 / 未プレイ)
     acc_complexity: float = 0.0  # AccSaber / AccSaber Reloaded の Complexity
     player_mods: str = ""   # 実際に使用したモディファイア文字列 (例: "NF", "SC", "NF,SC")
+    full_combo: bool = False  # フルコンボ達成済み
     score_source: str = ""  # スコア表示元: "BL" | "SS" | "AS" | ""
 
     @property
@@ -249,6 +277,7 @@ def load_ss_maps(steam_id: Optional[str] = None, filter_stars: bool = True) -> L
         player_pp, cleared, nf_clear, acc, rank, mods = _ss_player_score_info(
             ss_scores, lb_id_str, max_score
         )
+        _fc = bool((ss_scores.get(str(lb_id_str)) or {}).get("score", {}).get("fullCombo"))
 
         entries.append(MapEntry(
             song_name=m.get("songName") or "",
@@ -267,6 +296,7 @@ def load_ss_maps(steam_id: Optional[str] = None, filter_stars: bool = True) -> L
             leaderboard_id=lb_id_str,
             source="scoresaber",
             player_mods=mods,
+            full_combo=_fc,
             score_source="SS",
         ))
 
@@ -311,6 +341,7 @@ def load_bl_maps(steam_id: Optional[str] = None) -> List[MapEntry]:
         stars = float(diff.get("stars") or 0)
 
         player_pp, cleared, nf_clear, acc, rank, mods = _bl_player_score_info(bl_scores, map_id)
+        _fc = bool((bl_scores.get(str(map_id)) or {}).get("fullCombo"))
 
         entries.append(MapEntry(
             song_name=song.get("name") or "",
@@ -329,6 +360,7 @@ def load_bl_maps(steam_id: Optional[str] = None) -> List[MapEntry]:
             leaderboard_id=map_id,
             source="beatleader",
             player_mods=mods,
+            full_combo=_fc,
             score_source="BL",
         ))
 
@@ -510,7 +542,11 @@ def _mode_item(mode: str) -> QTableWidgetItem:
 
 def _sort_dir_from_mode(sort_mode: str) -> str:
     """sort_mode 文字列から 'asc'/'desc' を返す。"""
-    return "desc" if sort_mode in ("pp_high", "ap_high", "acc_high", "rank_high", "star_desc") else "asc"
+    return "desc" if sort_mode in (
+        "pp_high", "ap_high", "acc_high", "rank_high", "star_desc", "fc_desc",
+        "status_desc", "song_desc", "diff_desc", "mode_desc", "cat_desc",
+        "mapper_desc", "author_desc",
+    ) else "asc"
 
 
 def _make_playlist_cover(
@@ -1223,6 +1259,14 @@ class _BatchConfig:
             "ap_high": "APDesc", "ap_low": "APAsc",
             "acc_high": "AccDesc", "acc_low": "AccAsc",
             "rank_low": "RankAsc", "rank_high": "RankDesc",
+            "fc_desc": "FCDesc", "fc_asc": "FCAsc",
+            "status_desc": "StsDesc", "status_asc": "StsAsc",
+            "song_desc": "SongDesc", "song_asc": "SongAsc",
+            "diff_desc": "DiffDesc", "diff_asc": "DiffAsc",
+            "mode_desc": "ModeDesc", "mode_asc": "ModeAsc",
+            "cat_desc": "CatDesc", "cat_asc": "CatAsc",
+            "mapper_desc": "MapperDesc", "mapper_asc": "MapperAsc",
+            "author_desc": "AuthorDesc", "author_asc": "AuthorAsc",
         }.get(self.sort_mode, self.sort_mode)
         q_tag = f" \U0001f50d\"{self.song_filter}\"" if self.song_filter else ""
         if self.source in ("rl", "acc"):
@@ -1253,7 +1297,7 @@ def _apply_config_filter(maps: List[MapEntry], cfg: "_BatchConfig") -> List[MapE
             targets = (e.song_name.lower(), e.song_author.lower(), e.mapper.lower())
             if not all(any(kw in t for t in targets) for kw in keywords):
                 continue
-        if e.stars < cfg.star_min or e.stars > cfg.star_max:
+        if e.stars < cfg.star_min or e.stars >= cfg.star_max:
             continue
         if e.cleared and not cfg.show_cleared:
             continue
@@ -1287,6 +1331,37 @@ def _apply_config_filter(maps: List[MapEntry], cfg: "_BatchConfig") -> List[MapE
         result.sort(key=lambda e: (-(e.player_rank or 0), e.stars, e.song_name))
     elif cfg.sort_mode == "star_desc":
         result.sort(key=lambda e: (-e.stars, e.song_name))
+    elif cfg.sort_mode == "fc_desc":
+        result.sort(key=lambda e: (-int(e.full_combo), e.stars, e.song_name))
+    elif cfg.sort_mode == "fc_asc":
+        result.sort(key=lambda e: (int(e.full_combo), e.stars, e.song_name))
+    elif cfg.sort_mode == "status_desc":
+        result.sort(key=lambda e: -(2 if e.cleared else 1 if e.nf_clear else 0))
+    elif cfg.sort_mode == "status_asc":
+        result.sort(key=lambda e: (2 if e.cleared else 1 if e.nf_clear else 0))
+    elif cfg.sort_mode == "song_desc":
+        result.sort(key=lambda e: e.song_name.lower(), reverse=True)
+    elif cfg.sort_mode == "song_asc":
+        result.sort(key=lambda e: e.song_name.lower())
+    elif cfg.sort_mode in ("diff_desc", "diff_asc"):
+        _dord = {"Easy": 1, "Normal": 2, "Hard": 3, "Expert": 4, "ExpertPlus": 5}
+        result.sort(key=lambda e: _dord.get(e.difficulty, 0), reverse=(cfg.sort_mode == "diff_desc"))
+    elif cfg.sort_mode == "mode_desc":
+        result.sort(key=lambda e: e.mode.lower(), reverse=True)
+    elif cfg.sort_mode == "mode_asc":
+        result.sort(key=lambda e: e.mode.lower())
+    elif cfg.sort_mode == "cat_desc":
+        result.sort(key=lambda e: e.acc_category.lower(), reverse=True)
+    elif cfg.sort_mode == "cat_asc":
+        result.sort(key=lambda e: e.acc_category.lower())
+    elif cfg.sort_mode == "mapper_desc":
+        result.sort(key=lambda e: e.mapper.lower(), reverse=True)
+    elif cfg.sort_mode == "mapper_asc":
+        result.sort(key=lambda e: e.mapper.lower())
+    elif cfg.sort_mode == "author_desc":
+        result.sort(key=lambda e: e.song_author.lower(), reverse=True)
+    elif cfg.sort_mode == "author_asc":
+        result.sort(key=lambda e: e.song_author.lower())
     else:
         result.sort(key=lambda e: (e.stars, e.song_name))
     return result
@@ -1350,22 +1425,46 @@ def _config_export_tag(cfg: "_BatchConfig") -> str:
         "ap_high": "APDesc", "ap_low": "APAsc",
         "acc_high": "AccDesc", "acc_low": "AccAsc",
         "rank_low": "RankAsc", "rank_high": "RankDesc",
+        "fc_desc": "FCDesc", "fc_asc": "FCAsc",
+        "status_desc": "StsDesc", "status_asc": "StsAsc",
+        "song_desc": "SongDesc", "song_asc": "SongAsc",
+        "diff_desc": "DiffDesc", "diff_asc": "DiffAsc",
+        "mode_desc": "ModeDesc", "mode_asc": "ModeAsc",
+        "cat_desc": "CatDesc", "cat_asc": "CatAsc",
+        "mapper_desc": "MapperDesc", "mapper_asc": "MapperAsc",
+        "author_desc": "AuthorDesc", "author_asc": "AuthorAsc",
     }
     parts.append(_sort_tags.get(cfg.sort_mode, cfg.sort_mode))
     return "_".join(parts)
 
 
 _SORT_SYMBOL: Dict[str, str] = {
-    "star_asc":  "★↑",
-    "star_desc": "★↓",
-    "pp_high":   "PP↓",
-    "pp_low":    "PP↑",
-    "ap_high":   "AP↓",
-    "ap_low":    "AP↑",
-    "acc_high":  "Acc↓",
-    "acc_low":   "Acc↑",
-    "rank_low":  "Rank↑",
-    "rank_high": "Rank↓",
+    "star_asc":      "★↑",
+    "star_desc":     "★↓",
+    "pp_high":       "PP↓",
+    "pp_low":        "PP↑",
+    "ap_high":       "AP↓",
+    "ap_low":        "AP↑",
+    "acc_high":      "Acc↓",
+    "acc_low":       "Acc↑",
+    "rank_low":      "Rank↑",
+    "rank_high":     "Rank↓",
+    "fc_desc":       "FC↑",
+    "fc_asc":        "FC↓",
+    "status_desc":   "Sts↓",
+    "status_asc":    "Sts↑",
+    "song_desc":     "Song↓",
+    "song_asc":      "Song↑",
+    "diff_desc":     "Diff↓",
+    "diff_asc":      "Diff↑",
+    "mode_desc":     "Mode↓",
+    "mode_asc":      "Mode↑",
+    "cat_desc":      "Cat↓",
+    "cat_asc":       "Cat↑",
+    "mapper_desc":   "Mapper↓",
+    "mapper_asc":    "Mapper↑",
+    "author_desc":   "Author↓",
+    "author_asc":    "Author↑",
 }
 _CAT_LABEL: Dict[str, str] = {
     "true": "True", "standard": "Standard", "tech": "Tech",
@@ -1563,14 +1662,15 @@ _COL_PLAYER_RANK = 6
 _COL_STARS = 7
 _COL_PLAYER_ACC = 8
 _COL_PLAYER_PP = 9
-_COL_MOD = 10
-_COL_MAPPER = 11
-_COL_AUTHOR = 12
-_COL_COUNT = 13
+_COL_FC = 10
+_COL_MOD = 11
+_COL_MAPPER = 12
+_COL_AUTHOR = 13
+_COL_COUNT = 14
 
 _COL_LABELS = [
     "Status", "Song", "Diff", "Mode", "Acc Category", "Service", "Rank", "★", "Acc %", "Player PP",
-    "Mods", "Mapper", "Author",
+    "FC", "Mods", "Mapper", "Author",
 ]
 
 
@@ -1845,6 +1945,7 @@ class PlaylistWindow(QMainWindow):
         hdr.setStretchLastSection(True)
         hdr.setSectionsMovable(True)
         hdr.sectionClicked.connect(self._on_header_clicked)
+        hdr.setStyle(_SwapSortArrowStyle())
 
         # 初期列幅調整
         self._table.setColumnWidth(_COL_STATUS, 52)
@@ -1857,6 +1958,7 @@ class PlaylistWindow(QMainWindow):
         self._table.setColumnWidth(_COL_STARS, 64)
         self._table.setColumnWidth(_COL_PLAYER_ACC, 64)
         self._table.setColumnWidth(_COL_PLAYER_PP, 72)
+        self._table.setColumnWidth(_COL_FC, 32)
         self._table.setColumnWidth(_COL_MOD, 68)
         self._table.setColumnWidth(_COL_AUTHOR, 140)
         self._table.setColumnWidth(_COL_MAPPER, 120)
@@ -2040,6 +2142,64 @@ class PlaylistWindow(QMainWindow):
         if self._all_entries:
             self._refresh_table(self._filtered)
 
+    def apply_filter_preset(
+        self,
+        source: str,
+        star_min: float = 0.0,
+        star_max: float = 20.0,
+        categories: Optional[List[str]] = None,
+        sort_mode: str = "status_desc",
+    ) -> None:
+        """Stats 画面からの遷移用。ソース・星範囲・カテゴリ・ソートをプリセットして Load する。
+
+        source: "ss" | "bl" | "acc" | "acc_rl"
+        categories: None = 全カテゴリ / ["true"/"standard"/"tech"] で絞り込み
+        sort_mode: "status_desc" | "pp_high" | "ap_high" など
+        """
+        # ソースラジオボタンを切り替え（シグナルで _on_source_changed が呼ばれる）
+        _rb_map = {"ss": self._rb_ss, "bl": self._rb_bl, "acc": self._rb_acc, "acc_rl": self._rb_acc_rl}
+        rb = _rb_map.get(source)
+        if rb is not None:
+            rb.setChecked(True)
+
+        # 星範囲を設定（シグナルを一時ブロックして二重フィルタを防ぐ）
+        self._star_min.blockSignals(True)
+        self._star_max.blockSignals(True)
+        self._star_min.setValue(star_min)
+        self._star_max.setValue(star_max)
+        self._star_min.blockSignals(False)
+        self._star_max.blockSignals(False)
+
+        # カテゴリチェックボックスを設定
+        for cat, cb in [
+            ("true", self._cb_cat_true),
+            ("standard", self._cb_cat_standard),
+            ("tech", self._cb_cat_tech),
+        ]:
+            cb.blockSignals(True)
+            cb.setChecked(categories is None or cat in categories)
+            cb.blockSignals(False)
+
+        # Export スタイルを Split by ★ / Category に設定
+        self._rb_exp_split.setChecked(True)
+
+        # ソートインジケータを sort_mode に合わせて設定
+        _sort_col_map = {
+            "status_desc": (_COL_STATUS,    Qt.SortOrder.DescendingOrder),
+            "pp_high":     (_COL_PLAYER_PP, Qt.SortOrder.DescendingOrder),
+            "pp_low":      (_COL_PLAYER_PP, Qt.SortOrder.AscendingOrder),
+            "ap_high":     (_COL_PLAYER_PP, Qt.SortOrder.DescendingOrder),
+            "ap_low":      (_COL_PLAYER_PP, Qt.SortOrder.AscendingOrder),
+            "fc_desc":     (_COL_FC,        Qt.SortOrder.DescendingOrder),
+            "fc_asc":      (_COL_FC,        Qt.SortOrder.AscendingOrder),
+        }
+        sort_col, sort_order = _sort_col_map.get(sort_mode, (_COL_STATUS, Qt.SortOrder.DescendingOrder))
+        self._table.horizontalHeader().setSortIndicator(sort_col, sort_order)
+        self._update_sort_label()
+
+        # データをロード
+        self._load_data()
+
     # ──────────────────────────────────────────────────────────────────────────
     # ソース選択イベント
     # ──────────────────────────────────────────────────────────────────────────
@@ -2121,6 +2281,16 @@ class PlaylistWindow(QMainWindow):
         col = self._table.horizontalHeader().sortIndicatorSection()
         order = self._table.horizontalHeader().sortIndicatorOrder()
         is_desc = (order == Qt.SortOrder.DescendingOrder)
+        if col == _COL_STATUS:
+            return "status_desc" if is_desc else "status_asc"
+        if col == _COL_SONG:
+            return "song_desc" if is_desc else "song_asc"
+        if col == _COL_DIFF:
+            return "diff_desc" if is_desc else "diff_asc"
+        if col == _COL_MODE:
+            return "mode_desc" if is_desc else "mode_asc"
+        if col == _COL_ACC_CAT:
+            return "cat_desc" if is_desc else "cat_asc"
         if col == _COL_PLAYER_PP:
             # AccSaber/RL モードでは AP 表示のため ap ソートモードを返す
             hdr = self._table.horizontalHeaderItem(_COL_PLAYER_PP)
@@ -2133,6 +2303,12 @@ class PlaylistWindow(QMainWindow):
             return "rank_high" if is_desc else "rank_low"
         if col == _COL_STARS:
             return "star_desc" if is_desc else "star_asc"
+        if col == _COL_FC:
+            return "fc_desc" if is_desc else "fc_asc"
+        if col == _COL_MAPPER:
+            return "mapper_desc" if is_desc else "mapper_asc"
+        if col == _COL_AUTHOR:
+            return "author_desc" if is_desc else "author_asc"
         return "star_asc"
 
     def _make_export_tag(self) -> str:
@@ -2186,6 +2362,14 @@ class PlaylistWindow(QMainWindow):
             "ap_high": "ap_desc", "ap_low": "ap_asc",
             "acc_high": "acc_desc", "acc_low": "acc_asc",
             "rank_low": "rank_asc", "rank_high": "rank_desc",
+            "fc_desc": "fc_desc", "fc_asc": "fc_asc",
+            "status_desc": "status_desc", "status_asc": "status_asc",
+            "song_desc": "song_desc", "song_asc": "song_asc",
+            "diff_desc": "diff_desc", "diff_asc": "diff_asc",
+            "mode_desc": "mode_desc", "mode_asc": "mode_asc",
+            "cat_desc": "cat_desc", "cat_asc": "cat_asc",
+            "mapper_desc": "mapper_desc", "mapper_asc": "mapper_asc",
+            "author_desc": "author_desc", "author_asc": "author_asc",
         }
         parts.append(_sort_tags.get(sort_mode, sort_mode))
 
@@ -2928,7 +3112,7 @@ class PlaylistWindow(QMainWindow):
         result: List[MapEntry] = []
         for e in self._all_entries:
             # 星フィルタ
-            if e.stars < star_min or e.stars > star_max:
+            if e.stars < star_min or e.stars >= star_max:
                 continue
             # テキストフィルタ
             if keywords:
@@ -3030,6 +3214,10 @@ class PlaylistWindow(QMainWindow):
             table.setItem(row, _COL_AUTHOR, QTableWidgetItem(e.song_author))
             # マッパー
             table.setItem(row, _COL_MAPPER, QTableWidgetItem(e.mapper))
+            # FC
+            fc_item = _NumItem("FC" if e.full_combo else "", 1.0 if e.full_combo else 0.0)
+            fc_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            table.setItem(row, _COL_FC, fc_item)
             # Mod (SC, NF, etc.)
             mod_item = QTableWidgetItem(e.player_mods)
             mod_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
