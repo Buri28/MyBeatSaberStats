@@ -9,8 +9,8 @@ from typing import Callable, Dict, List, Optional
 import json
 from datetime import datetime, timezone
 
-from PySide6.QtCore import QSize, Qt, QDateTime, QTimer, Signal, QObject
-from PySide6.QtGui import QBrush, QColor, QFont, QIcon, QPalette, QPixmap, QCursor
+from PySide6.QtCore import QEvent, QSize, Qt, QDateTime, QTimer, Signal, QObject
+from PySide6.QtGui import QBrush, QColor, QFont, QIcon, QPalette, QPen, QPixmap, QCursor
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -595,6 +595,78 @@ class ColumnMaxBarDelegate(QStyledItemDelegate):
         super().paint(painter, option, index)
 
 
+class _ClickableColHover(QObject):
+    """テーブルの特定列にホバーカーソルとグロー演出を追加するヘルパー。
+
+    inner デリゲートをラップした新しいデリゲートを列に設定し、
+    ビューポートのイベントフィルタでカーソル変更とセル再描画を管理する。
+    """
+
+    def __init__(self, table: QTableWidget, col: int, inner: QStyledItemDelegate) -> None:
+        super().__init__(table)
+        self._table = table
+        self._col = col
+        self._hover_row: int = -1
+
+        vp = table.viewport()
+        vp.setMouseTracking(True)
+        vp.installEventFilter(self)
+
+        hover_ref = self
+
+        class _HoverDelegate(QStyledItemDelegate):
+            def initStyleOption(self, option, index) -> None:  # type: ignore[override]
+                inner.initStyleOption(option, index)
+
+            def sizeHint(self, option, index):  # type: ignore[override]
+                return inner.sizeHint(option, index)
+
+            def paint(self, painter, option, index) -> None:  # type: ignore[override]
+                inner.paint(painter, option, index)
+                if index.row() == hover_ref._hover_row:
+                    painter.save()
+                    glow = QColor(255, 255, 255, 55) if is_dark() else QColor(255, 255, 255, 90)
+                    painter.fillRect(option.rect, glow)
+                    painter.setPen(QPen(QColor(100, 180, 255, 190), 1))
+                    painter.drawRect(option.rect.adjusted(0, 0, -1, -1))
+                    painter.restore()
+
+        self._delegate = _HoverDelegate(table)
+        table.setItemDelegateForColumn(col, self._delegate)
+
+    def eventFilter(self, obj, event) -> bool:  # type: ignore[override]
+        if obj is self._table.viewport():
+            etype = event.type()
+            if etype == QEvent.Type.MouseMove:
+                pos = event.position().toPoint()
+                idx = self._table.indexAt(pos)
+                new_row = idx.row() if (idx.isValid() and idx.column() == self._col) else -1
+                if new_row != self._hover_row:
+                    old = self._hover_row
+                    self._hover_row = new_row
+                    self._repaint(old)
+                    self._repaint(new_row)
+                self._table.viewport().setCursor(
+                    Qt.CursorShape.PointingHandCursor if new_row >= 0 else Qt.CursorShape.ArrowCursor
+                )
+            elif etype == QEvent.Type.Leave:
+                old = self._hover_row
+                self._hover_row = -1
+                self._table.viewport().unsetCursor()
+                self._repaint(old)
+        return False
+
+    def _repaint(self, row: int) -> None:
+        if row < 0:
+            return
+        model = self._table.model()
+        if model is None:
+            return
+        rect = self._table.visualRect(model.index(row, self._col))
+        if rect.isValid():
+            self._table.viewport().update(rect)
+
+
 class _AvatarFetchSignals(QObject):
     """非同期アバター取得の完了シグナル。"""
     fetched = Signal(str, bytes)   # service ("ss" | "bl"), image_bytes
@@ -982,9 +1054,9 @@ class PlayerWindow(QMainWindow):
         # acc_table の行番号も非表示にする
         self.acc_table.verticalHeader().setVisible(False)
 
-        # AccSaber / AccSaber Reloaded Play Count 列 (col 3) にバーを表示するデリゲート
-        self.acc_table.setItemDelegateForColumn(3, AccPlayCountBarDelegate(self))
-        self.acc_rl_table.setItemDelegateForColumn(3, AccPlayCountBarDelegate(self))
+        # AccSaber / AccSaber Reloaded Play Count 列 (col 3) にバーを表示するデリゲート（ホバー演出付き）
+        _ClickableColHover(self.acc_table, 3, AccPlayCountBarDelegate(self))
+        _ClickableColHover(self.acc_rl_table, 3, AccPlayCountBarDelegate(self))
         # AccSaber / AccSaber Reloaded Avg Acc 列 (col 4): 70〜100% グラデーション
         self.acc_table.setItemDelegateForColumn(4, PercentageBarDelegate(self, max_value=100.0, gradient_min=70.0))
         self.acc_rl_table.setItemDelegateForColumn(4, PercentageBarDelegate(self, max_value=100.0, gradient_min=70.0))
@@ -995,13 +1067,13 @@ class PlayerWindow(QMainWindow):
         # Avg ACC 用: 70% 以下は常に赤、それ以上を 70〜100% の範囲でグラデーション
         perc_acc = PercentageBarDelegate(self, max_value=100.0, gradient_min=70.0)
 
-        # ScoreSaber: Clear Rate (3列目), FC Rate (5列目), Avg ACC (6列目)
-        self.star_table.setItemDelegateForColumn(3, perc_clear)
-        self.star_table.setItemDelegateForColumn(5, perc_clear)
+        # ScoreSaber: Clear Rate (3列目, ホバー演出付き), FC Rate (5列目), Avg ACC (6列目)
+        _ClickableColHover(self.star_table, 3, perc_clear)
+        _ClickableColHover(self.star_table, 5, perc_clear)
         self.star_table.setItemDelegateForColumn(6, perc_acc)
-        # BeatLeader: Clear Rate, FC Rate, Avg ACC
-        self.bl_star_table.setItemDelegateForColumn(3, perc_clear)
-        self.bl_star_table.setItemDelegateForColumn(5, perc_clear)
+        # BeatLeader: Clear Rate (ホバー演出付き), FC Rate, Avg ACC
+        _ClickableColHover(self.bl_star_table, 3, perc_clear)
+        _ClickableColHover(self.bl_star_table, 5, perc_clear)
         self.bl_star_table.setItemDelegateForColumn(6, perc_acc)
         # PP 列はデリゲート対象のため、列番号が 9→10 にシフトしたことに合わせて後で上書き
 
@@ -1009,10 +1081,14 @@ class PlayerWindow(QMainWindow):
         self.star_table.horizontalHeader().setSectionsMovable(True)
         self.bl_star_table.horizontalHeader().setSectionsMovable(True)
 
-        # PP 列 (col 10): 列内最大値を MAX として赤→青グラデーションバーを表示
+        # PP 列 (col 10): 列内最大値を MAX として赤→青グラデーションバーを表示（ホバー演出付き）
         perc_pp = ColumnMaxBarDelegate(self)
-        self.star_table.setItemDelegateForColumn(10, perc_pp)
-        self.bl_star_table.setItemDelegateForColumn(10, perc_pp)
+        _ClickableColHover(self.star_table, 10, perc_pp)
+        _ClickableColHover(self.bl_star_table, 10, perc_pp)
+
+        # AccSaber AP 列 (col 1) にホバー演出を追加
+        _ClickableColHover(self.acc_table, 1, QStyledItemDelegate(self))
+        _ClickableColHover(self.acc_rl_table, 1, QStyledItemDelegate(self))
 
         # BL Avg ACC 列の L/R トグル変数
         self._bl_acc_show_lr: bool = False
@@ -1021,6 +1097,18 @@ class PlayerWindow(QMainWindow):
         self.bl_star_table.horizontalHeader().sectionClicked.connect(
             lambda col: self._on_bl_acc_cell_clicked(0, col)
         )
+
+        # Stats → Playlist 連携: Clear Rate / FC Rate / Play Count / PP / AP クリックでプレイリスト画面を開く
+        self.star_table.cellClicked.connect(self._on_ss_clear_rate_clicked)
+        self.star_table.cellClicked.connect(self._on_ss_fc_rate_clicked)
+        self.star_table.cellClicked.connect(self._on_ss_pp_clicked)
+        self.bl_star_table.cellClicked.connect(self._on_bl_clear_rate_clicked)
+        self.bl_star_table.cellClicked.connect(self._on_bl_fc_rate_clicked)
+        self.bl_star_table.cellClicked.connect(self._on_bl_pp_clicked)
+        self.acc_table.cellClicked.connect(self._on_acc_play_count_clicked)
+        self.acc_table.cellClicked.connect(self._on_acc_ap_clicked)
+        self.acc_rl_table.cellClicked.connect(self._on_acc_rl_play_count_clicked)
+        self.acc_rl_table.cellClicked.connect(self._on_acc_rl_ap_clicked)
 
         # --- SS パネル (左列): [アイコン+IDヘッダ] + [情報テーブル(2行6列)] + [★テーブル] ---
         self._ss_id_label = QLabel("", self)
@@ -3035,6 +3123,154 @@ class PlayerWindow(QMainWindow):
         self._playlist_window.show()
         self._playlist_window.raise_()
         self._playlist_window.activateWindow()
+
+    def open_playlist_with_filter(
+        self,
+        source: str,
+        star_min: float = 0.0,
+        star_max: float = 20.0,
+        categories: Optional[List[str]] = None,
+        sort_mode: str = "status_desc",
+    ) -> None:
+        """Stats 画面からの連携用。Playlist 画面を開いてフィルタプリセットを適用する。"""
+        self.open_playlist()
+        if self._playlist_window is not None:
+            self._playlist_window.apply_filter_preset(
+                source=source,
+                star_min=star_min,
+                star_max=star_max,
+                categories=categories,
+                sort_mode=sort_mode,
+            )
+
+    def _on_ss_clear_rate_clicked(self, row: int, col: int) -> None:
+        """SS ★テーブルの Clear Rate 列クリックで Playlist 画面を開く。"""
+        if col != 3:
+            return
+        star_item = self.star_table.item(row, 0)
+        if star_item is None:
+            return
+        try:
+            star = int(star_item.text())
+        except ValueError:
+            # "Total" 行など: 星フィルタなし
+            self.open_playlist_with_filter("ss")
+            return
+        self.open_playlist_with_filter("ss", star_min=float(star), star_max=float(star) + 1.0)
+
+    def _on_ss_pp_clicked(self, row: int, col: int) -> None:
+        """SS ★テーブルの PP 列クリックで Playlist 画面を PP 高順で開く。"""
+        if col != 10:
+            return
+        star_item = self.star_table.item(row, 0)
+        if star_item is None:
+            return
+        try:
+            star = int(star_item.text())
+            self.open_playlist_with_filter("ss", star_min=float(star), star_max=float(star) + 1.0, sort_mode="pp_high")
+        except ValueError:
+            self.open_playlist_with_filter("ss", sort_mode="pp_high")
+
+    def _on_ss_fc_rate_clicked(self, row: int, col: int) -> None:
+        """SS ★テーブルの FC Rate 列クリックで Playlist 画面を FC 昇順で開く。"""
+        if col != 5:
+            return
+        star_item = self.star_table.item(row, 0)
+        if star_item is None:
+            return
+        try:
+            star = int(star_item.text())
+            self.open_playlist_with_filter("ss", star_min=float(star), star_max=float(star) + 1.0, sort_mode="fc_asc")
+        except ValueError:
+            self.open_playlist_with_filter("ss", sort_mode="fc_asc")
+
+    def _on_bl_clear_rate_clicked(self, row: int, col: int) -> None:
+        """BL ★テーブルの Clear Rate 列クリックで Playlist 画面を開く。"""
+        if col != 3:
+            return
+        star_item = self.bl_star_table.item(row, 0)
+        if star_item is None:
+            return
+        try:
+            star = int(star_item.text())
+        except ValueError:
+            self.open_playlist_with_filter("bl")
+            return
+        self.open_playlist_with_filter("bl", star_min=float(star), star_max=float(star) + 1.0)
+
+    def _on_bl_pp_clicked(self, row: int, col: int) -> None:
+        """BL ★テーブルの PP 列クリックで Playlist 画面を PP 高順で開く。"""
+        if col != 10:
+            return
+        star_item = self.bl_star_table.item(row, 0)
+        if star_item is None:
+            return
+        try:
+            star = int(star_item.text())
+            self.open_playlist_with_filter("bl", star_min=float(star), star_max=float(star) + 1.0, sort_mode="pp_high")
+        except ValueError:
+            self.open_playlist_with_filter("bl", sort_mode="pp_high")
+
+    def _on_bl_fc_rate_clicked(self, row: int, col: int) -> None:
+        """BL ★テーブルの FC Rate 列クリックで Playlist 画面を FC 昇順で開く。"""
+        if col != 5:
+            return
+        star_item = self.bl_star_table.item(row, 0)
+        if star_item is None:
+            return
+        try:
+            star = int(star_item.text())
+            self.open_playlist_with_filter("bl", star_min=float(star), star_max=float(star) + 1.0, sort_mode="fc_asc")
+        except ValueError:
+            self.open_playlist_with_filter("bl", sort_mode="fc_asc")
+
+    def _on_acc_play_count_clicked(self, row: int, col: int) -> None:
+        """AccSaber テーブルの Play Count 列クリックで Playlist 画面を開く。"""
+        if col != 3:
+            return
+        _row_categories: Dict[int, Optional[List[str]]] = {
+            0: None,          # Overall
+            1: ["true"],
+            2: ["standard"],
+            3: ["tech"],
+        }
+        self.open_playlist_with_filter("acc", categories=_row_categories.get(row))
+
+    def _on_acc_ap_clicked(self, row: int, col: int) -> None:
+        """AccSaber テーブルの AP 列クリックで Playlist 画面を AP 高順で開く。"""
+        if col != 1:
+            return
+        _row_categories: Dict[int, Optional[List[str]]] = {
+            0: None,
+            1: ["true"],
+            2: ["standard"],
+            3: ["tech"],
+        }
+        self.open_playlist_with_filter("acc", categories=_row_categories.get(row), sort_mode="ap_high")
+
+    def _on_acc_rl_play_count_clicked(self, row: int, col: int) -> None:
+        """AccSaber Reloaded テーブルの Play Count 列クリックで Playlist 画面を開く。"""
+        if col != 3:
+            return
+        _row_categories: Dict[int, Optional[List[str]]] = {
+            0: None,          # Overall
+            1: ["true"],
+            2: ["standard"],
+            3: ["tech"],
+        }
+        self.open_playlist_with_filter("acc_rl", categories=_row_categories.get(row))
+
+    def _on_acc_rl_ap_clicked(self, row: int, col: int) -> None:
+        """AccSaber Reloaded テーブルの AP 列クリックで Playlist 画面を AP 高順で開く。"""
+        if col != 1:
+            return
+        _row_categories: Dict[int, Optional[List[str]]] = {
+            0: None,
+            1: ["true"],
+            2: ["standard"],
+            3: ["tech"],
+        }
+        self.open_playlist_with_filter("acc_rl", categories=_row_categories.get(row), sort_mode="ap_high")
 
 
 def run() -> None:
