@@ -40,6 +40,8 @@ from ..accsaber import (
     ACCSABER_MIN_AP_GLOBAL,
     ACCSABER_MIN_AP_SKILL,
     get_accsaber_playlist_map_counts_with_meta,
+    fetch_and_save_accsaber_maps_cache as _fetch_and_save_accsaber_maps,
+    fetch_and_save_player_scores_cache as _fetch_and_save_acc_player_scores,
 )
 from .accsaber import (
     _load_list_cache,
@@ -49,6 +51,8 @@ from .accsaber import (
 from ..accsaber_reloaded import fetch_player_all_categories as _fetch_accsaber_reloaded
 from ..accsaber_reloaded import fetch_player_xp as _fetch_accsaber_reloaded_xp
 from ..accsaber_reloaded import fetch_reloaded_map_counts as _fetch_reloaded_map_counts
+from ..accsaber_reloaded import fetch_and_save_all_maps_cache as _fetch_and_save_rl_maps
+from ..accsaber_reloaded import fetch_and_save_player_scores_cache as _fetch_and_save_rl_player_scores
 
 # キャッシュディレクトリ(app.py と同じ BASE_DIR / "cache" を利用)
 CACHE_DIR = BASE_DIR / "cache"
@@ -592,6 +596,18 @@ def ensure_global_rank_caches(
     # AccSaber Reloaded 総譜面数を更新する（accsaber_reloaded_map_counts.json）
     try:
         _fetch_reloaded_map_counts(session=session)
+    except Exception:  # noqa: BLE001
+        pass
+
+    # AccSaber マップデータ（ranked-maps + プレイリスト）をキャッシュに保存する
+    try:
+        _fetch_and_save_accsaber_maps(session=session)
+    except Exception:  # noqa: BLE001
+        pass
+
+    # AccSaber Reloaded 全マップデータをキャッシュに保存する
+    try:
+        _fetch_and_save_rl_maps(session=session)
     except Exception:  # noqa: BLE001
         pass
 
@@ -1674,6 +1690,19 @@ def create_snapshot_for_steam_id(
             _fetch_reloaded_map_counts(session=session)
         except Exception:  # noqa: BLE001
             pass
+        # AccSaber マップデータ（ranked-maps + プレイリスト）をキャッシュに保存する
+        try:
+            _step(0.63, "Fetching AccSaber map data for playlist cache...")
+            _fetch_and_save_accsaber_maps(session=session)
+        except Exception:  # noqa: BLE001
+            pass
+        # AccSaber プレイヤースコアをキャッシュに保存する
+        if scoresaber_id:
+            try:
+                _step(0.64, "Fetching AccSaber player scores for cache...")
+                _fetch_and_save_acc_player_scores(scoresaber_id, session=session)
+            except Exception:  # noqa: BLE001
+                pass
     else:
         print("9. AccSaber 取得スキップ（オプションが無効）")
         _step(0.60, "Skipping AccSaber data...")
@@ -1768,6 +1797,19 @@ def create_snapshot_for_steam_id(
             accsaber_reloaded_xp_rank_country = _rl_xp_result.rank_country
 
         print("9.4R AccSaber Reloaded プレイヤーステータス取得完了。")
+
+        # AccSaber Reloaded 全マップデータをキャッシュに保存する
+        try:
+            _step(0.65, "Fetching AccSaber Reloaded map data for playlist cache...")
+            _fetch_and_save_rl_maps(session=session)
+        except Exception as exc:  # noqa: BLE001
+            _rethrow_if_cancelled(exc)
+        # AccSaber Reloaded プレイヤースコアをキャッシュに保存する
+        try:
+            _step(0.66, "Fetching AccSaber Reloaded player scores for cache...")
+            _fetch_and_save_rl_player_scores(_rl_player_id, session=session)
+        except Exception as exc:  # noqa: BLE001
+            _rethrow_if_cancelled(exc)
     else:
         if not options.fetch_accsaber_reloaded:
             print("9.4R AccSaber Reloaded 取得スキップ（オプションが無効）")

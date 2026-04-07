@@ -27,6 +27,9 @@ _PAGE_SIZE = 50
 
 _MAP_COUNTS_CACHE_FILE: Path = BASE_DIR / "cache" / "accsaber_reloaded_map_counts.json"
 
+# AccSaber Reloaded 全マップデータのキャッシュファイル
+_ALL_MAPS_CACHE_FILE: Path = BASE_DIR / "cache" / "accsaber_reloaded_maps.json"
+
 
 def _load_map_counts_file_cache() -> Dict[str, Dict]:
     """ファイルキャッシュから前回の総譜面数を読み込む。"""
@@ -395,6 +398,106 @@ def fetch_player_scored_diff_ids(
         page += 1
 
     return result
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# AccSaber Reloaded 全マップデータキャッシュ
+# ──────────────────────────────────────────────────────────────────────────────
+
+def fetch_and_save_all_maps_cache(
+    session: Optional[requests.Session] = None,
+    on_progress=None,
+) -> None:
+    """AccSaber Reloaded の全マップを取得してキャッシュファイルに保存する。
+
+    Snapshot 取得時に呼び出す。プレイリスト作成時は load_all_maps_from_cache() で読む。
+    accsaber_reloaded_maps.json に以下の形式で保存する::
+
+        {
+            "fetched_at": "2026-04-07T12:00:00Z",
+            "maps": [...]
+        }
+    """
+    all_maps = fetch_all_maps_full(session=session, on_progress=on_progress)
+    now_z = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    data = {"fetched_at": now_z, "maps": all_maps}
+    try:
+        _ALL_MAPS_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _ALL_MAPS_CACHE_FILE.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def load_all_maps_from_cache() -> Optional[List[Dict]]:
+    """accsaber_reloaded_maps.json キャッシュを読み込んで全マップリストを返す。
+
+    ファイルが存在しないか形式が不正な場合は None を返す。
+    """
+    try:
+        data = json.loads(_ALL_MAPS_CACHE_FILE.read_text(encoding="utf-8"))
+        if isinstance(data, dict) and isinstance(data.get("maps"), list):
+            return data["maps"]
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# AccSaber Reloaded プレイヤースコアキャッシュ
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _rl_player_scores_cache_path(player_id: str) -> Path:
+    return BASE_DIR / "cache" / f"accsaber_reloaded_player_scores_{player_id}.json"
+
+
+def fetch_and_save_player_scores_cache(
+    player_id: str,
+    session: Optional[requests.Session] = None,
+) -> None:
+    """AccSaber Reloaded プレイヤースコアを全ページ取得してキャッシュファイルに保存する。
+
+    Snapshot 取得時に呼び出す。プレイリスト作成時は load_player_scores_from_cache() で読む。
+    """
+    if not player_id:
+        return
+    if session is None:
+        session = requests.Session()
+    all_scores: List[Dict] = []
+    try:
+        page = 0
+        while True:
+            resp = session.get(
+                f"{BASE_URL}/users/{player_id}/scores",
+                params={"page": page, "size": _PAGE_SIZE},
+                timeout=30,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            all_scores.extend(data.get("content", []))
+            if data.get("last", True):
+                break
+            page += 1
+        now_z = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        cache_data = {"fetched_at": now_z, "scores": all_scores}
+        path = _rl_player_scores_cache_path(player_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(cache_data, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def load_player_scores_from_cache(player_id: str) -> Optional[List[Dict]]:
+    """キャッシュから AccSaber Reloaded プレイヤースコアリストを返す。なければ None。"""
+    try:
+        path = _rl_player_scores_cache_path(player_id)
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(data, dict) and isinstance(data.get("scores"), list):
+            return data["scores"]
+    except Exception:  # noqa: BLE001
+        pass
+    return None
 
 
 def build_unplayed_bplist(
