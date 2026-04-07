@@ -1072,12 +1072,17 @@ class PlayerWindow(QMainWindow):
         # Avg ACC 用: 70% 以下は常に赤、それ以上を 70〜100% の範囲でグラデーション
         perc_acc = PercentageBarDelegate(self, max_value=100.0, gradient_min=70.0)
 
-        # ScoreSaber: Clear Rate (3列目, ホバー演出付き), FC Rate (5列目), Avg ACC (6列目)
+        # ScoreSaber: Clears/FC はリンクのみ(バーなし)、Clear Rate/FC Rate はバー付き、Avg ACC
+        _plain = QStyledItemDelegate(self)
+        _ClickableColHover(self.star_table, 2, _plain)
         _ClickableColHover(self.star_table, 3, perc_clear)
+        _ClickableColHover(self.star_table, 4, _plain)
         _ClickableColHover(self.star_table, 5, perc_clear)
         self.star_table.setItemDelegateForColumn(6, perc_acc)
-        # BeatLeader: Clear Rate (ホバー演出付き), FC Rate, Avg ACC
+        # BeatLeader: Clears/FC はリンクのみ(バーなし)、Clear Rate/FC Rate はバー付き、Avg ACC
+        _ClickableColHover(self.bl_star_table, 2, _plain)
         _ClickableColHover(self.bl_star_table, 3, perc_clear)
+        _ClickableColHover(self.bl_star_table, 4, _plain)
         _ClickableColHover(self.bl_star_table, 5, perc_clear)
         self.bl_star_table.setItemDelegateForColumn(6, perc_acc)
         # PP 列はデリゲート対象のため、列番号が 9→10 にシフトしたことに合わせて後で上書き
@@ -1103,11 +1108,15 @@ class PlayerWindow(QMainWindow):
             lambda col: self._on_bl_acc_cell_clicked(0, col)
         )
 
-        # Stats → Playlist 連携: Clear Rate / FC Rate / Play Count / PP / AP クリックでプレイリスト画面を開く
+        # Stats → Playlist 連携: Clears / Clear Rate / FC / FC Rate / PP / AP クリックでプレイリスト画面を開く
+        self.star_table.cellClicked.connect(self._on_ss_clears_clicked)
         self.star_table.cellClicked.connect(self._on_ss_clear_rate_clicked)
+        self.star_table.cellClicked.connect(self._on_ss_fc_clicked)
         self.star_table.cellClicked.connect(self._on_ss_fc_rate_clicked)
         self.star_table.cellClicked.connect(self._on_ss_pp_clicked)
+        self.bl_star_table.cellClicked.connect(self._on_bl_clears_clicked)
         self.bl_star_table.cellClicked.connect(self._on_bl_clear_rate_clicked)
+        self.bl_star_table.cellClicked.connect(self._on_bl_fc_clicked)
         self.bl_star_table.cellClicked.connect(self._on_bl_fc_rate_clicked)
         self.bl_star_table.cellClicked.connect(self._on_bl_pp_clicked)
         self.acc_table.cellClicked.connect(self._on_acc_play_count_clicked)
@@ -3148,8 +3157,21 @@ class PlayerWindow(QMainWindow):
                 sort_mode=sort_mode,
             )
 
+    def _on_ss_clears_clicked(self, row: int, col: int) -> None:
+        """SS ★テーブルの Clears 列クリックで Playlist 画面をクリア降順で開く。"""
+        if col != 2:
+            return
+        star_item = self.star_table.item(row, 0)
+        if star_item is None:
+            return
+        try:
+            star = int(star_item.text())
+            self.open_playlist_with_filter("ss", star_min=float(star), star_max=float(star) + 1.0, sort_mode="status_desc")
+        except ValueError:
+            self.open_playlist_with_filter("ss", sort_mode="status_desc")
+
     def _on_ss_clear_rate_clicked(self, row: int, col: int) -> None:
-        """SS ★テーブルの Clear Rate 列クリックで Playlist 画面を開く。"""
+        """SS ★テーブルの Clear Rate 列クリックで Playlist 画面をステータス昇順で開く。"""
         if col != 3:
             return
         star_item = self.star_table.item(row, 0)
@@ -3159,9 +3181,22 @@ class PlayerWindow(QMainWindow):
             star = int(star_item.text())
         except ValueError:
             # "Total" 行など: 星フィルタなし
-            self.open_playlist_with_filter("ss")
+            self.open_playlist_with_filter("ss", sort_mode="status_asc")
             return
-        self.open_playlist_with_filter("ss", star_min=float(star), star_max=float(star) + 1.0)
+        self.open_playlist_with_filter("ss", star_min=float(star), star_max=float(star) + 1.0, sort_mode="status_asc")
+
+    def _on_ss_fc_clicked(self, row: int, col: int) -> None:
+        """SS ★テーブルの FC 列クリックで Playlist 画面を FC 降順で開く。"""
+        if col != 4:
+            return
+        star_item = self.star_table.item(row, 0)
+        if star_item is None:
+            return
+        try:
+            star = int(star_item.text())
+            self.open_playlist_with_filter("ss", star_min=float(star), star_max=float(star) + 1.0, sort_mode="fc_desc")
+        except ValueError:
+            self.open_playlist_with_filter("ss", sort_mode="fc_desc")
 
     def _on_ss_pp_clicked(self, row: int, col: int) -> None:
         """SS ★テーブルの PP 列クリックで Playlist 画面を PP 高順で開く。"""
@@ -3189,8 +3224,21 @@ class PlayerWindow(QMainWindow):
         except ValueError:
             self.open_playlist_with_filter("ss", sort_mode="fc_asc")
 
+    def _on_bl_clears_clicked(self, row: int, col: int) -> None:
+        """BL ★テーブルの Clears 列クリックで Playlist 画面をクリア降順で開く。"""
+        if col != 2:
+            return
+        star_item = self.bl_star_table.item(row, 0)
+        if star_item is None:
+            return
+        try:
+            star = int(star_item.text())
+            self.open_playlist_with_filter("bl", star_min=float(star), star_max=float(star) + 1.0, sort_mode="status_desc")
+        except ValueError:
+            self.open_playlist_with_filter("bl", sort_mode="status_desc")
+
     def _on_bl_clear_rate_clicked(self, row: int, col: int) -> None:
-        """BL ★テーブルの Clear Rate 列クリックで Playlist 画面を開く。"""
+        """BL ★テーブルの Clear Rate 列クリックで Playlist 画面をステータス昇順で開く。"""
         if col != 3:
             return
         star_item = self.bl_star_table.item(row, 0)
@@ -3199,9 +3247,22 @@ class PlayerWindow(QMainWindow):
         try:
             star = int(star_item.text())
         except ValueError:
-            self.open_playlist_with_filter("bl")
+            self.open_playlist_with_filter("bl", sort_mode="status_asc")
             return
-        self.open_playlist_with_filter("bl", star_min=float(star), star_max=float(star) + 1.0)
+        self.open_playlist_with_filter("bl", star_min=float(star), star_max=float(star) + 1.0, sort_mode="status_asc")
+
+    def _on_bl_fc_clicked(self, row: int, col: int) -> None:
+        """BL ★テーブルの FC 列クリックで Playlist 画面を FC 降順で開く。"""
+        if col != 4:
+            return
+        star_item = self.bl_star_table.item(row, 0)
+        if star_item is None:
+            return
+        try:
+            star = int(star_item.text())
+            self.open_playlist_with_filter("bl", star_min=float(star), star_max=float(star) + 1.0, sort_mode="fc_desc")
+        except ValueError:
+            self.open_playlist_with_filter("bl", sort_mode="fc_desc")
 
     def _on_bl_pp_clicked(self, row: int, col: int) -> None:
         """BL ★テーブルの PP 列クリックで Playlist 画面を PP 高順で開く。"""
