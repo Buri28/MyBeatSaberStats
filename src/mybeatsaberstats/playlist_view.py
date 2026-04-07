@@ -1336,9 +1336,9 @@ def _apply_config_filter(maps: List[MapEntry], cfg: "_BatchConfig") -> List[MapE
     elif cfg.sort_mode == "fc_asc":
         result.sort(key=lambda e: (int(e.full_combo), e.stars, e.song_name))
     elif cfg.sort_mode == "status_desc":
-        result.sort(key=lambda e: -(2 if e.cleared else 1 if e.nf_clear else 0))
+        result.sort(key=lambda e: -(30 if e.cleared else 20 if e.nf_clear else 10))
     elif cfg.sort_mode == "status_asc":
-        result.sort(key=lambda e: (2 if e.cleared else 1 if e.nf_clear else 0))
+        result.sort(key=lambda e: (30 if e.cleared else 20 if e.nf_clear else 10))
     elif cfg.sort_mode == "song_desc":
         result.sort(key=lambda e: e.song_name.lower(), reverse=True)
     elif cfg.sort_mode == "song_asc":
@@ -2186,6 +2186,7 @@ class PlaylistWindow(QMainWindow):
         # ソートインジケータを sort_mode に合わせて設定
         _sort_col_map = {
             "status_desc": (_COL_STATUS,    Qt.SortOrder.DescendingOrder),
+            "status_asc":  (_COL_STATUS,    Qt.SortOrder.AscendingOrder),
             "pp_high":     (_COL_PLAYER_PP, Qt.SortOrder.DescendingOrder),
             "pp_low":      (_COL_PLAYER_PP, Qt.SortOrder.AscendingOrder),
             "ap_high":     (_COL_PLAYER_PP, Qt.SortOrder.DescendingOrder),
@@ -3153,8 +3154,9 @@ class PlaylistWindow(QMainWindow):
         )
 
         for row, e in enumerate(entries):
-            # ステータス
-            status_item = QTableWidgetItem(e.status_str)
+            # ステータス (sort_val: Cleared=30, NF=20, Unplayed=10)
+            _status_val = 30 if e.cleared else 20 if e.nf_clear else 10
+            status_item = _NumItem(e.status_str, float(_status_val))
             status_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             if e.cleared:
                 status_item.setBackground(_cleared_bg)
