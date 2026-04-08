@@ -854,6 +854,10 @@ class PlayerWindow(QMainWindow):
         self.dark_mode_button.clicked.connect(self._toggle_dark_mode)
         self.dark_mode_button.setFixedWidth(32)
         self.dark_mode_button.setFixedHeight(_header_control_h)
+        if _initial_dark:
+            self.dark_mode_button.setToolTip(f"ライトモードに切り替えます")
+        else:
+            self.dark_mode_button.setToolTip(f"ダークモードに切り替えます")
         top_row.addWidget(self.dark_mode_button)
 
         self.btn_row_height_up = QPushButton("▲")
@@ -2084,7 +2088,9 @@ class PlayerWindow(QMainWindow):
         dark = _toggle_theme()
         self.dark_mode_button.setText(_theme_button_label())
         self.dark_mode_button.setChecked(dark)
+        self.dark_mode_button.setToolTip("ライトモードに切り替えます" if dark else "ダークモードに切り替えます")
         self._apply_header_control_style()
+        
         _ver_color = "#cccccc" if dark else "black"
         self._ver_label.setStyleSheet(f"font-size: 12px; color: {_ver_color}; padding-right: 4px;" )
         # ダーク時はデフォルト間隔、ライト時は素のネイティブボタンりも間隔を狭める
