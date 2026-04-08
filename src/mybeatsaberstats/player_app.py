@@ -824,8 +824,10 @@ class PlayerWindow(QMainWindow):
         self.snapshot_button = QPushButton("📷 Snapshot")
         self.snapshot_button.clicked.connect(self._take_snapshot_for_current_player)
         self.snapshot_button.setFixedHeight(_header_control_h)
-        top_row.addWidget(self.snapshot_button)
         self.snapshot_button.setFixedWidth(86)
+        self.snapshot_button.setToolTip("プレイヤーのスナップショットを取得します")
+        top_row.addWidget(self.snapshot_button)
+        
 
         top_row.addSpacing(12) 
 
@@ -833,16 +835,19 @@ class PlayerWindow(QMainWindow):
         self.compare_button = QPushButton("🔍 Compare")
         self.compare_button.clicked.connect(self.open_compare)
         self.compare_button.setFixedHeight(_header_control_h)
+        self.compare_button.setToolTip("プレイヤーのスナップショットを比較します")
         top_row.addWidget(self.compare_button)
 
         self.graph_button = QPushButton("📈 Graph")
         self.graph_button.clicked.connect(self.open_graph)
         self.graph_button.setFixedHeight(_header_control_h)
+        self.graph_button.setToolTip("プレイヤーのグラフを表示します")
         top_row.addWidget(self.graph_button)
 
         self.playlist_button = QPushButton("📋 Playlist")
         self.playlist_button.clicked.connect(self.open_playlist)
         self.playlist_button.setFixedHeight(_header_control_h)
+        self.playlist_button.setToolTip("プレイヤーのプレイリストを表示します")
         top_row.addWidget(self.playlist_button)
 
         top_row.addStretch(1)
@@ -898,6 +903,7 @@ class PlayerWindow(QMainWindow):
         self.snapshot_latest_button.setFixedWidth(86)
         self.snapshot_latest_button.setFixedHeight(_header_control_h)
         self.snapshot_latest_button.clicked.connect(lambda: self.snapshot_combo.setCurrentIndex(0))
+        self.snapshot_latest_button.setToolTip("最新のスナップショットを選択します")
         snapshot_row.addWidget(self.snapshot_latest_button)
 
         snapshot_row.addSpacing(12) 
@@ -907,6 +913,7 @@ class PlayerWindow(QMainWindow):
         self.ranking_button.clicked.connect(self.open_ranking)
         self.ranking_button.setFixedWidth(86)
         self.ranking_button.setFixedHeight(_header_control_h)
+        self.ranking_button.setToolTip("キャッシュされたランキングJSONから統合ランキングを表示します")
         snapshot_row.addWidget(self.ranking_button)
 
         # ランク情報キャッシュを取得/更新するボタン
@@ -914,6 +921,7 @@ class PlayerWindow(QMainWindow):
         self.fetch_ranking_button.clicked.connect(self._fetch_ranking_data)
         self.fetch_ranking_button.setFixedWidth(148)
         self.fetch_ranking_button.setFixedHeight(_header_control_h)
+        self.fetch_ranking_button.setToolTip("ランク情報キャッシュを取得/更新します")
         snapshot_row.addWidget(self.fetch_ranking_button)
 
         self._header_buttons = [
