@@ -96,12 +96,25 @@ def button_label() -> str:
 
     - Default 状態: クリックで強制モードに切り替わることを示す
       ダーク表示中 → "☀\ufe0f Light" (クリックで強制ライトへ)
-      ライト表示中 → "\U0001f319 Dark"  (クリックで強制ダークへ)
+      ライト表示中 → "🌙\U0001f319 Dark"  (クリックで強制ダークへ)
     - 強制モード: クリックで Default に戻ることを示す "\u21a9 Default"
     """
     if _theme_mode == "default":
-        return "\u2600\ufe0f Light" if _dark_mode else "\U0001f319 Dark"
-    return "\u21a9 Default"
+        if _dark_mode:
+            # Winダークモード表示中の強制ライトモードへ
+            return "🌤" # DLight
+            
+        else:
+            # Winライトモード表示中の強制ダークモードへ
+            return "🌙" # LDark
+    else:
+        if _dark_mode:
+            # Winライトモード表示中のデフォルトライトモードへ
+            return "☀️" # LLight
+            
+        else:
+            # Winダークモード表示中のデフォルトダークモードへ
+            return "🌑" #DDark
 
 
 # ------------------------------------------------------------------ #
@@ -384,13 +397,9 @@ QProgressDialog QLabel {
 #  公開 API
 # ------------------------------------------------------------------ #
 
-# Windows がライトモードのとき: ネイティブ描画を壊さないよう最小限のみ指定する。
-# QCheckBox などを明示すると Qt がネイティブスタイルから独自描画に切り替えてしまう。
-_LIGHT_NATIVE_QSS = """
-QPushButton {
-    padding: 2px 8px;
-}
-"""
+# Windows がライトモードのとき: ネイティブ描画を壊さないよう QSS は最小限にする。
+# QPushButton を QSS で指定するとネイティブスタイルが無効になりボタンが小さくなるため含めない。
+_LIGHT_NATIVE_QSS = ""
 
 # Windows がダークモードで強制ライトのとき: ネイティブダークスタイルを完全上書きする必要がある。
 _LIGHT_FORCED_QSS = """

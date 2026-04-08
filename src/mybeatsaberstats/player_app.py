@@ -822,6 +822,9 @@ class PlayerWindow(QMainWindow):
         self.snapshot_button = QPushButton("📷 Snapshot")
         self.snapshot_button.clicked.connect(self._take_snapshot_for_current_player)
         top_row.addWidget(self.snapshot_button)
+        self.snapshot_button.setFixedWidth(86)
+
+        top_row.addSpacing(24) 
 
         # スナップショット比較 / グラフ表示
         self.compare_button = QPushButton("🔍 Compare")
@@ -838,16 +841,6 @@ class PlayerWindow(QMainWindow):
 
         top_row.addStretch(1)
 
-        # ランキング表示ボタン（キャッシュされたランキングJSONから統合ランキングを表示）
-        self.ranking_button = QPushButton("🏆 Ranking")
-        self.ranking_button.clicked.connect(self.open_ranking)
-        top_row.addWidget(self.ranking_button)
-
-        # ランク情報キャッシュを取得/更新するボタン
-        self.fetch_ranking_button = QPushButton("⬇️ Ranking Data")
-        self.fetch_ranking_button.clicked.connect(self._fetch_ranking_data)
-        top_row.addWidget(self.fetch_ranking_button)
-
         _initial_dark = is_dark()
         self.dark_mode_button = QPushButton(_theme_button_label())
         self.dark_mode_button.setCheckable(True)
@@ -855,18 +848,22 @@ class PlayerWindow(QMainWindow):
         self.dark_mode_button.clicked.connect(self._toggle_dark_mode)
         top_row.addWidget(self.dark_mode_button)
 
-        self.update_button = QPushButton("🔄 Update")
-        top_row.addWidget(self.update_button)
-
         self.btn_row_height_up = QPushButton("▲")
         self.btn_row_height_up.setFixedWidth(28)
         self.btn_row_height_up.setToolTip("行の高さを増やす")
+        top_row.addWidget(self.btn_row_height_up)
+
         self.btn_row_height_dn = QPushButton("▼")
         self.btn_row_height_dn.setFixedWidth(28)
         self.btn_row_height_dn.setToolTip("行の高さを減らす")
+        top_row.addWidget(self.btn_row_height_dn)
 
         self.btn_default_layout = QPushButton("Default Layout")
         self.btn_default_layout.setToolTip("レイアウトをデフォルトにリセットする")
+        top_row.addWidget(self.btn_default_layout)
+
+        self.update_button = QPushButton("🔄 Update")
+        top_row.addWidget(self.update_button)
 
         _rows_layout.addLayout(top_row)
 
@@ -879,18 +876,32 @@ class PlayerWindow(QMainWindow):
         self.snapshot_combo = QComboBox(self)
         self.snapshot_combo.setFixedWidth(250)
         snapshot_row.addWidget(self.snapshot_combo)
+        
         self.snapshot_latest_button = QPushButton("Latest")
-        self.snapshot_latest_button.setFixedWidth(60)
+        self.snapshot_latest_button.setFixedWidth(86)
         self.snapshot_latest_button.clicked.connect(lambda: self.snapshot_combo.setCurrentIndex(0))
         snapshot_row.addWidget(self.snapshot_latest_button)
+
+        snapshot_row.addSpacing(24) 
+
+        # ランキング表示ボタン（キャッシュされたランキングJSONから統合ランキングを表示）
+        self.ranking_button = QPushButton("🏆 Ranking")
+        self.ranking_button.clicked.connect(self.open_ranking)
+        self.ranking_button.setFixedWidth(86)
+        snapshot_row.addWidget(self.ranking_button)
+
+        # ランク情報キャッシュを取得/更新するボタン
+        self.fetch_ranking_button = QPushButton("⬇️ Ranking Data")
+        self.fetch_ranking_button.clicked.connect(self._fetch_ranking_data)
+        self.fetch_ranking_button.setFixedWidth(148)
+        snapshot_row.addWidget(self.fetch_ranking_button)
+
         _ver = get_current_version()
         self._ver_label = QLabel(f"version：v{_ver}" if _ver else "", self)
         _ver_color = "#cccccc" if is_dark() else "black"
         self._ver_label.setStyleSheet(f"font-size: 12px; color: {_ver_color}; padding-right: 4px;")
         snapshot_row.addStretch(1)
-        snapshot_row.addWidget(self.btn_row_height_up)
-        snapshot_row.addWidget(self.btn_row_height_dn)
-        snapshot_row.addWidget(self.btn_default_layout)
+
         snapshot_row.addSpacing(96)  # ダミースペースで右端のボタン群とバージョン表示を分離
         snapshot_row.addWidget(self._ver_label)
         _rows_layout.addLayout(snapshot_row)
