@@ -479,16 +479,16 @@ class SnapshotCompareDialog(QDialog):
         for _chk in (self.chk_col_clear, self.chk_col_fc, self.chk_col_acc, self.chk_col_pp, self.chk_col_starpp):
             _chk_layout.addWidget(_chk)
         # 全選択 / 全解除ボタン
-        btn_chk_all = QPushButton("All", _chk_container)
-        btn_chk_all.setFixedWidth(60)
-        btn_chk_all.setToolTip("全チェック")
-        btn_chk_all.clicked.connect(self._on_chk_all)
-        btn_chk_none = QPushButton("None", _chk_container)
-        btn_chk_none.setFixedWidth(60)
-        btn_chk_none.setToolTip("全解除")
-        btn_chk_none.clicked.connect(self._on_chk_none)
-        _chk_layout.addWidget(btn_chk_all)
-        _chk_layout.addWidget(btn_chk_none)
+        self.btn_chk_all = QPushButton("All", _chk_container)
+        self.btn_chk_all.setFixedWidth(60)
+        self.btn_chk_all.setToolTip("全チェック")
+        self.btn_chk_all.clicked.connect(self._on_chk_all)
+        self.btn_chk_none = QPushButton("None", _chk_container)
+        self.btn_chk_none.setFixedWidth(60)
+        self.btn_chk_none.setToolTip("全解除")
+        self.btn_chk_none.clicked.connect(self._on_chk_none)
+        _chk_layout.addWidget(self.btn_chk_all)
+        _chk_layout.addWidget(self.btn_chk_none)
         _chk_layout.addStretch(1)
         top_grid.addWidget(_chk_container, 1, 7, 1, 7)
 
@@ -509,6 +509,16 @@ class SnapshotCompareDialog(QDialog):
         self.btn_default_layout = QPushButton("Default Layout", self)
         self.btn_default_layout.setToolTip("レイアウトをデフォルトにリセットする")
         top_grid.addWidget(self.btn_default_layout, 1, 19)
+
+        self._plain_header_buttons = [
+            self.button_latest_b,
+            self.btn_chk_all,
+            self.btn_chk_none,
+            self.btn_row_height_up,
+            self.btn_row_height_dn,
+            self.btn_default_layout,
+        ]
+        self._apply_plain_header_button_style()
 
         # top_grid を QWidget でラップして縦スプリッターの上パネルにする
         _top_ctrl_widget = QWidget(self)
@@ -952,6 +962,22 @@ class SnapshotCompareDialog(QDialog):
             self.combo_player_b.setCurrentIndex(default_index)
             self._reload_player_snapshots_for(self.combo_player_a, self.combo_a)
             self._reload_player_snapshots_for(self.combo_player_b, self.combo_b)
+
+    def _apply_plain_header_button_style(self) -> None:
+        """比較画面ヘッダーのプレーンボタン余白をテーマ間で揃える。"""
+        button_qss = ""
+        if not is_dark():
+            button_qss = (
+                "QPushButton {"
+                "margin: 0px; padding: 0px 8px;"
+                "background-color: #f6f6f6; color: #111111;"
+                "border: 1px solid #d9d9d9; border-radius: 6px;"
+                "}"
+                "QPushButton:hover { background-color: #ececec; border-color: #c8c8c8; }"
+                "QPushButton:pressed { background-color: #e2e2e2; }"
+            )
+        for button in getattr(self, "_plain_header_buttons", []):
+            button.setStyleSheet(button_qss)
 
     # 設定保存/復元まわり
 
