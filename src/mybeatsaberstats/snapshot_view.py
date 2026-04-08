@@ -1895,6 +1895,14 @@ class SnapshotCompareDialog(QDialog):
                         diff_text = f"{diff_text} ({flag}{diff_jp_signed:+,d})"
 
                 diff_item.setText(diff_text)
+                # _set_row でつけた色をランク方向で上書き（小さいほど良い指標なので反転）
+                if diff_global_signed > 0:
+                    diff_item.setBackground(diff_positive_bg())
+                elif diff_global_signed < 0:
+                    diff_item.setBackground(diff_negative_bg())
+                else:
+                    diff_item.setBackground(diff_neutral_bg())
+                diff_item.setForeground(diff_text_color())
 
             return row + 1
 
