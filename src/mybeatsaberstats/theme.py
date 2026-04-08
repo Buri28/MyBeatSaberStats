@@ -102,7 +102,7 @@ def button_label() -> str:
     if _theme_mode == "default":
         if _dark_mode:
             # Winダークモード表示中の強制ライトモードへ
-            return "🌤" # DLight
+            return "🌅" #💡🔦🌞 🌤🌅DLight
             
         else:
             # Winライトモード表示中の強制ダークモードへ
@@ -114,7 +114,7 @@ def button_label() -> str:
             
         else:
             # Winダークモード表示中のデフォルトダークモードへ
-            return "⭐" #DDark
+            return "⭐" #🌛DDark
 
 
 # ------------------------------------------------------------------ #
