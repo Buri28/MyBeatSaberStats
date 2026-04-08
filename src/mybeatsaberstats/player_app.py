@@ -2069,12 +2069,12 @@ class PlayerWindow(QMainWindow):
             theme_button_qss = (
                 "QPushButton {"
                 "margin: 0px; padding: 0px 4px;"
-                "background-color: #5a6478; color: #f7f7f7;"
-                "border: 1px solid #4a5365; border-radius: 6px;"
+                "background-color: rgba(34, 50, 90, 0.3); color: #f7f7f7;"
+                "border: 1px solid rgba(17, 25, 45, 0.3); border-radius: 6px;"
                 "}"
-                "QPushButton:hover { background-color: #657088; border-color: #556076; }"
-                "QPushButton:pressed { background-color: #4d5668; }"
-                "QPushButton:checked { background-color: #4f89d8; border-color: #3f78c6; }"
+                "QPushButton:hover { background-color: #223355; border-color: #99CCFF; }"
+                "QPushButton:pressed { background-color: #000000; }"
+                "QPushButton:checked { background-color: #406088; border-color: #3f78c6; }"
             )
 
         for button in getattr(self, "_header_buttons", []):
