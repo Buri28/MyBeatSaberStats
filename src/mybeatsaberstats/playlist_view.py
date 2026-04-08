@@ -1670,7 +1670,7 @@ _COL_AUTHOR = 13
 _COL_COUNT = 14
 
 _COL_LABELS = [
-    "Status", "Song", "Diff", "Mode", "Acc Category", "Service", "Rank", "★", "Acc %", "Player PP",
+    "Status", "Song", "Diff", "Mode", "Acc Category", "Service", "Rank", "★", "Acc %", "PP",
     "FC", "Mods", "Mapper", "Author",
 ]
 
@@ -2261,7 +2261,7 @@ class PlaylistWindow(QMainWindow):
             elif svc in ("accsaber", "accsaber_rl"):
                 pp_label, acc_label, rank_label = "AP", "Acc %", "Rank"
             else:
-                pp_label, acc_label, rank_label = "Player PP", "Acc %", "Rank"
+                pp_label, acc_label, rank_label = "PP", "Acc %", "Rank"
         for col, label in [
             (_COL_PLAYER_PP, pp_label),
             (_COL_PLAYER_ACC, acc_label),

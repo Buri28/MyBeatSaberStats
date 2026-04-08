@@ -808,6 +808,7 @@ class PlayerWindow(QMainWindow):
         top_row = QHBoxLayout()
         top_row.setSpacing(2)  # ライトモードの初期間隔
         self._top_row = top_row
+        _header_control_h = 22
 
         # SteamID 選択コンボボックス
         _label_width = 55
@@ -816,27 +817,32 @@ class PlayerWindow(QMainWindow):
         top_row.addWidget(_player_label)
         self.player_combo = QComboBox(self)
         self.player_combo.setFixedWidth(250)
+        self.player_combo.setFixedHeight(_header_control_h)
         top_row.addWidget(self.player_combo)
 
         # スナップショット取得ボタン
         self.snapshot_button = QPushButton("📷 Snapshot")
         self.snapshot_button.clicked.connect(self._take_snapshot_for_current_player)
+        self.snapshot_button.setFixedHeight(_header_control_h)
         top_row.addWidget(self.snapshot_button)
         self.snapshot_button.setFixedWidth(86)
 
-        top_row.addSpacing(24) 
+        top_row.addSpacing(12) 
 
         # スナップショット比較 / グラフ表示
         self.compare_button = QPushButton("🔍 Compare")
         self.compare_button.clicked.connect(self.open_compare)
+        self.compare_button.setFixedHeight(_header_control_h)
         top_row.addWidget(self.compare_button)
 
         self.graph_button = QPushButton("📈 Graph")
         self.graph_button.clicked.connect(self.open_graph)
+        self.graph_button.setFixedHeight(_header_control_h)
         top_row.addWidget(self.graph_button)
 
         self.playlist_button = QPushButton("📋 Playlist")
         self.playlist_button.clicked.connect(self.open_playlist)
+        self.playlist_button.setFixedHeight(_header_control_h)
         top_row.addWidget(self.playlist_button)
 
         top_row.addStretch(1)
@@ -846,23 +852,29 @@ class PlayerWindow(QMainWindow):
         self.dark_mode_button.setCheckable(True)
         self.dark_mode_button.setChecked(_initial_dark)
         self.dark_mode_button.clicked.connect(self._toggle_dark_mode)
+        self.dark_mode_button.setFixedWidth(32)
+        self.dark_mode_button.setFixedHeight(_header_control_h)
         top_row.addWidget(self.dark_mode_button)
 
         self.btn_row_height_up = QPushButton("▲")
         self.btn_row_height_up.setFixedWidth(28)
+        self.btn_row_height_up.setFixedHeight(_header_control_h)
         self.btn_row_height_up.setToolTip("行の高さを増やす")
         top_row.addWidget(self.btn_row_height_up)
 
         self.btn_row_height_dn = QPushButton("▼")
         self.btn_row_height_dn.setFixedWidth(28)
+        self.btn_row_height_dn.setFixedHeight(_header_control_h)
         self.btn_row_height_dn.setToolTip("行の高さを減らす")
         top_row.addWidget(self.btn_row_height_dn)
 
         self.btn_default_layout = QPushButton("Default Layout")
+        self.btn_default_layout.setFixedHeight(_header_control_h)
         self.btn_default_layout.setToolTip("レイアウトをデフォルトにリセットする")
         top_row.addWidget(self.btn_default_layout)
 
         self.update_button = QPushButton("🔄 Update")
+        self.update_button.setFixedHeight(_header_control_h)
         top_row.addWidget(self.update_button)
 
         _rows_layout.addLayout(top_row)
@@ -875,26 +887,47 @@ class PlayerWindow(QMainWindow):
         snapshot_row.addWidget(_snapshot_label)
         self.snapshot_combo = QComboBox(self)
         self.snapshot_combo.setFixedWidth(250)
+        self.snapshot_combo.setFixedHeight(_header_control_h)
         snapshot_row.addWidget(self.snapshot_combo)
         
         self.snapshot_latest_button = QPushButton("Latest")
         self.snapshot_latest_button.setFixedWidth(86)
+        self.snapshot_latest_button.setFixedHeight(_header_control_h)
         self.snapshot_latest_button.clicked.connect(lambda: self.snapshot_combo.setCurrentIndex(0))
         snapshot_row.addWidget(self.snapshot_latest_button)
 
-        snapshot_row.addSpacing(24) 
+        snapshot_row.addSpacing(12) 
 
         # ランキング表示ボタン（キャッシュされたランキングJSONから統合ランキングを表示）
         self.ranking_button = QPushButton("🏆 Ranking")
         self.ranking_button.clicked.connect(self.open_ranking)
         self.ranking_button.setFixedWidth(86)
+        self.ranking_button.setFixedHeight(_header_control_h)
         snapshot_row.addWidget(self.ranking_button)
 
         # ランク情報キャッシュを取得/更新するボタン
         self.fetch_ranking_button = QPushButton("⬇️ Ranking Data")
         self.fetch_ranking_button.clicked.connect(self._fetch_ranking_data)
         self.fetch_ranking_button.setFixedWidth(148)
+        self.fetch_ranking_button.setFixedHeight(_header_control_h)
         snapshot_row.addWidget(self.fetch_ranking_button)
+
+        self._header_buttons = [
+            self.snapshot_button,
+            self.compare_button,
+            self.graph_button,
+            self.playlist_button,
+            self.dark_mode_button,
+            self.btn_row_height_up,
+            self.btn_row_height_dn,
+            self.btn_default_layout,
+            self.update_button,
+            self.snapshot_latest_button,
+            self.ranking_button,
+            self.fetch_ranking_button,
+        ]
+        self._header_combos = [self.player_combo, self.snapshot_combo]
+        self._apply_header_control_style()
 
         _ver = get_current_version()
         self._ver_label = QLabel(f"version：v{_ver}" if _ver else "", self)
@@ -1999,18 +2032,61 @@ class PlayerWindow(QMainWindow):
         dark = is_dark()
         self.dark_mode_button.setText(_theme_button_label())
         self.dark_mode_button.setChecked(dark)
+        self._apply_header_control_style()
         _ver_color = "#cccccc" if dark else "black"
         self._ver_label.setStyleSheet(f"font-size: 12px; color: {_ver_color}; padding-right: 4px;")
         self._top_row.setSpacing(2)
         self._update_view()
+
+    def _apply_header_control_style(self) -> None:
+        """ヘッダーのコントロール余白をテーマ非依存で揃える。"""
+        button_qss = ""
+        combo_qss = ""
+        theme_button_qss = ""
+        if not is_dark():
+            button_qss = (
+                "QPushButton {"
+                "margin: 0px; padding: 0px 8px;"
+                "background-color: #f6f6f6; color: #111111;"
+                "border: 1px solid #d9d9d9; border-radius: 6px;"
+                "}"
+                "QPushButton:hover { background-color: #ececec; border-color: #c8c8c8; }"
+                "QPushButton:pressed { background-color: #e2e2e2; }"
+                "QPushButton:checked { background-color: #e8f1fb; border-color: #8cb8e8; }"
+            )
+            combo_qss = (
+                "QComboBox {"
+                "margin: 0px; padding: 0px 8px;"
+                "background-color: #ffffff; color: #111111;"
+                "border: 1px solid #d9d9d9; border-radius: 6px;"
+                "}"
+                "QComboBox::drop-down { border: none; width: 24px; }"
+            )
+            theme_button_qss = (
+                "QPushButton {"
+                "margin: 0px; padding: 0px 4px;"
+                "background-color: #5a6478; color: #f7f7f7;"
+                "border: 1px solid #4a5365; border-radius: 6px;"
+                "}"
+                "QPushButton:hover { background-color: #657088; border-color: #556076; }"
+                "QPushButton:pressed { background-color: #4d5668; }"
+                "QPushButton:checked { background-color: #4f89d8; border-color: #3f78c6; }"
+            )
+
+        for button in getattr(self, "_header_buttons", []):
+            button.setStyleSheet(button_qss)
+        for combo in getattr(self, "_header_combos", []):
+            combo.setStyleSheet(combo_qss)
+        self.dark_mode_button.setStyleSheet(theme_button_qss)
 
     def _toggle_dark_mode(self) -> None:
         """\u30c0\u30fc\u30af / \u30e9\u30a4\u30c8\u30e2\u30fc\u30c9\u3092\u5207\u308a\u66ff\u3048\u308b\u3002"""
         dark = _toggle_theme()
         self.dark_mode_button.setText(_theme_button_label())
         self.dark_mode_button.setChecked(dark)
+        self._apply_header_control_style()
         _ver_color = "#cccccc" if dark else "black"
-        self._ver_label.setStyleSheet(f"font-size: 12px; color: {_ver_color}; padding-right: 4px;")
+        self._ver_label.setStyleSheet(f"font-size: 12px; color: {_ver_color}; padding-right: 4px;" )
         # ダーク時はデフォルト間隔、ライト時は素のネイティブボタンりも間隔を狭める
         self._top_row.setSpacing(2)
         # ラベルセルの色はテーブル再描画時に反映されるのでビューを再構築する
