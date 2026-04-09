@@ -13,6 +13,7 @@ import re
 import tempfile
 import threading
 from dataclasses import dataclass, field, asdict
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
@@ -135,6 +136,8 @@ class MapEntry:
     player_mods: str = ""   # 実際に使用したモディファイア文字列 (例: "NF", "SC", "NF,SC")
     full_combo: bool = False  # フルコンボ達成済み
     score_source: str = ""  # スコア表示元: "BL" | "SS" | "AS" | ""
+    duration_seconds: int = 0  # 譜面時間 (秒)
+    played_at_ts: int = 0  # プレイ日時 (Unix秒)
 
     @property
     def status_str(self) -> str:
@@ -182,6 +185,31 @@ def _mode_from_gamemode(game_mode: str) -> str:
     return game_mode.replace("Solo", "") if game_mode else "Standard"
 
 
+def _parse_iso_datetime_to_ts(value: object) -> int:
+    if not isinstance(value, str) or not value:
+        return 0
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return 0
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return int(dt.timestamp())
+
+
+def _parse_unix_datetime_to_ts(value: object) -> int:
+    if value is None:
+        return 0
+    try:
+        if isinstance(value, (int, float, str)):
+            raw_value = value
+        else:
+            raw_value = str(value)
+        return int(float(raw_value))
+    except (TypeError, ValueError):
+        return 0
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # データ読み込み
 # ──────────────────────────────────────────────────────────────────────────────
@@ -227,6 +255,17 @@ def _bl_player_score_info(scores: Dict, map_id: str
     return player_pp, cleared, nf_clear, acc, rank, mods_str
 
 
+def _ss_player_score_timeset(scores: Dict, lb_id: str) -> int:
+    entry = scores.get(str(lb_id)) or {}
+    sc = entry.get("score", {})
+    return _parse_iso_datetime_to_ts(sc.get("timeSet"))
+
+
+def _bl_player_score_timeset(scores: Dict, map_id: str) -> int:
+    entry = scores.get(str(map_id)) or {}
+    return _parse_unix_datetime_to_ts(entry.get("timeset"))
+
+
 def load_ss_maps(steam_id: Optional[str] = None, filter_stars: bool = True) -> List[MapEntry]:
     """ScoreSaber ランクマップをキャッシュから読み込む。
 
@@ -262,6 +301,13 @@ def load_ss_maps(steam_id: Optional[str] = None, filter_stars: bool = True) -> L
             except Exception:
                 pass
 
+    # ScoreSaber キャッシュには譜面時間がないため BL キャッシュから補完する
+    bl_duration_index = {
+        (e.song_hash.upper(), e.mode, e.difficulty): e.duration_seconds
+        for e in load_bl_maps()
+        if e.duration_seconds > 0
+    }
+
     entries: List[MapEntry] = []
     for lb_id_str, m in maps_dict.items():
         stars = float(m.get("stars") or 0)
@@ -273,19 +319,23 @@ def load_ss_maps(steam_id: Optional[str] = None, filter_stars: bool = True) -> L
         diff_raw = diff_info.get("difficultyRaw") or ""
         game_mode = diff_info.get("gameMode") or "SoloStandard"
         max_score = int(m.get("maxScore") or 0)
+        song_hash = (m.get("songHash") or "").upper()
+        difficulty = _diff_from_raw(diff_raw, diff_num)
+        mode = _mode_from_gamemode(game_mode)
 
         player_pp, cleared, nf_clear, acc, rank, mods = _ss_player_score_info(
             ss_scores, lb_id_str, max_score
         )
+        played_at_ts = _ss_player_score_timeset(ss_scores, lb_id_str)
         _fc = bool((ss_scores.get(str(lb_id_str)) or {}).get("score", {}).get("fullCombo"))
 
         entries.append(MapEntry(
             song_name=m.get("songName") or "",
             song_author=m.get("songAuthorName") or "",
             mapper=m.get("levelAuthorName") or "",
-            song_hash=(m.get("songHash") or "").upper(),
-            difficulty=_diff_from_raw(diff_raw, diff_num),
-            mode=_mode_from_gamemode(game_mode),
+            song_hash=song_hash,
+            difficulty=difficulty,
+            mode=mode,
             stars=stars,
             max_pp=float(m.get("maxPP") or 0),
             player_pp=player_pp,
@@ -298,6 +348,8 @@ def load_ss_maps(steam_id: Optional[str] = None, filter_stars: bool = True) -> L
             player_mods=mods,
             full_combo=_fc,
             score_source="SS",
+            duration_seconds=bl_duration_index.get((song_hash, mode, difficulty), 0),
+            played_at_ts=played_at_ts,
         ))
 
     return entries
@@ -341,6 +393,7 @@ def load_bl_maps(steam_id: Optional[str] = None) -> List[MapEntry]:
         stars = float(diff.get("stars") or 0)
 
         player_pp, cleared, nf_clear, acc, rank, mods = _bl_player_score_info(bl_scores, map_id)
+        played_at_ts = _bl_player_score_timeset(bl_scores, map_id)
         _fc = bool((bl_scores.get(str(map_id)) or {}).get("fullCombo"))
 
         entries.append(MapEntry(
@@ -362,6 +415,8 @@ def load_bl_maps(steam_id: Optional[str] = None) -> List[MapEntry]:
             player_mods=mods,
             full_combo=_fc,
             score_source="BL",
+            duration_seconds=_normalize_duration_seconds(song.get("duration")),
+            played_at_ts=played_at_ts,
         ))
 
     return entries
@@ -369,12 +424,12 @@ def load_bl_maps(steam_id: Optional[str] = None) -> List[MapEntry]:
 
 def _build_ss_score_hash_index(
     ss_scores: Dict[str, dict],
-) -> Dict[Tuple[str, str, str], Tuple[float, bool, bool, float, int, str]]:
-    """SS player scores キャッシュから (hash, mode, diff) → (pp, cleared, nf_clear, acc, rank, mods) を構築。
+) -> Dict[Tuple[str, str, str], Tuple[float, bool, bool, float, int, str, int]]:
+    """SS player scores キャッシュから (hash, mode, diff) → (pp, cleared, nf_clear, acc, rank, mods, played_at_ts) を構築。
 
     SS ranked maps に含まれない Easy 等のマップもカバーするため AccSaber 用途で使用。
     """
-    idx: Dict[Tuple[str, str, str], Tuple[float, bool, bool, float, int, str]] = {}
+    idx: Dict[Tuple[str, str, str], Tuple[float, bool, bool, float, int, str, int]] = {}
     for lb_id_str, entry in ss_scores.items():
         lb = entry.get("leaderboard", {})
         song_hash = (lb.get("songHash") or "").upper()
@@ -388,10 +443,11 @@ def _build_ss_score_hash_index(
         mode = _mode_from_gamemode(game_mode)
         max_score = int(lb.get("maxScore") or 0)
         pp, cleared, nf_clear, acc, rank, mods = _ss_player_score_info(ss_scores, lb_id_str, max_score)
+        played_at_ts = _ss_player_score_timeset(ss_scores, lb_id_str)
         key = (song_hash, mode, diff_name)
         # クリア済み優先、同キーに複数スコアがあれば最高 pp を保持
         if key not in idx or (cleared and not idx[key][1]) or pp > idx[key][0]:
-            idx[key] = (pp, cleared, nf_clear, acc, rank, mods)
+            idx[key] = (pp, cleared, nf_clear, acc, rank, mods, played_at_ts)
     return idx
 
 
@@ -406,6 +462,20 @@ def _build_ss_hash_index(entries: List[MapEntry]) -> Dict[Tuple[str, str, str], 
 
 def _build_bl_hash_index(entries: List[MapEntry]) -> Dict[Tuple[str, str, str], MapEntry]:
     return _build_ss_hash_index(entries)
+
+
+def _normalize_duration_seconds(value: object) -> int:
+    if value is None:
+        return 0
+    try:
+        if isinstance(value, (int, float, str)):
+            raw_value = value
+        else:
+            raw_value = str(value)
+        seconds = int(round(float(raw_value)))
+    except (TypeError, ValueError):
+        return 0
+    return seconds if seconds > 0 else 0
 
 
 def load_bplist_maps(
@@ -461,6 +531,7 @@ def load_bplist_maps(
                     cleared=False, nf_clear=False,
                     player_acc=0.0, player_rank=0,
                     leaderboard_id="", source="open",
+                    duration_seconds=0,
                 ))
         else:
             for d in diffs:
@@ -478,6 +549,7 @@ def load_bplist_maps(
                         cleared=False, nf_clear=False,
                         player_acc=0.0, player_rank=0,
                         leaderboard_id="", source="open",
+                        duration_seconds=0,
                     ))
 
     return entries
@@ -541,11 +613,39 @@ def _mode_item(mode: str) -> QTableWidgetItem:
     return item
 
 
+def _format_duration(seconds: int) -> str:
+    if seconds <= 0:
+        return "-"
+    minutes, sec = divmod(seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours > 0:
+        return f"{hours}:{minutes:02d}:{sec:02d}"
+    return f"{minutes}:{sec:02d}"
+
+
+def _duration_item(seconds: int) -> QTableWidgetItem:
+    item = _NumItem(_format_duration(seconds), float(seconds))
+    item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+    return item
+
+
+def _format_played_at(ts: int) -> str:
+    if ts <= 0:
+        return "-"
+    return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
+
+
+def _played_at_item(ts: int) -> QTableWidgetItem:
+    item = _NumItem(_format_played_at(ts), float(ts))
+    item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+    return item
+
+
 def _sort_dir_from_mode(sort_mode: str) -> str:
     """sort_mode 文字列から 'asc'/'desc' を返す。"""
     return "desc" if sort_mode in (
         "pp_high", "ap_high", "acc_high", "rank_high", "star_desc", "fc_desc",
-        "status_desc", "song_desc", "diff_desc", "mode_desc", "cat_desc",
+        "status_desc", "song_desc", "playtime_desc", "diff_desc", "mode_desc", "cat_desc",
         "mapper_desc", "author_desc",
     ) else "asc"
 
@@ -770,6 +870,7 @@ def load_accsaber_maps(
     acc_score_cleared: set = set()   # (hash.upper(), diff) — AccSaber 正規クリア
     acc_score_nf: set = set()         # (hash.upper(), diff) — NF クリア
     acc_score_ap: Dict[Tuple[str, str], Tuple[float, int]] = {}  # (hash, diff) → (ap, rank)
+    acc_score_ts: Dict[Tuple[str, str], int] = {}  # (hash, diff) → played_at_ts
     acc_player_scores_available = False
     if steam_id:
         from .accsaber import load_player_scores_from_cache as _load_acc_score_cache
@@ -795,10 +896,15 @@ def load_accsaber_maps(
                     acc_score_cleared.add((h, dn))
                 ap = float(asc.get("ap") or 0)
                 rank = int(asc.get("rank") or 0)
+                time_set = _parse_iso_datetime_to_ts(asc.get("timeSet"))
                 if ap > 0 and h and dn:
                     key_ap: Tuple[str, str] = (h, dn)
                     if ap > acc_score_ap.get(key_ap, (0.0, 0))[0]:
                         acc_score_ap[key_ap] = (ap, rank)
+                if h and dn and time_set > 0:
+                    key_ts: Tuple[str, str] = (h, dn)
+                    if time_set > acc_score_ts.get(key_ts, 0):
+                        acc_score_ts[key_ts] = time_set
             acc_player_scores_available = True
 
     # SS player scores — pp/acc/rank 表示用、および AccSaber 取得不可時のフォールバック
@@ -861,8 +967,9 @@ def load_accsaber_maps(
                     ss_acc = 0.0
                     ss_rank = 0
                     ss_mods = ""
+                    ss_played_at_ts = 0
                     if ss_info:
-                        ss_pp, ss_cleared, ss_nf, ss_acc, ss_rank, ss_mods = ss_info
+                        ss_pp, ss_cleared, ss_nf, ss_acc, ss_rank, ss_mods, ss_played_at_ts = ss_info
 
                     # BL スコア取得 (フォールバック用)
                     bl_entry = bl_index.get(key)
@@ -872,10 +979,12 @@ def load_accsaber_maps(
                     bl_rank = 0
                     bl_stars = 0.0
                     bl_mods = ""
+                    bl_played_at_ts = 0
                     if bl_entry:
                         bl_pp, bl_cleared, bl_nf, bl_acc_val, bl_rank, bl_mods = _bl_player_score_info(
                             bl_scores, bl_entry.leaderboard_id
                         )
+                        bl_played_at_ts = _bl_player_score_timeset(bl_scores, bl_entry.leaderboard_id)
                         bl_stars = bl_entry.stars
 
                     # クリア判定: AccSaber 公式スコアを優先
@@ -909,15 +1018,20 @@ def load_accsaber_maps(
                     acc_ap_entry = acc_score_ap.get(key_hd, (0.0, 0))
                     final_acc_ap = acc_ap_entry[0]
                     final_acc_rank = acc_ap_entry[1]
+                    acc_played_at_ts = acc_score_ts.get(key_hd, 0)
 
                     if acc_player_scores_available and (key_hd in acc_score_cleared or key_hd in acc_score_nf):
                         final_score_src = "AS"
+                        final_played_at_ts = acc_played_at_ts
                     elif ss_pp > 0 or ss_cleared or ss_nf:
                         final_score_src = "SS"
+                        final_played_at_ts = ss_played_at_ts
                     elif bl_pp > 0 or bl_cleared or bl_nf:
                         final_score_src = "BL"
+                        final_played_at_ts = bl_played_at_ts
                     else:
                         final_score_src = ""
+                        final_played_at_ts = 0
 
                     seen_entries[key] = MapEntry(
                         song_name=s_name, song_author="", mapper="",
@@ -932,6 +1046,8 @@ def load_accsaber_maps(
                         acc_complexity=complexity_index.get((s_hash, diff_name), 0.0),
                         player_mods=final_mods,
                         score_source=final_score_src,
+                        duration_seconds=bl_entry.duration_seconds if bl_entry else 0,
+                        played_at_ts=final_played_at_ts,
                     )
                     seen_cats[key] = [cat]
                 else:
@@ -953,24 +1069,25 @@ def load_accsaber_maps(
 def _fetch_rl_ap_index(
     player_id: str,
     session: Optional[requests.Session] = None,
-) -> Dict[str, Tuple[float, int]]:
-    """AccSaber Reloaded プレイヤーの mapDifficultyId → (ap, rank) インデックスを取得する。
+) -> Dict[str, Tuple[float, int, int]]:
+    """AccSaber Reloaded プレイヤーの mapDifficultyId → (ap, rank, played_at_ts) インデックスを取得する。
 
     キャッシュが存在する場合はキャッシュから読み込む。
     """
     if not player_id:
         return {}
 
-    def _build_index(scores: list) -> Dict[str, Tuple[float, int]]:
-        result: Dict[str, Tuple[float, int]] = {}
+    def _build_index(scores: list) -> Dict[str, Tuple[float, int, int]]:
+        result: Dict[str, Tuple[float, int, int]] = {}
         for score in scores:
             diff_id = score.get("mapDifficultyId")
             ap = float(score.get("ap") or 0)
             rank = int(score.get("rank") or 0)
+            played_at_ts = _parse_iso_datetime_to_ts(score.get("timeSet"))
             if diff_id and ap > 0:
-                prev_ap = result.get(diff_id, (0.0, 0))[0]
+                prev_ap = result.get(diff_id, (0.0, 0, 0))[0]
                 if prev_ap < ap:
-                    result[diff_id] = (ap, rank)
+                    result[diff_id] = (ap, rank, played_at_ts)
         return result
 
     from .accsaber_reloaded import load_player_scores_from_cache as _load_rl_score_cache
@@ -1042,7 +1159,7 @@ def load_accsaber_reloaded_maps(
 
     # RL プレイヤースコア (AP, rank) を mapDifficultyId でインデックス化
     # mapDifficultyId -> (ap, rank)
-    rl_ap_index: Dict[str, Tuple[float, int]] = {}
+    rl_ap_index: Dict[str, Tuple[float, int, int]] = {}
     if steam_id:
         if on_progress:
             on_progress(0, 1, "Fetching RL player scores (AP)...")
@@ -1106,6 +1223,7 @@ def load_accsaber_reloaded_maps(
             bl_lb_id = str(diff.get("blLeaderboardId") or "")
             complexity = float(diff.get("complexity") or 0.0)
             bl_pp, bl_cleared, bl_nf, bl_acc, bl_rank_val, bl_mods = _bl_player_score_info(bl_scores, bl_lb_id)
+            bl_played_at_ts = _bl_player_score_timeset(bl_scores, bl_lb_id)
             bl_has_any_score = bl_pp > 0 or bl_cleared or bl_nf
 
             # SS スコアも常に取得する
@@ -1117,6 +1235,7 @@ def load_accsaber_reloaded_maps(
             ss_acc_v = 0.0
             ss_rank_v = 0
             ss_mods_v = ""
+            ss_played_at_ts = 0
             if ss_lb_id and ss_scores:
                 ss_max_score = int(
                     (ss_scores.get(str(ss_lb_id), {}).get("leaderboard") or {}).get("maxScore") or 0
@@ -1124,6 +1243,7 @@ def load_accsaber_reloaded_maps(
                 ss_pp_v, ss_cleared, ss_nf, ss_acc_v, ss_rank_v, ss_mods_v = _ss_player_score_info(
                     ss_scores, ss_lb_id, ss_max_score
                 )
+                ss_played_at_ts = _ss_player_score_timeset(ss_scores, ss_lb_id)
 
             # (cleared=2 > nf=1 > unplayed=0, acc) のタプル比較で高い方を採用
             use_ss = (
@@ -1135,17 +1255,20 @@ def load_accsaber_reloaded_maps(
                     ss_cleared, ss_nf, ss_acc_v, ss_rank_v, ss_mods_v, ss_pp_v
                 )
                 score_src = "SS"
+                played_at_ts = ss_played_at_ts
             else:
                 cleared, nf_clear, acc, rank, score_mods, player_pp = (
                     bl_cleared, bl_nf, bl_acc, bl_rank_val, bl_mods, bl_pp
                 )
                 score_src = "BL" if bl_has_any_score else ""
+                played_at_ts = bl_played_at_ts if bl_has_any_score else 0
 
             # RL AP・rank（mapDifficultyId による精定値）
             rl_diff_id = diff.get("id") or ""
-            rl_score = rl_ap_index.get(rl_diff_id, (0.0, 0))
+            rl_score = rl_ap_index.get(rl_diff_id, (0.0, 0, 0))
             ap = rl_score[0]
             rl_rank = rl_score[1]
+            rl_played_at_ts = rl_score[2]
 
             # BL ランクマップからスター取得 (hash+char+diff 一致)
             bl_entry = bl_index.get(key)
@@ -1172,6 +1295,8 @@ def load_accsaber_reloaded_maps(
                 acc_complexity=complexity,
                 player_mods=score_mods,
                 score_source=score_src,
+                duration_seconds=bl_entry.duration_seconds if bl_entry else 0,
+                played_at_ts=rl_played_at_ts if rl_played_at_ts else played_at_ts,
             ))
 
     if on_progress:
@@ -1288,6 +1413,67 @@ _BATCH_PRESETS: List[_BatchPreset] = [
 ]
 
 
+def _sort_entries(entries: List[MapEntry], sort_mode: str) -> List[MapEntry]:
+    """sort_mode に従って MapEntry をソートした新しいリストを返す。"""
+    result = list(entries)
+    if sort_mode == "pp_high":
+        result.sort(key=lambda e: (-e.player_pp, e.stars, e.song_name))
+    elif sort_mode == "pp_low":
+        result.sort(key=lambda e: (e.player_pp, e.stars, e.song_name))
+    elif sort_mode == "ap_high":
+        result.sort(key=lambda e: (-e.acc_rl_ap, e.stars, e.song_name))
+    elif sort_mode == "ap_low":
+        result.sort(key=lambda e: (e.acc_rl_ap, e.stars, e.song_name))
+    elif sort_mode == "acc_high":
+        result.sort(key=lambda e: (-e.player_acc, e.stars, e.song_name))
+    elif sort_mode == "acc_low":
+        result.sort(key=lambda e: (e.player_acc, e.stars, e.song_name))
+    elif sort_mode == "rank_low":
+        result.sort(key=lambda e: (e.player_rank or 999999, e.stars, e.song_name))
+    elif sort_mode == "rank_high":
+        result.sort(key=lambda e: (-(e.player_rank or 0), e.stars, e.song_name))
+    elif sort_mode == "star_desc":
+        result.sort(key=lambda e: (-e.stars, e.song_name))
+    elif sort_mode == "fc_desc":
+        result.sort(key=lambda e: (-int(e.full_combo), e.stars, e.song_name))
+    elif sort_mode == "fc_asc":
+        result.sort(key=lambda e: (int(e.full_combo), e.stars, e.song_name))
+    elif sort_mode == "status_desc":
+        result.sort(key=lambda e: (-(30 if e.cleared else 20 if e.nf_clear else 10), e.song_name.lower()))
+    elif sort_mode == "status_asc":
+        result.sort(key=lambda e: ((30 if e.cleared else 20 if e.nf_clear else 10), e.song_name.lower()))
+    elif sort_mode == "song_desc":
+        result.sort(key=lambda e: e.song_name.lower(), reverse=True)
+    elif sort_mode == "song_asc":
+        result.sort(key=lambda e: e.song_name.lower())
+    elif sort_mode in ("diff_desc", "diff_asc"):
+        _dord = {"Easy": 1, "Normal": 3, "Hard": 5, "Expert": 7, "ExpertPlus": 9}
+        result.sort(key=lambda e: (_dord.get(e.difficulty, 0), e.song_name.lower()), reverse=(sort_mode == "diff_desc"))
+    elif sort_mode == "mode_desc":
+        result.sort(key=lambda e: e.mode.lower(), reverse=True)
+    elif sort_mode == "mode_asc":
+        result.sort(key=lambda e: e.mode.lower())
+    elif sort_mode == "cat_desc":
+        result.sort(key=lambda e: e.acc_category.lower(), reverse=True)
+    elif sort_mode == "cat_asc":
+        result.sort(key=lambda e: e.acc_category.lower())
+    elif sort_mode == "mapper_desc":
+        result.sort(key=lambda e: e.mapper.lower(), reverse=True)
+    elif sort_mode == "mapper_asc":
+        result.sort(key=lambda e: e.mapper.lower())
+    elif sort_mode == "author_desc":
+        result.sort(key=lambda e: e.song_author.lower(), reverse=True)
+    elif sort_mode == "author_asc":
+        result.sort(key=lambda e: e.song_author.lower())
+    elif sort_mode == "playtime_desc":
+        result.sort(key=lambda e: (-e.played_at_ts, e.song_name.lower()))
+    elif sort_mode == "playtime_asc":
+        result.sort(key=lambda e: (e.played_at_ts if e.played_at_ts > 0 else 9_999_999_999, e.song_name.lower()))
+    else:
+        result.sort(key=lambda e: (e.stars, e.song_name))
+    return result
+
+
 def _apply_config_filter(maps: List[MapEntry], cfg: "_BatchConfig") -> List[MapEntry]:
     """_BatchConfig のフィルタ条件をマップリストに適用してソート済みリストを返す。"""
     q = cfg.song_filter.lower() if cfg.song_filter else ""
@@ -1314,58 +1500,7 @@ def _apply_config_filter(maps: List[MapEntry], cfg: "_BatchConfig") -> List[MapE
             if e.acc_category == "tech" and not cfg.cat_tech:
                 continue
         result.append(e)
-    if cfg.sort_mode == "pp_high":
-        result.sort(key=lambda e: (-e.player_pp, e.stars, e.song_name))
-    elif cfg.sort_mode == "pp_low":
-        result.sort(key=lambda e: (e.player_pp, e.stars, e.song_name))
-    elif cfg.sort_mode == "ap_high":
-        result.sort(key=lambda e: (-e.acc_rl_ap, e.stars, e.song_name))
-    elif cfg.sort_mode == "ap_low":
-        result.sort(key=lambda e: (e.acc_rl_ap, e.stars, e.song_name))
-    elif cfg.sort_mode == "acc_high":
-        result.sort(key=lambda e: (-e.player_acc, e.stars, e.song_name))
-    elif cfg.sort_mode == "acc_low":
-        result.sort(key=lambda e: (e.player_acc, e.stars, e.song_name))
-    elif cfg.sort_mode == "rank_low":
-        result.sort(key=lambda e: (e.player_rank or 999999, e.stars, e.song_name))
-    elif cfg.sort_mode == "rank_high":
-        result.sort(key=lambda e: (-(e.player_rank or 0), e.stars, e.song_name))
-    elif cfg.sort_mode == "star_desc":
-        result.sort(key=lambda e: (-e.stars, e.song_name))
-    elif cfg.sort_mode == "fc_desc":
-        result.sort(key=lambda e: (-int(e.full_combo), e.stars, e.song_name))
-    elif cfg.sort_mode == "fc_asc":
-        result.sort(key=lambda e: (int(e.full_combo), e.stars, e.song_name))
-    elif cfg.sort_mode == "status_desc":
-        result.sort(key=lambda e: -(30 if e.cleared else 20 if e.nf_clear else 10))
-    elif cfg.sort_mode == "status_asc":
-        result.sort(key=lambda e: (30 if e.cleared else 20 if e.nf_clear else 10))
-    elif cfg.sort_mode == "song_desc":
-        result.sort(key=lambda e: e.song_name.lower(), reverse=True)
-    elif cfg.sort_mode == "song_asc":
-        result.sort(key=lambda e: e.song_name.lower())
-    elif cfg.sort_mode in ("diff_desc", "diff_asc"):
-        _dord = {"Easy": 1, "Normal": 3, "Hard": 5, "Expert": 7, "ExpertPlus": 9}
-        result.sort(key=lambda e: _dord.get(e.difficulty, 0), reverse=(cfg.sort_mode == "diff_desc"))
-    elif cfg.sort_mode == "mode_desc":
-        result.sort(key=lambda e: e.mode.lower(), reverse=True)
-    elif cfg.sort_mode == "mode_asc":
-        result.sort(key=lambda e: e.mode.lower())
-    elif cfg.sort_mode == "cat_desc":
-        result.sort(key=lambda e: e.acc_category.lower(), reverse=True)
-    elif cfg.sort_mode == "cat_asc":
-        result.sort(key=lambda e: e.acc_category.lower())
-    elif cfg.sort_mode == "mapper_desc":
-        result.sort(key=lambda e: e.mapper.lower(), reverse=True)
-    elif cfg.sort_mode == "mapper_asc":
-        result.sort(key=lambda e: e.mapper.lower())
-    elif cfg.sort_mode == "author_desc":
-        result.sort(key=lambda e: e.song_author.lower(), reverse=True)
-    elif cfg.sort_mode == "author_asc":
-        result.sort(key=lambda e: e.song_author.lower())
-    else:
-        result.sort(key=lambda e: (e.stars, e.song_name))
-    return result
+    return _sort_entries(result, cfg.sort_mode)
 
 
 def _pregenerate_covers(configs: "List[_BatchConfig]") -> Dict[str, str]:
@@ -1422,6 +1557,7 @@ def _config_export_tag(cfg: "_BatchConfig") -> str:
             parts.append(safe_q)
     _sort_tags = {
         "star_asc": "StarAsc", "star_desc": "StarDesc",
+        "playtime_desc": "PlayedDesc", "playtime_asc": "PlayedAsc",
         "pp_high": "PPDesc", "pp_low": "PPAsc",
         "ap_high": "APDesc", "ap_low": "APAsc",
         "acc_high": "AccDesc", "acc_low": "AccAsc",
@@ -1442,6 +1578,8 @@ def _config_export_tag(cfg: "_BatchConfig") -> str:
 _SORT_SYMBOL: Dict[str, str] = {
     "star_asc":      "★↑",
     "star_desc":     "★↓",
+    "playtime_desc": "Played↓",
+    "playtime_asc":  "Played↑",
     "pp_high":       "PP↓",
     "pp_low":        "PP↑",
     "ap_high":       "AP↓",
@@ -1655,22 +1793,23 @@ def _run_export_configs(
 # テーブル列インデックス
 _COL_STATUS = 0
 _COL_SONG = 1
-_COL_DIFF = 2
-_COL_MODE = 3
-_COL_ACC_CAT = 4
-_COL_SERVICE = 5     # スコア元サービス表示 (BL / SS / AS)
-_COL_PLAYER_RANK = 6
-_COL_STARS = 7
-_COL_PLAYER_ACC = 8
-_COL_PLAYER_PP = 9
-_COL_FC = 10
-_COL_MOD = 11
-_COL_MAPPER = 12
-_COL_AUTHOR = 13
-_COL_COUNT = 14
+_COL_PLAY_TIME = 2
+_COL_DIFF = 3
+_COL_MODE = 4
+_COL_ACC_CAT = 5
+_COL_SERVICE = 6     # スコア元サービス表示 (BL / SS / AS)
+_COL_PLAYER_RANK = 7
+_COL_STARS = 8
+_COL_PLAYER_ACC = 9
+_COL_PLAYER_PP = 10
+_COL_FC = 11
+_COL_MOD = 12
+_COL_MAPPER = 13
+_COL_AUTHOR = 14
+_COL_COUNT = 15
 
 _COL_LABELS = [
-    "Status", "Song", "Diff", "Mode", "Acc Category", "Service", "Rank", "★", "Acc %", "PP",
+    "Status", "Song", "Played At", "Diff", "Mode", "Acc Category", "Service", "Rank", "★", "Acc %", "PP",
     "FC", "Mods", "Mapper", "Author",
 ]
 
@@ -1951,6 +2090,7 @@ class PlaylistWindow(QMainWindow):
         # 初期列幅調整
         self._table.setColumnWidth(_COL_STATUS, 52)
         self._table.setColumnWidth(_COL_SONG, 240)
+        self._table.setColumnWidth(_COL_PLAY_TIME, 132)
         self._table.setColumnWidth(_COL_DIFF, 26)
         self._table.setColumnWidth(_COL_MODE, 42)
         self._table.setColumnWidth(_COL_ACC_CAT, 90)
@@ -2188,6 +2328,8 @@ class PlaylistWindow(QMainWindow):
         _sort_col_map = {
             "status_desc": (_COL_STATUS,    Qt.SortOrder.DescendingOrder),
             "status_asc":  (_COL_STATUS,    Qt.SortOrder.AscendingOrder),
+            "playtime_desc": (_COL_PLAY_TIME, Qt.SortOrder.DescendingOrder),
+            "playtime_asc":  (_COL_PLAY_TIME, Qt.SortOrder.AscendingOrder),
             "pp_high":     (_COL_PLAYER_PP, Qt.SortOrder.DescendingOrder),
             "pp_low":      (_COL_PLAYER_PP, Qt.SortOrder.AscendingOrder),
             "ap_high":     (_COL_PLAYER_PP, Qt.SortOrder.DescendingOrder),
@@ -2287,6 +2429,8 @@ class PlaylistWindow(QMainWindow):
             return "status_desc" if is_desc else "status_asc"
         if col == _COL_SONG:
             return "song_desc" if is_desc else "song_asc"
+        if col == _COL_PLAY_TIME:
+            return "playtime_desc" if is_desc else "playtime_asc"
         if col == _COL_DIFF:
             return "diff_desc" if is_desc else "diff_asc"
         if col == _COL_MODE:
@@ -2360,6 +2504,7 @@ class PlaylistWindow(QMainWindow):
         sort_mode = self._current_sort_mode()
         _sort_tags = {
             "star_asc": "star_asc", "star_desc": "star_desc",
+            "playtime_desc": "playtime_desc", "playtime_asc": "playtime_asc",
             "pp_high": "pp_desc", "pp_low": "pp_asc",
             "ap_high": "ap_desc", "ap_low": "ap_asc",
             "acc_high": "acc_desc", "acc_low": "acc_asc",
@@ -3169,6 +3314,8 @@ class PlaylistWindow(QMainWindow):
 
             # 曲名
             table.setItem(row, _COL_SONG, QTableWidgetItem(e.song_name))
+            # プレイ日時
+            table.setItem(row, _COL_PLAY_TIME, _played_at_item(e.played_at_ts))
             # 難易度
             table.setItem(row, _COL_DIFF, _diff_item(e.difficulty))
             # モード
@@ -3266,10 +3413,7 @@ class PlaylistWindow(QMainWindow):
     def _export_all_by_pp(self, tag: str = "all") -> None:
         """全マップを ★ → Player PP 降順で 1 つの bplist に出力する。"""
         target = list(self._filtered)
-        sorted_entries = sorted(
-            target,
-            key=lambda e: (math.floor(e.stars), -e.player_pp, e.song_name),
-        )
+        sorted_entries = _sort_entries(target, self._current_sort_mode())
 
         if not sorted_entries:
             QMessageBox.information(self, "Export", "No maps found.")
@@ -3323,10 +3467,7 @@ class PlaylistWindow(QMainWindow):
         _sort_dir = _sort_dir_from_mode(self._current_sort_mode())
 
         for star_int in sorted(groups.keys()):
-            group_entries = sorted(
-                groups[star_int],
-                key=lambda e: (e.stars, -e.player_pp, e.song_name),
-            )
+            group_entries = _sort_entries(groups[star_int], self._current_sort_mode())
             title = title_template.format(star=star_int)
             filename = f"{star_int:02d}star_{filename_suffix}.bplist"
             out_path = Path(folder) / filename
@@ -3379,7 +3520,7 @@ class PlaylistWindow(QMainWindow):
 
         for cat in sorted(groups.keys()):
             try:
-                cat_entries = sorted(groups[cat], key=lambda e: (e.stars, e.song_name))
+                cat_entries = _sort_entries(groups[cat], self._current_sort_mode())
                 fname = folder_path / f"{cat}_{tag}.bplist"
                 image = _make_playlist_cover(cat, "", _sort_dir)
                 bplist = _make_bplist(f"{cat.capitalize()} ({tag})", cat_entries, image)
