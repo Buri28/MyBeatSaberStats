@@ -58,7 +58,7 @@ from PySide6.QtWidgets import (
 )
 
 from .snapshot import BASE_DIR, RESOURCES_DIR
-from .theme import is_dark, table_stylesheet
+from .theme import detect_system_dark, is_dark, table_stylesheet
 
 
 class _SwapSortArrowStyle(QProxyStyle):
@@ -92,6 +92,26 @@ SOURCE_BL = "BeatLeader"
 SOURCE_ACC = "AccSaber"
 SOURCE_ACC_RL = "AccSaber RL"
 SOURCE_OPEN = "Open File"
+def _secondary_button_stylesheet() -> str:
+    if is_dark():
+        return (
+            "QPushButton { background-color: #2a2a2a; color: #f0f0f0; "
+            "border: 1px solid #5a5a5a; border-radius: 4px; padding: 1px 10px; }"
+            "QPushButton:hover { background-color: #353535; border-color: #7a7a7a; }"
+            "QPushButton:pressed { background-color: #232323; }"
+            "QPushButton:disabled { background-color: #222222; color: #888888; border-color: #4a4a4a; }"
+        )
+    return (
+        "QPushButton { background-color: #f7f7f7; color: #111111; "
+        "border: 1px solid #cfcfcf; border-radius: 8px; padding: 1px 10px; }"
+        "QPushButton:hover { background-color: #ffffff; border-color: #b9cbea; }"
+        "QPushButton:pressed { background-color: #ececec; }"
+        "QPushButton:disabled { background-color: #f1f1f1; color: #9a9a9a; border-color: #dddddd; }"
+    )
+
+
+def _is_windows_light_app_light() -> bool:
+    return not is_dark() and not detect_system_dark()
 
 # ステータス表示
 STATUS_CLEARED = "✔"
@@ -1892,6 +1912,14 @@ class PlaylistWindow(QMainWindow):
             src_row1.addWidget(rb)
         src_row1.addStretch()
         src_vbox.addLayout(src_row1)
+        self._secondary_buttons: List[QPushButton] = []
+
+        def _set_standard_button_height(*buttons: QPushButton, height: int = 26) -> None:
+            for button in buttons:
+                button.setMinimumHeight(height)
+        def _register_secondary_buttons(*buttons: QPushButton) -> None:
+            _set_standard_button_height(*buttons)
+            self._secondary_buttons.extend(buttons)
 
         # 2行目: Open File + ファイル操作 + Load ボタン
         src_row2 = QHBoxLayout()
@@ -1905,6 +1933,7 @@ class PlaylistWindow(QMainWindow):
         self._open_edit.setEnabled(False)
         self._open_edit.setMinimumWidth(240)
         self._btn_browse = QPushButton("Browse...")
+        _register_secondary_buttons(self._btn_browse)
         self._btn_browse.setEnabled(False)
         self._btn_browse.clicked.connect(self._browse_bplist)
         self._svc_label = QLabel("Service:")
@@ -2045,18 +2074,17 @@ class PlaylistWindow(QMainWindow):
         export_row.addStretch()
 
         self._btn_export = QPushButton("📤 Export")
-        self._btn_export.setStyleSheet(
-            "QPushButton { font-weight: bold; padding: 2px 8px; }"
-        )
         self._btn_export.setToolTip(
             "Content と Style の条件に従って bplist を出力します。\n"
             "フィルタ中の範囲が対象です。\n"
             "Split by ★ の場合は保存フォルダを選択してください。"
         )
         self._btn_export.clicked.connect(self._on_export)
+        self._apply_export_button_theme()
         export_row.addWidget(self._btn_export)
 
         self._btn_add_to_batch = QPushButton("➕ Add to Batch")
+        _register_secondary_buttons(self._btn_add_to_batch)
         self._btn_add_to_batch.setToolTip(
             "フィルタ中のマップを Batch Export キューに追加します。\n"
             "Content / Style の設定が反映されます。"
@@ -2132,6 +2160,7 @@ class PlaylistWindow(QMainWindow):
         _batch_title_row.addWidget(_batch_title)
         _batch_title_row.addStretch()
         self._btn_preview_cover = QPushButton("🖼️ Playlist Covers")
+        _register_secondary_buttons(self._btn_preview_cover)
         self._btn_preview_cover.setToolTip("出力フォルダを選んで .bplist のカバー画像を一覧表示します")
         self._btn_preview_cover.clicked.connect(self._show_cover_preview)
         _batch_title_row.addWidget(self._btn_preview_cover)
@@ -2161,8 +2190,10 @@ class PlaylistWindow(QMainWindow):
         _btn_bq_remove.clicked.connect(self._batch_remove_selected)
         _queue_btn_row.addWidget(_btn_bq_remove)
         _btn_bq_clear = QPushButton("Clear")
+        _btn_bq_clear.setToolTip("すべてを削除")
         _btn_bq_clear.clicked.connect(self._batch_clear)
         _queue_btn_row.addWidget(_btn_bq_clear)
+        _register_secondary_buttons(_btn_bq_all, _btn_bq_none, _btn_bq_remove, _btn_bq_clear)
         _top_layout.addLayout(_queue_btn_row)
 
         _export_all_btn_row = QHBoxLayout()
@@ -2211,6 +2242,7 @@ class PlaylistWindow(QMainWindow):
         _preset_btn_row.addWidget(_btn_pn)
         _preset_btn_row.addStretch()
         self._btn_add_presets = QPushButton("➕ Add to Batch")
+        _register_secondary_buttons(_btn_pa, _btn_pn, self._btn_add_presets)
         self._btn_add_presets.clicked.connect(self._batch_add_presets)
         _preset_btn_row.addWidget(self._btn_add_presets)
         _bot_layout.addLayout(_preset_btn_row)
@@ -2232,6 +2264,7 @@ class PlaylistWindow(QMainWindow):
         self._export_sigs = _LoadSignals()
         self._export_sigs.finished.connect(self._on_export_finished)
         self._export_sigs.error.connect(self._on_export_error)
+        self._apply_secondary_button_theme()
         self._export_sigs.progress.connect(self._on_export_progress)
         self._batch_progress_dlg: Optional[QProgressDialog] = None
         self._batch_queue_list.itemChanged.connect(self._on_batch_item_changed)
@@ -2277,8 +2310,29 @@ class PlaylistWindow(QMainWindow):
         self._save_window_state()
         super().closeEvent(event)
 
+    def _apply_secondary_button_theme(self) -> None:
+        style = _secondary_button_stylesheet()
+        for button in self._secondary_buttons:
+            button.setStyleSheet(style)
+
+    def _apply_export_button_theme(self) -> None:
+        if _is_windows_light_app_light():
+            self._btn_export.setMinimumHeight(30)
+            self._btn_export.setMinimumWidth(104)
+            self._btn_export.setStyleSheet(
+                "QPushButton { font-weight: bold; padding: 3px 14px; }"
+            )
+        else:
+            self._btn_export.setMinimumHeight(26)
+            self._btn_export.setMinimumWidth(0)
+            self._btn_export.setStyleSheet(
+                "QPushButton { font-weight: bold; padding: 2px 8px; }"
+            )
+
     def apply_theme(self) -> None:
         """テーマ切替後に呼び出してテーブルスタイルと行色を更新する。"""
+        self._apply_secondary_button_theme()
+        self._apply_export_button_theme()
         self._table.setStyleSheet(table_stylesheet())
         if self._all_entries:
             self._refresh_table(self._filtered)
