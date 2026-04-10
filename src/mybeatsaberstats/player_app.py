@@ -1764,6 +1764,13 @@ class PlayerWindow(QMainWindow):
         )
         return True
 
+    def _prompt_initial_snapshot_if_needed(self) -> None:
+        """初回起動時のみ、スナップショット未作成なら取得ダイアログを開く。"""
+
+        if self.player_combo.count() != 0:
+            return
+        self._take_snapshot_for_current_player()
+
     def _collect_star_stats_from_beatleader(self, beatleader_id: Optional[str]) -> List[StarClearStat]:
         """BeatLeader の RankedMap 一覧とプレイヤースコアから★別統計を集計する。"""
 
@@ -2331,9 +2338,10 @@ class PlayerWindow(QMainWindow):
         # ★別統計は ScoreSaber / BeatLeader の Ranked 譜面数にも相当するので、
         # 基本的にはスナップショットに保存された値を使い、無い場合のみ再集計する。
         stats = snap.star_stats or []
+        # 古いスナップショットでは BeatLeader ★統計が未保存のことがあるが、
+        # ここで同期再取得すると起動時やプレイヤー切り替え時にネットワーク待ちで固まる。
+        # 表示は保存済みデータだけを使い、未保存なら空表示にとどめる。
         bl_stats = list(snap.beatleader_star_stats or [])
-        if not bl_stats:
-            bl_stats = self._collect_star_stats_from_beatleader(snap.beatleader_id or snap.steam_id)
         total_ranked_maps = sum(s.map_count for s in stats)
 
         # ScoreSaber / BeatLeader で対になる指標が一目で分かるよう、
@@ -3561,10 +3569,8 @@ def run() -> None:
     window.show()
 
     # 起動直後にスナップショットが1つも無い場合は、最初にだけ
-    # Take Snapshot ダイアログを表示する。ここでキャンセルされたらそのまま終了する。
+    # Take Snapshot ダイアログを表示する。失敗・キャンセルしてもアプリは終了しない。
     if window.player_combo.count() == 0:
-        created = window._take_snapshot_for_current_player()
-        if not created:
-            return
+        QTimer.singleShot(0, window._prompt_initial_snapshot_if_needed)
 
     app.exec()
