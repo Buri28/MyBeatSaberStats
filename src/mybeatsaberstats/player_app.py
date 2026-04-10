@@ -1130,16 +1130,20 @@ class PlayerWindow(QMainWindow):
 
         # ScoreSaber: Clears/FC はリンクのみ(バーなし)、Clear Rate/FC Rate はバー付き、Avg ACC
         _plain = QStyledItemDelegate(self)
+        _ClickableColHover(self.star_table, 1, _plain)
         _ClickableColHover(self.star_table, 2, _plain)
         _ClickableColHover(self.star_table, 3, perc_clear)
         _ClickableColHover(self.star_table, 4, _plain)
         _ClickableColHover(self.star_table, 5, perc_clear)
+        _ClickableColHover(self.star_table, 7, _plain)
         self.star_table.setItemDelegateForColumn(6, perc_acc)
         # BeatLeader: Clears/FC はリンクのみ(バーなし)、Clear Rate/FC Rate はバー付き、Avg ACC
+        _ClickableColHover(self.bl_star_table, 1, _plain)
         _ClickableColHover(self.bl_star_table, 2, _plain)
         _ClickableColHover(self.bl_star_table, 3, perc_clear)
         _ClickableColHover(self.bl_star_table, 4, _plain)
         _ClickableColHover(self.bl_star_table, 5, perc_clear)
+        _ClickableColHover(self.bl_star_table, 7, _plain)
         self.bl_star_table.setItemDelegateForColumn(6, perc_acc)
         # PP 列はデリゲート対象のため、列番号が 9→10 にシフトしたことに合わせて後で上書き
 
@@ -1164,16 +1168,20 @@ class PlayerWindow(QMainWindow):
             lambda col: self._on_bl_acc_cell_clicked(0, col)
         )
 
-        # Stats → Playlist 連携: Clears / Clear Rate / FC / FC Rate / PP / AP クリックでプレイリスト画面を開く
+        # Stats → Playlist 連携: Maps / Clears / Clear Rate / FC / FC Rate / NF / PP / AP クリックでプレイリスト画面を開く
+        self.star_table.cellClicked.connect(self._on_ss_maps_clicked)
         self.star_table.cellClicked.connect(self._on_ss_clears_clicked)
         self.star_table.cellClicked.connect(self._on_ss_clear_rate_clicked)
         self.star_table.cellClicked.connect(self._on_ss_fc_clicked)
         self.star_table.cellClicked.connect(self._on_ss_fc_rate_clicked)
+        self.star_table.cellClicked.connect(self._on_ss_nf_clicked)
         self.star_table.cellClicked.connect(self._on_ss_pp_clicked)
+        self.bl_star_table.cellClicked.connect(self._on_bl_maps_clicked)
         self.bl_star_table.cellClicked.connect(self._on_bl_clears_clicked)
         self.bl_star_table.cellClicked.connect(self._on_bl_clear_rate_clicked)
         self.bl_star_table.cellClicked.connect(self._on_bl_fc_clicked)
         self.bl_star_table.cellClicked.connect(self._on_bl_fc_rate_clicked)
+        self.bl_star_table.cellClicked.connect(self._on_bl_nf_clicked)
         self.bl_star_table.cellClicked.connect(self._on_bl_pp_clicked)
         self.acc_table.cellClicked.connect(self._on_acc_play_count_clicked)
         self.acc_table.cellClicked.connect(self._on_acc_ap_clicked)
@@ -3245,6 +3253,9 @@ class PlayerWindow(QMainWindow):
         star_min: float = 0.0,
         star_max: float = 20.0,
         categories: Optional[List[str]] = None,
+        show_cleared: bool = True,
+        show_nf: bool = True,
+        show_unplayed: bool = True,
         sort_mode: str = "status_desc",
     ) -> None:
         """Stats 画面からの連携用。Playlist 画面を開いてフィルタプリセットを適用する。"""
@@ -3255,141 +3266,239 @@ class PlayerWindow(QMainWindow):
                 star_min=star_min,
                 star_max=star_max,
                 categories=categories,
+                show_cleared=show_cleared,
+                show_nf=show_nf,
+                show_unplayed=show_unplayed,
                 sort_mode=sort_mode,
             )
+
+    def _star_range_from_row(self, table: QTableWidget, row: int) -> tuple[float, float]:
+        star_item = table.item(row, 0)
+        if star_item is None:
+            return 0.0, 20.0
+        try:
+            star = int(star_item.text())
+        except ValueError:
+            return 0.0, 20.0
+        return float(star), float(star) + 1.0
+
+    def _open_star_playlist_preset(
+        self,
+        table: QTableWidget,
+        row: int,
+        source: str,
+        *,
+        show_cleared: bool,
+        show_nf: bool,
+        show_unplayed: bool,
+        sort_mode: str,
+    ) -> None:
+        star_min, star_max = self._star_range_from_row(table, row)
+        self.open_playlist_with_filter(
+            source,
+            star_min=star_min,
+            star_max=star_max,
+            show_cleared=show_cleared,
+            show_nf=show_nf,
+            show_unplayed=show_unplayed,
+            sort_mode=sort_mode,
+        )
+
+    def _on_ss_maps_clicked(self, row: int, col: int) -> None:
+        """SS ★テーブルの Maps 列クリックで Playlist 画面を Split by ★ で開く。"""
+        if col != 1:
+            return
+        self._open_star_playlist_preset(
+            self.star_table,
+            row,
+            "ss",
+            show_cleared=True,
+            show_nf=True,
+            show_unplayed=True,
+            sort_mode="status_desc",
+        )
 
     def _on_ss_clears_clicked(self, row: int, col: int) -> None:
         """SS ★テーブルの Clears 列クリックで Playlist 画面をクリア降順で開く。"""
         if col != 2:
             return
-        star_item = self.star_table.item(row, 0)
-        if star_item is None:
-            return
-        try:
-            star = int(star_item.text())
-            self.open_playlist_with_filter("ss", star_min=float(star), star_max=float(star) + 1.0, sort_mode="status_desc")
-        except ValueError:
-            self.open_playlist_with_filter("ss", sort_mode="status_desc")
+        self._open_star_playlist_preset(
+            self.star_table,
+            row,
+            "ss",
+            show_cleared=True,
+            show_nf=False,
+            show_unplayed=False,
+            sort_mode="status_desc",
+        )
 
     def _on_ss_clear_rate_clicked(self, row: int, col: int) -> None:
         """SS ★テーブルの Clear Rate 列クリックで Playlist 画面をステータス昇順で開く。"""
         if col != 3:
             return
-        star_item = self.star_table.item(row, 0)
-        if star_item is None:
-            return
-        try:
-            star = int(star_item.text())
-        except ValueError:
-            # "Total" 行など: 星フィルタなし
-            self.open_playlist_with_filter("ss", sort_mode="status_asc")
-            return
-        self.open_playlist_with_filter("ss", star_min=float(star), star_max=float(star) + 1.0, sort_mode="status_asc")
+        self._open_star_playlist_preset(
+            self.star_table,
+            row,
+            "ss",
+            show_cleared=True,
+            show_nf=True,
+            show_unplayed=True,
+            sort_mode="status_asc",
+        )
 
     def _on_ss_fc_clicked(self, row: int, col: int) -> None:
         """SS ★テーブルの FC 列クリックで Playlist 画面を FC 降順で開く。"""
         if col != 4:
             return
-        star_item = self.star_table.item(row, 0)
-        if star_item is None:
-            return
-        try:
-            star = int(star_item.text())
-            self.open_playlist_with_filter("ss", star_min=float(star), star_max=float(star) + 1.0, sort_mode="fc_desc")
-        except ValueError:
-            self.open_playlist_with_filter("ss", sort_mode="fc_desc")
+        self._open_star_playlist_preset(
+            self.star_table,
+            row,
+            "ss",
+            show_cleared=True,
+            show_nf=False,
+            show_unplayed=False,
+            sort_mode="fc_desc",
+        )
 
     def _on_ss_pp_clicked(self, row: int, col: int) -> None:
         """SS ★テーブルの PP 列クリックで Playlist 画面を PP 高順で開く。"""
         if col != 10:
             return
-        star_item = self.star_table.item(row, 0)
-        if star_item is None:
-            return
-        try:
-            star = int(star_item.text())
-            self.open_playlist_with_filter("ss", star_min=float(star), star_max=float(star) + 1.0, sort_mode="pp_high")
-        except ValueError:
-            self.open_playlist_with_filter("ss", sort_mode="pp_high")
+        self._open_star_playlist_preset(
+            self.star_table,
+            row,
+            "ss",
+            show_cleared=True,
+            show_nf=True,
+            show_unplayed=True,
+            sort_mode="pp_high",
+        )
 
     def _on_ss_fc_rate_clicked(self, row: int, col: int) -> None:
         """SS ★テーブルの FC Rate 列クリックで Playlist 画面を FC 昇順で開く。"""
         if col != 5:
             return
-        star_item = self.star_table.item(row, 0)
-        if star_item is None:
+        self._open_star_playlist_preset(
+            self.star_table,
+            row,
+            "ss",
+            show_cleared=True,
+            show_nf=True,
+            show_unplayed=True,
+            sort_mode="fc_asc",
+        )
+
+    def _on_ss_nf_clicked(self, row: int, col: int) -> None:
+        """SS ★テーブルの NF 列クリックで NF のみを Split by ★ で開く。"""
+        if col != 7:
             return
-        try:
-            star = int(star_item.text())
-            self.open_playlist_with_filter("ss", star_min=float(star), star_max=float(star) + 1.0, sort_mode="fc_asc")
-        except ValueError:
-            self.open_playlist_with_filter("ss", sort_mode="fc_asc")
+        self._open_star_playlist_preset(
+            self.star_table,
+            row,
+            "ss",
+            show_cleared=False,
+            show_nf=True,
+            show_unplayed=False,
+            sort_mode="status_desc",
+        )
 
     def _on_bl_clears_clicked(self, row: int, col: int) -> None:
         """BL ★テーブルの Clears 列クリックで Playlist 画面をクリア降順で開く。"""
         if col != 2:
             return
-        star_item = self.bl_star_table.item(row, 0)
-        if star_item is None:
+        self._open_star_playlist_preset(
+            self.bl_star_table,
+            row,
+            "bl",
+            show_cleared=True,
+            show_nf=False,
+            show_unplayed=False,
+            sort_mode="status_desc",
+        )
+
+    def _on_bl_maps_clicked(self, row: int, col: int) -> None:
+        """BL ★テーブルの Maps 列クリックで Playlist 画面を Split by ★ で開く。"""
+        if col != 1:
             return
-        try:
-            star = int(star_item.text())
-            self.open_playlist_with_filter("bl", star_min=float(star), star_max=float(star) + 1.0, sort_mode="status_desc")
-        except ValueError:
-            self.open_playlist_with_filter("bl", sort_mode="status_desc")
+        self._open_star_playlist_preset(
+            self.bl_star_table,
+            row,
+            "bl",
+            show_cleared=True,
+            show_nf=True,
+            show_unplayed=True,
+            sort_mode="status_desc",
+        )
 
     def _on_bl_clear_rate_clicked(self, row: int, col: int) -> None:
         """BL ★テーブルの Clear Rate 列クリックで Playlist 画面をステータス昇順で開く。"""
         if col != 3:
             return
-        star_item = self.bl_star_table.item(row, 0)
-        if star_item is None:
-            return
-        try:
-            star = int(star_item.text())
-        except ValueError:
-            self.open_playlist_with_filter("bl", sort_mode="status_asc")
-            return
-        self.open_playlist_with_filter("bl", star_min=float(star), star_max=float(star) + 1.0, sort_mode="status_asc")
+        self._open_star_playlist_preset(
+            self.bl_star_table,
+            row,
+            "bl",
+            show_cleared=True,
+            show_nf=True,
+            show_unplayed=True,
+            sort_mode="status_asc",
+        )
 
     def _on_bl_fc_clicked(self, row: int, col: int) -> None:
         """BL ★テーブルの FC 列クリックで Playlist 画面を FC 降順で開く。"""
         if col != 4:
             return
-        star_item = self.bl_star_table.item(row, 0)
-        if star_item is None:
-            return
-        try:
-            star = int(star_item.text())
-            self.open_playlist_with_filter("bl", star_min=float(star), star_max=float(star) + 1.0, sort_mode="fc_desc")
-        except ValueError:
-            self.open_playlist_with_filter("bl", sort_mode="fc_desc")
+        self._open_star_playlist_preset(
+            self.bl_star_table,
+            row,
+            "bl",
+            show_cleared=True,
+            show_nf=False,
+            show_unplayed=False,
+            sort_mode="fc_desc",
+        )
 
     def _on_bl_pp_clicked(self, row: int, col: int) -> None:
         """BL ★テーブルの PP 列クリックで Playlist 画面を PP 高順で開く。"""
         if col != 10:
             return
-        star_item = self.bl_star_table.item(row, 0)
-        if star_item is None:
-            return
-        try:
-            star = int(star_item.text())
-            self.open_playlist_with_filter("bl", star_min=float(star), star_max=float(star) + 1.0, sort_mode="pp_high")
-        except ValueError:
-            self.open_playlist_with_filter("bl", sort_mode="pp_high")
+        self._open_star_playlist_preset(
+            self.bl_star_table,
+            row,
+            "bl",
+            show_cleared=True,
+            show_nf=True,
+            show_unplayed=True,
+            sort_mode="pp_high",
+        )
 
     def _on_bl_fc_rate_clicked(self, row: int, col: int) -> None:
         """BL ★テーブルの FC Rate 列クリックで Playlist 画面を FC 昇順で開く。"""
         if col != 5:
             return
-        star_item = self.bl_star_table.item(row, 0)
-        if star_item is None:
+        self._open_star_playlist_preset(
+            self.bl_star_table,
+            row,
+            "bl",
+            show_cleared=True,
+            show_nf=True,
+            show_unplayed=True,
+            sort_mode="fc_asc",
+        )
+
+    def _on_bl_nf_clicked(self, row: int, col: int) -> None:
+        """BL ★テーブルの NF 列クリックで NF のみを Split by ★ で開く。"""
+        if col != 7:
             return
-        try:
-            star = int(star_item.text())
-            self.open_playlist_with_filter("bl", star_min=float(star), star_max=float(star) + 1.0, sort_mode="fc_asc")
-        except ValueError:
-            self.open_playlist_with_filter("bl", sort_mode="fc_asc")
+        self._open_star_playlist_preset(
+            self.bl_star_table,
+            row,
+            "bl",
+            show_cleared=False,
+            show_nf=True,
+            show_unplayed=False,
+            sort_mode="status_desc",
+        )
 
     def _on_acc_play_count_clicked(self, row: int, col: int) -> None:
         """AccSaber テーブルの Play Count 列クリックで Playlist 画面を開く。"""

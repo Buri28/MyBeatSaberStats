@@ -2289,6 +2289,9 @@ class PlaylistWindow(QMainWindow):
         star_min: float = 0.0,
         star_max: float = 20.0,
         categories: Optional[List[str]] = None,
+        show_cleared: bool = True,
+        show_nf: bool = True,
+        show_unplayed: bool = True,
         sort_mode: str = "status_desc",
     ) -> None:
         """Stats 画面からの遷移用。ソース・星範囲・カテゴリ・ソートをプリセットして Load する。
@@ -2319,6 +2322,16 @@ class PlaylistWindow(QMainWindow):
         ]:
             cb.blockSignals(True)
             cb.setChecked(categories is None or cat in categories)
+            cb.blockSignals(False)
+
+        # Status チェックを設定
+        for checked, cb in [
+            (show_cleared, self._cb_sts_cleared),
+            (show_nf, self._cb_sts_nf),
+            (show_unplayed, self._cb_sts_unplayed),
+        ]:
+            cb.blockSignals(True)
+            cb.setChecked(checked)
             cb.blockSignals(False)
 
         # Export スタイルを Split by ★ / Category に設定
