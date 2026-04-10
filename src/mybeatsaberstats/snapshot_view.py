@@ -9,6 +9,7 @@ import re
 from PySide6.QtCore import Qt, QTimer, QSize
 from PySide6.QtGui import QColor, QIcon, QPalette
 from .theme import (
+    detect_system_dark,
     label_cell_color,
     label_cell_text_color,
     diff_positive_bg,
@@ -45,6 +46,12 @@ from PySide6.QtWidgets import (
 from .snapshot import Snapshot, SNAPSHOT_DIR, BASE_DIR, RESOURCES_DIR
 from .accsaber import get_accsaber_playlist_map_counts_from_cache
 from .accsaber_reloaded import get_reloaded_map_counts_from_cache as _get_reloaded_map_counts_from_cache
+
+
+def _light_app_button_min_height() -> int:
+    if is_dark():
+        return 0
+    return 20 if detect_system_dark() else 23
 
 
 class PercentageBarDelegate(QStyledItemDelegate):
@@ -518,6 +525,23 @@ class SnapshotCompareDialog(QDialog):
             self.btn_row_height_dn,
             self.btn_default_layout,
         ]
+        self._top_control_buttons = [
+            self.button_latest_b,
+            self.btn_toggle_metric,
+            self.btn_toggle_ss,
+            self.btn_toggle_bl,
+            self.btn_toggle_header,
+            self.btn_bl_below,
+            self.btn_acc_as,
+            self.btn_acc_rl,
+            self.btn_acc_pos,
+            self.btn_chk_all,
+            self.btn_chk_none,
+            self.btn_row_height_up,
+            self.btn_row_height_dn,
+            self.btn_default_layout,
+        ]
+        self._apply_header_button_density()
         self._apply_plain_header_button_style()
 
         # top_grid を QWidget でラップして縦スプリッターの上パネルにする
@@ -969,7 +993,7 @@ class SnapshotCompareDialog(QDialog):
         if not is_dark():
             button_qss = (
                 "QPushButton {"
-                "margin: 0px; padding: 0px 8px;"
+                "margin: 0px; padding: 0px 10px;"
                 "background-color: #f6f6f6; color: #111111;"
                 "border: 1px solid #d9d9d9; border-radius: 6px;"
                 "}"
@@ -978,6 +1002,11 @@ class SnapshotCompareDialog(QDialog):
             )
         for button in getattr(self, "_plain_header_buttons", []):
             button.setStyleSheet(button_qss)
+
+    def _apply_header_button_density(self) -> None:
+        min_height = _light_app_button_min_height()
+        for button in getattr(self, "_top_control_buttons", []):
+            button.setMinimumHeight(min_height)
 
     # 設定保存/復元まわり
 
