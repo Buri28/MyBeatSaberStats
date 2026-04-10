@@ -1400,19 +1400,20 @@ class _BatchConfig:
             src = f"Acc[{'+'.join(cats) or 'none'}]"
         sts = "".join([s for flag, s in [(self.show_cleared, "✓"), (self.show_nf, "⚠"), (self.show_unplayed, "✗")] if flag])
         sort_label = {
-            "star_asc": "StarAsc", "star_desc": "StarDesc",
-            "pp_high": "PPDesc", "pp_low": "PPAsc",
-            "ap_high": "APDesc", "ap_low": "APAsc",
-            "acc_high": "AccDesc", "acc_low": "AccAsc",
-            "rank_low": "RankAsc", "rank_high": "RankDesc",
-            "fc_desc": "FCDesc", "fc_asc": "FCAsc",
-            "status_desc": "StsDesc", "status_asc": "StsAsc",
-            "song_desc": "SongDesc", "song_asc": "SongAsc",
-            "diff_desc": "DiffDesc", "diff_asc": "DiffAsc",
-            "mode_desc": "ModeDesc", "mode_asc": "ModeAsc",
-            "cat_desc": "CatDesc", "cat_asc": "CatAsc",
-            "mapper_desc": "MapperDesc", "mapper_asc": "MapperAsc",
-            "author_desc": "AuthorDesc", "author_asc": "AuthorAsc",
+            "star_asc": "Star↑", "star_desc": "Star↓",
+            "pp_high": "PP↓", "pp_low": "PP↑",
+            "ap_high": "AP↓", "ap_low": "AP↑",
+            "acc_high": "Acc↓", "acc_low": "Acc↑",
+            "rank_low": "Rank↑", "rank_high": "Rank↓",
+            "fc_desc": "FC↓", "fc_asc": "FC↑",
+            "status_desc": "Sts↓", "status_asc": "Sts↑",
+            "song_desc": "Song↓", "song_asc": "Song↑",
+            "diff_desc": "Diff↓", "diff_asc": "Diff↑",
+            "mode_desc": "Mode↓", "mode_asc": "Mode↑",
+            "cat_desc": "Cat↓", "cat_asc": "Cat↑",
+            "mapper_desc": "Mapper↓", "mapper_asc": "Mapper↑",
+            "author_desc": "Author↓", "author_asc": "Author↑",
+            "playtime_desc": "Played↓", "playtime_asc": "Played↑",
         }.get(self.sort_mode, self.sort_mode)
         q_tag = f" \U0001f50d\"{self.song_filter}\"" if self.song_filter else ""
         if self.source in ("rl", "acc"):
@@ -1430,6 +1431,7 @@ _BATCH_PRESETS: List[_BatchPreset] = [
     _BatchPreset("BL — High PP per ★",                   "bl", "", False, "pp_high",  "",    True),
     _BatchPreset("AccSaber RL — Uncleared per Category", "rl", "", True,  "star_asc", "",    True),
     _BatchPreset("AccSaber RL — High AP per Category",   "rl", "", False, "ap_high",  "",    True),
+    _BatchPreset("AccSaber RL — Oldest Played per Category", "rl", "", False, "playtime_asc", "", True),
 ]
 
 
