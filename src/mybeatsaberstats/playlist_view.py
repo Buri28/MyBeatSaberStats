@@ -1809,7 +1809,7 @@ _COL_AUTHOR = 14
 _COL_COUNT = 15
 
 _COL_LABELS = [
-    "Status", "Song", "Played At", "Diff", "Mode", "Acc Category", "Service", "Rank", "★", "Acc %", "PP",
+    "Status", "Song", "Played At", "Diff", "Mode", "Category", "Service", "Rank", "★", "Acc %", "PP",
     "FC", "Mods", "Mapper", "Author",
 ]
 
@@ -1844,7 +1844,7 @@ class PlaylistWindow(QMainWindow):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Playlist")
-        self.resize(1400, 750)
+        self.resize(1300, 800)
 
         self._steam_id = steam_id
         self._all_entries: List[MapEntry] = []   # ロード済み全データ
@@ -2089,18 +2089,18 @@ class PlaylistWindow(QMainWindow):
 
         # 初期列幅調整
         self._table.setColumnWidth(_COL_STATUS, 52)
-        self._table.setColumnWidth(_COL_SONG, 240)
-        self._table.setColumnWidth(_COL_PLAY_TIME, 132)
+        self._table.setColumnWidth(_COL_SONG, 210)
+        self._table.setColumnWidth(_COL_PLAY_TIME, 110)
         self._table.setColumnWidth(_COL_DIFF, 26)
         self._table.setColumnWidth(_COL_MODE, 42)
-        self._table.setColumnWidth(_COL_ACC_CAT, 90)
+        self._table.setColumnWidth(_COL_ACC_CAT, 60)
         self._table.setColumnWidth(_COL_SERVICE, 48)
         self._table.setColumnWidth(_COL_PLAYER_RANK, 52)
-        self._table.setColumnWidth(_COL_STARS, 64)
-        self._table.setColumnWidth(_COL_PLAYER_ACC, 64)
-        self._table.setColumnWidth(_COL_PLAYER_PP, 72)
+        self._table.setColumnWidth(_COL_STARS, 40)
+        self._table.setColumnWidth(_COL_PLAYER_ACC, 50)
+        self._table.setColumnWidth(_COL_PLAYER_PP, 45)
         self._table.setColumnWidth(_COL_FC, 32)
-        self._table.setColumnWidth(_COL_MOD, 68)
+        self._table.setColumnWidth(_COL_MOD, 45)
         self._table.setColumnWidth(_COL_AUTHOR, 140)
         self._table.setColumnWidth(_COL_MAPPER, 120)
 
@@ -2224,7 +2224,7 @@ class PlaylistWindow(QMainWindow):
         )
         _bot_layout.addWidget(self._btn_quick_export)
 
-        _right_splitter.setSizes([300, 200])
+        _right_splitter.setSizes([300, 250])
 
         # ── バッチ状態 ──
         self._export_dir: str = self._load_export_dir()
@@ -2238,7 +2238,7 @@ class PlaylistWindow(QMainWindow):
         self._batch_refresh_queue()
 
         # スプリッタ初期サイズ: 左を広く、右パネルを 252px
-        self._splitter.setSizes([980, 420])
+        self._splitter.setSizes([940, 350])
         self._load_window_state()
 
     def _save_window_state(self) -> None:
@@ -2360,7 +2360,7 @@ class PlaylistWindow(QMainWindow):
         if not open_mode:
             hdr_item = self._table.horizontalHeaderItem(_COL_ACC_CAT)
             if hdr_item is not None:
-                hdr_item.setText("Acc Category")
+                hdr_item.setText("Category")
         # Filter / Export UI をソース状態に合わせて更新
         self._update_filter_export_ui()
         # ソースに応じて PP / Acc / Rank 列ヘッダを切り替え
@@ -2388,18 +2388,18 @@ class PlaylistWindow(QMainWindow):
     def _update_score_headers(self) -> None:
         """ソースに応じて PP / Acc % / Rank 列のヘッダを切り替える。"""
         if self._rb_ss.isChecked():
-            pp_label, acc_label, rank_label = "SS PP", "Acc %", "Rank"
+            pp_label, acc_label, rank_label = "PP", "Acc %", "Rank"
         elif self._rb_bl.isChecked():
-            pp_label, acc_label, rank_label = "BL PP", "Acc %", "Rank"
+            pp_label, acc_label, rank_label = "PP", "Acc %", "Rank"
         elif self._rb_acc.isChecked() or self._rb_acc_rl.isChecked():
             pp_label, acc_label, rank_label = "AP", "Acc %", "Rank"
         else:
             # open モード: service コンボで決まる
             svc = self._svc_combo.currentData() or "none"
             if svc == "scoresaber":
-                pp_label, acc_label, rank_label = "SS PP", "Acc %", "Rank"
+                pp_label, acc_label, rank_label = "PP", "Acc %", "Rank"
             elif svc == "beatleader":
-                pp_label, acc_label, rank_label = "BL PP", "Acc %", "Rank"
+                pp_label, acc_label, rank_label = "PP", "Acc %", "Rank"
             elif svc in ("accsaber", "accsaber_rl"):
                 pp_label, acc_label, rank_label = "AP", "Acc %", "Rank"
             else:
@@ -3315,7 +3315,10 @@ class PlaylistWindow(QMainWindow):
             # 曲名
             table.setItem(row, _COL_SONG, QTableWidgetItem(e.song_name))
             # プレイ日時
-            table.setItem(row, _COL_PLAY_TIME, _played_at_item(e.played_at_ts))
+            #プレイ日時は左寄せ
+            played_at_item = _played_at_item(e.played_at_ts)
+            played_at_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+            table.setItem(row, _COL_PLAY_TIME, played_at_item)
             # 難易度
             table.setItem(row, _COL_DIFF, _diff_item(e.difficulty))
             # モード
