@@ -32,6 +32,52 @@ _MAP_COUNTS_CACHE_FILE: Path = BASE_DIR / "cache" / "accsaber_reloaded_map_count
 _ALL_MAPS_CACHE_FILE: Path = BASE_DIR / "cache" / "accsaber_reloaded_maps.json"
 
 
+def is_pending_difficulty(diff: dict) -> bool:
+    """AccSaber Reloaded difficulty が pending 扱いかを返す。"""
+    if not isinstance(diff, dict):
+        return False
+
+    status = str(diff.get("status") or "").upper()
+    if status in {"QUEUE", "PENDING"}:
+        return True
+    return False
+
+
+def _count_non_pending_map_counts(all_maps: List[Dict]) -> Dict[str, int]:
+    """全マップ一覧から pending を除いたカテゴリ別譜面数を返す。"""
+    uuid_to_cat: Dict[str, str] = {v: k for k, v in _MAP_COUNT_CATEGORY_IDS.items()}
+    counts: Dict[str, int] = {cat: 0 for cat in _MAP_COUNT_CATEGORY_IDS}
+
+    for song in all_maps:
+        if not isinstance(song, dict):
+            continue
+        for diff in song.get("difficulties", []):
+            if not isinstance(diff, dict):
+                continue
+            if not diff.get("active", False):
+                continue
+            if is_pending_difficulty(diff):
+                continue
+            cat = uuid_to_cat.get(diff.get("categoryId", ""))
+            if cat:
+                counts[cat] += 1
+
+    overall_parts = [counts[k] for k in ("true", "standard", "tech") if counts.get(k, 0) > 0]
+    if overall_parts:
+        counts["overall"] = sum(overall_parts)
+    return counts
+
+
+def format_pending_song_name(song_name: str, is_pending: bool) -> str:
+    """pending 譜面なら曲名の末尾に [Pending] を付ける。"""
+    base_name = song_name or ""
+    if not is_pending:
+        return base_name
+    if base_name.endswith(" [Pending]"):
+        return base_name
+    return f"{base_name} [Pending]"
+
+
 def _load_map_counts_file_cache() -> Dict[str, Dict]:
     """ファイルキャッシュから前回の総譜面数を読み込む。"""
     try:
@@ -82,9 +128,9 @@ def fetch_reloaded_map_counts(
     _uuid_to_cat: Dict[str, str] = {v: k for k, v in _MAP_COUNT_CATEGORY_IDS.items()}
 
     try:
-        raw_counts: Dict[str, int] = {cat: 0 for cat in _MAP_COUNT_CATEGORY_IDS}
         page = 0
         page_size = 50
+        all_maps: List[Dict] = []
         while True:
             resp = session.get(
                 f"{BASE_URL}/maps",
@@ -93,26 +139,17 @@ def fetch_reloaded_map_counts(
             )
             resp.raise_for_status()
             data = resp.json()
-            for song in data.get("content", []):
-                for diff in song.get("difficulties", []):
-                    if not diff.get("active", False):
-                        continue
-                    cat = _uuid_to_cat.get(diff.get("categoryId", ""))
-                    if cat:
-                        raw_counts[cat] += 1
+            all_maps.extend(data.get("content", []))
             if data.get("last", True):
                 break
             page += 1
 
+        raw_counts = {k: v for k, v in _count_non_pending_map_counts(all_maps).items() if k != "overall"}
         per_cat: Dict[str, Dict] = {cat: {"count": cnt} for cat, cnt in raw_counts.items() if cnt > 0}
         if per_cat:
             _save_map_counts_file_cache(per_cat)
 
-        counts: Dict[str, int] = dict(raw_counts)
-        overall_parts = [counts[k] for k in ("true", "standard", "tech") if counts.get(k, 0) > 0]
-        if overall_parts:
-            counts["overall"] = sum(overall_parts)
-        return counts
+        return _count_non_pending_map_counts(all_maps)
 
     except Exception as exc:  # noqa: BLE001
         log_api_failure("accsaber_reloaded", "fetch_reloaded_map_counts", "request failed while fetching /maps pages", exc)
@@ -126,6 +163,10 @@ def get_reloaded_map_counts_from_cache() -> Dict[str, int]:
     戻り値: {"true": 109, "standard": ..., "tech": ..., "overall": ...}
     存在しないカテゴリのキーは含まれない。
     """
+    all_maps = load_all_maps_from_cache()
+    if isinstance(all_maps, list) and all_maps:
+        return _count_non_pending_map_counts(all_maps)
+
     file_cache = _load_map_counts_file_cache()
     counts: Dict[str, int] = {k: v["count"] for k, v in file_cache.items()}
     overall_parts = [counts[k] for k in ("true", "standard", "tech") if k in counts]
@@ -588,6 +629,8 @@ def compute_effective_played_counts_from_cache(player_id: str) -> Dict[str, int]
                 continue
             if not diff.get("active", False):
                 continue
+            if is_pending_difficulty(diff):
+                continue
             cat = uuid_to_cat.get(str(diff.get("categoryId") or ""))
             if not cat:
                 continue
@@ -654,6 +697,8 @@ def build_unplayed_bplist(
             if not bs_diff:
                 continue
 
+            pending = is_pending_difficulty(diff)
+
             if played_rl_diff_ids is not None:
                 # RL スコア API によるプレイ済み判定（最高精度: BL/SS 照合より優先）
                 rl_diff_id = diff.get("id", "")
@@ -675,7 +720,7 @@ def build_unplayed_bplist(
             if song_hash not in songs_dict:
                 songs_dict[song_hash] = {
                     "hash": song_hash,
-                    "songName": song.get("songName", ""),
+                    "songName": format_pending_song_name(song.get("songName", ""), pending),
                     "difficulties": [],
                 }
             songs_dict[song_hash]["difficulties"].append(
