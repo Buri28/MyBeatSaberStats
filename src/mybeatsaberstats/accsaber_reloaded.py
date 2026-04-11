@@ -8,6 +8,7 @@ from typing import Dict, List, Optional
 
 import requests
 
+from .api_error_log import log_api_failure
 from .snapshot import BASE_DIR
 
 BASE_URL = "https://api.accsaberreloaded.com/v1"
@@ -113,7 +114,8 @@ def fetch_reloaded_map_counts(
             counts["overall"] = sum(overall_parts)
         return counts
 
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        log_api_failure("accsaber_reloaded", "fetch_reloaded_map_counts", "request failed while fetching /maps pages", exc)
         # API 失敗時はファイルキャッシュにフォールバック
         return get_reloaded_map_counts_from_cache()
 
@@ -167,7 +169,8 @@ def _search_in_leaderboard(
             resp = session.get(url, params={"page": page, "size": _PAGE_SIZE}, timeout=30)
             resp.raise_for_status()
             data = resp.json()
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            log_api_failure("accsaber_reloaded", "_search_in_leaderboard", f"request failed url={url} category_uuid={category_uuid} player_id={player_id} country={country} page={page}", exc)
             break
 
         content = data.get("content")
@@ -266,7 +269,8 @@ def fetch_player_xp(
             resp = session.get(url, params={**params, "page": page}, timeout=30)
             resp.raise_for_status()
             data = resp.json()
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            log_api_failure("accsaber_reloaded", "fetch_player_xp", f"request failed url={url} player_id={player_id} country={country} page={page}", exc)
             break
 
         content = data.get("content")
@@ -328,13 +332,17 @@ def fetch_all_maps_full(
     total_pages: Optional[int] = None
 
     while True:
-        resp = session.get(
-            f"{BASE_URL}/maps",
-            params={"page": page, "size": _PAGE_SIZE},
-            timeout=30,
-        )
-        resp.raise_for_status()
-        data = resp.json()
+        try:
+            resp = session.get(
+                f"{BASE_URL}/maps",
+                params={"page": page, "size": _PAGE_SIZE},
+                timeout=30,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as exc:
+            log_api_failure("accsaber_reloaded", "fetch_all_maps_full", f"request failed page={page}", exc)
+            raise
 
         all_maps.extend(data.get("content", []))
 
@@ -380,7 +388,8 @@ def fetch_player_scored_diff_ids(
             )
             resp.raise_for_status()
             data = resp.json()
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            log_api_failure("accsaber_reloaded", "fetch_player_scored_diff_ids", f"request failed player_id={player_id} page={page}", exc)
             break
 
         content = data.get("content", [])
@@ -426,7 +435,8 @@ def fetch_and_save_all_maps_cache(
         _ALL_MAPS_CACHE_FILE.write_text(
             json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
         )
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        log_api_failure("accsaber_reloaded", "fetch_and_save_all_maps_cache", f"cache save failed path={_ALL_MAPS_CACHE_FILE}", exc)
         pass
 
 

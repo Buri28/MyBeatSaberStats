@@ -5,6 +5,8 @@ from typing import List, Optional
 
 import requests
 
+from .api_error_log import log_api_failure
+
 
 BASE_URL = "https://scoresaber.com/api/players"
 
@@ -39,9 +41,13 @@ def fetch_players(
     if country:
         params["countries"] = country.upper()
 
-    resp = session.get(BASE_URL, params=params, timeout=10)
-    resp.raise_for_status()
-    data = resp.json()
+    try:
+        resp = session.get(BASE_URL, params=params, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:
+        log_api_failure("scoresaber", "fetch_players", f"Request failed url={BASE_URL} params={params}", exc)
+        raise
 
     players_data = data.get("players", [])
     players: List[ScoreSaberPlayer] = []

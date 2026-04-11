@@ -634,6 +634,8 @@ def _get_beatleader_player_scores(
     session: requests.Session,
     progress: Optional[Callable[[int, Optional[int]], None]] = None,
     fetch_until: Optional[datetime] = None,
+    retry_failed_pages_only: bool = False,
+    warning_callback: Optional[Callable[[str], None]] = None,
 ) -> list[dict]:
     """BeatLeader のプレイヤースコア取得を beatleader.py 側の実装に委譲するラッパー。
 
@@ -645,7 +647,14 @@ def _get_beatleader_player_scores(
     if not beatleader_id:
         return []
 
-    return _bl_get_beatleader_player_scores(beatleader_id, session, progress, fetch_until=fetch_until)
+    return _bl_get_beatleader_player_scores(
+        beatleader_id,
+        session,
+        progress,
+        fetch_until=fetch_until,
+        retry_failed_pages_only=retry_failed_pages_only,
+        warning_callback=warning_callback,
+    )
 
 
 # def _extract_scoresaber_accuracy(score_info: dict) -> Optional[float]:
@@ -746,10 +755,18 @@ def collect_beatleader_star_stats(
     beatleader_id: str,
     session: Optional[requests.Session] = None,
     progress: Optional[Callable[[str, float], None]] = None,
+    retry_failed_pages_only: bool = False,
+    warning_callback: Optional[Callable[[str], None]] = None,
 ) -> list[StarClearStat]:
     """BeatLeader ★別統計収集を beatleader.py 側の実装に委譲するラッパー。"""
 
-    return _bl_collect_beatleader_star_stats(beatleader_id, session, progress=progress)
+    return _bl_collect_beatleader_star_stats(
+        beatleader_id,
+        session,
+        progress=progress,
+        retry_failed_pages_only=retry_failed_pages_only,
+        warning_callback=warning_callback,
+    )
 #     except Exception:  # noqa: BLE001
 #         return None
 
@@ -990,6 +1007,7 @@ def create_snapshot_for_steam_id(
     snapshot_dir: Optional[Path] = None,
     progress: Optional[Callable[[str, float], None]] = None,
     options: Optional[SnapshotOptions] = None,
+    on_warning: Optional[Callable[[str], None]] = None,
 ) -> Snapshot:
     """指定 SteamID(または players_index のキー)の現在ステータスから Snapshot を生成する。
 
@@ -1003,6 +1021,17 @@ def create_snapshot_for_steam_id(
 
     # フォールバックなどの警告メッセージを收集する
     _warnings: list[str] = []
+
+    def _add_warning(message: str) -> None:
+        if not message:
+            return
+        if message not in _warnings:
+            _warnings.append(message)
+            if on_warning is not None:
+                try:
+                    on_warning(message)
+                except Exception:
+                    pass
 
     # 外部から渡される progress(message, frac) を、この関数内では _step(frac, message)
     # という形で扱えるようにするヘルパー。
@@ -1347,7 +1376,13 @@ def create_snapshot_for_steam_id(
                     print("BeatLeaderプレイヤースコア: 初回取得")
                     _bl_score_label = "new"
                 _step(0.30, f"Fetching BeatLeader player scores (last fetch: {_bl_score_label}, page 1/?)...")
-                _get_beatleader_player_scores(beatleader_id, session, progress=_bl_scores_progress, fetch_until=_bl_effective_until)
+                _get_beatleader_player_scores(
+                    beatleader_id,
+                    session,
+                    progress=_bl_scores_progress,
+                    fetch_until=_bl_effective_until,
+                    warning_callback=_add_warning,
+                )
             except Exception as exc:  # noqa: BLE001
                 _rethrow_if_cancelled(exc)
                 pass
@@ -1506,7 +1541,7 @@ def create_snapshot_for_steam_id(
                 else:
                     _msg = "AccSaber True: API fetch failed"
                 print(f"9.1 {_msg}")
-                _warnings.append(_msg)
+                _add_warning(_msg)
 
             _std_api_err = False
             try:
@@ -1544,7 +1579,7 @@ def create_snapshot_for_steam_id(
                 else:
                     _msg = "AccSaber Standard: API fetch failed"
                 print(f"9.2 {_msg}")
-                _warnings.append(_msg)
+                _add_warning(_msg)
 
             _tech_api_err = False
             try:
@@ -1582,7 +1617,7 @@ def create_snapshot_for_steam_id(
                 else:
                     _msg = "AccSaber Tech: API fetch failed"
                 print(f"9.3 {_msg}")
-                _warnings.append(_msg)
+                _add_warning(_msg)
 
             # JP 国内順位は accsaber_ranking.json 全体と players_index.json を使って計算する
             try:
@@ -1847,10 +1882,13 @@ def create_snapshot_for_steam_id(
                     beatleader_id,
                     session,
                     progress=_bl_star_stats_progress,
+                    retry_failed_pages_only=True,
+                    warning_callback=_add_warning,
                 ) if beatleader_id else []
             )
         except Exception:  # noqa: BLE001
             beatleader_star_stats = []
+            _add_warning("BeatLeader star stats: failed to collect during snapshot.")
             print("9.6 BeatLeader ★別統計集計完了。")
     else:
         print("9.6 BeatLeader ★別統計集計スキップ（オプションが無効）")

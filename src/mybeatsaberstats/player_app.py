@@ -1717,26 +1717,60 @@ class PlayerWindow(QMainWindow):
         # スナップショット取得処理の途中でキャンセルできるように、Cancel ボタン付きの
         # QProgressDialog を用意し、キャンセル状態をフラグで管理する。
         cancelled = {"value": False}
+        warning_lines: list[str] = []
+        current_progress_message = {"value": "Taking snapshot..."}
 
         dlg = QProgressDialog("Taking snapshot...", "Cancel", 0, 100, self)
         dlg.setWindowTitle("Take Snapshot")
         dlg.setWindowModality(Qt.WindowModality.WindowModal)
         dlg.setAutoClose(True)
         dlg.canceled.connect(lambda: cancelled.__setitem__("value", True))
+        status_label = QLabel("Taking snapshot...", dlg)
+        status_label.setWordWrap(True)
+        status_label.setTextFormat(Qt.TextFormat.RichText)
+        dlg.setLabel(status_label)
         dlg.show()
+
+        def _escape_html(text: str) -> str:
+            return (
+                text.replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+                .replace("\n", "<br>")
+            )
+
+        def _render_progress_label(message: str) -> None:
+            body = _escape_html(message)
+            if warning_lines:
+                warning_text = "<br>".join(_escape_html(line) for line in warning_lines[-4:])
+                body += f"<br><br><span style='color:#DF8511; font-weight:600;'>Warnings:<br>{warning_text}</span>"
+            status_label.setText(body)
 
         def _on_progress(message: str, fraction: float) -> None:
             # キャンセルされていたら、例外を投げて処理全体を中断する
             if cancelled["value"]:
                 raise RuntimeError("SNAPSHOT_CANCELLED")
-            dlg.setLabelText(message)
+            current_progress_message["value"] = message
+            _render_progress_label(message)
             dlg.setValue(int(fraction * 100))
+            QApplication.processEvents()
+
+        def _on_warning(message: str) -> None:
+            if not message or message in warning_lines:
+                return
+            warning_lines.append(message)
+            _render_progress_label(current_progress_message["value"])
             QApplication.processEvents()
 
         try:
             # print文は日本語
             print(f"1.スナップショットを取得中: {steam_id}")
-            snapshot = create_snapshot_for_steam_id(steam_id, progress=_on_progress, options=options)
+            snapshot = create_snapshot_for_steam_id(
+                steam_id,
+                progress=_on_progress,
+                options=options,
+                on_warning=_on_warning,
+            )
             map_store_instance = MapStore()
             map_store_instance.snapshots[steam_id] = snapshot
 
