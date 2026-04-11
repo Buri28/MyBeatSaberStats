@@ -742,10 +742,14 @@ def _extract_beatleader_accuracy(score_info: dict) -> Optional[float]:
         return None
 
 
-def collect_beatleader_star_stats(beatleader_id: str, session: Optional[requests.Session] = None) -> list[StarClearStat]:
+def collect_beatleader_star_stats(
+    beatleader_id: str,
+    session: Optional[requests.Session] = None,
+    progress: Optional[Callable[[str, float], None]] = None,
+) -> list[StarClearStat]:
     """BeatLeader ★別統計収集を beatleader.py 側の実装に委譲するラッパー。"""
 
-    return _bl_collect_beatleader_star_stats(beatleader_id, session)
+    return _bl_collect_beatleader_star_stats(beatleader_id, session, progress=progress)
 #     except Exception:  # noqa: BLE001
 #         return None
 
@@ -1282,10 +1286,11 @@ def create_snapshot_for_steam_id(
 
     # BeatLeader 側も、Snapshot 取得時に基本情報（PP / ランク）を最新化しておく。
     beatleader: Optional[BeatLeaderPlayer] = bl
-    if scoresaber_id and options.fetch_beatleader:
+    beatleader_lookup_id = beatleader.id if beatleader is not None else steam_id
+    if beatleader_lookup_id and options.fetch_beatleader:
         try:
             print("6. BeatLeader 基本情報更新...")
-            bl_latest = fetch_bl_player(scoresaber_id, session=session)
+            bl_latest = fetch_bl_player(beatleader_lookup_id, session=session)
         except Exception as exc:  # noqa: BLE001
             _rethrow_if_cancelled(exc)
             bl_latest = None
@@ -1300,7 +1305,7 @@ def create_snapshot_for_steam_id(
             except Exception as exc:  # noqa: BLE001
                 _rethrow_if_cancelled(exc)
                 pass
-    elif scoresaber_id and not options.fetch_beatleader:
+    elif beatleader_lookup_id and not options.fetch_beatleader:
         print("6. BeatLeader 基本情報取得スキップ（オプションが無効）")
 
     beatleader_id: Optional[str] = beatleader.id if beatleader is not None else None
@@ -1834,8 +1839,15 @@ def create_snapshot_for_steam_id(
         try:
             print("9.6 BeatLeader ★別統計集計...")
             _step(0.80, "Collecting BeatLeader star stats...")
+            def _bl_star_stats_progress(message: str, fraction: float) -> None:
+                _step(0.80 + 0.10 * max(0.0, min(1.0, fraction)), message)
+
             beatleader_star_stats: list[StarClearStat] = (
-                collect_beatleader_star_stats(beatleader_id, session) if beatleader_id else []
+                collect_beatleader_star_stats(
+                    beatleader_id,
+                    session,
+                    progress=_bl_star_stats_progress,
+                ) if beatleader_id else []
             )
         except Exception:  # noqa: BLE001
             beatleader_star_stats = []
