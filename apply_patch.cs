@@ -3,11 +3,11 @@
 // 配布構成:
 //   MyBeatSaberStats/
 //   ├── MyBeatSaberStatsPlayer.exe
-//   ├── apply_patch.exe        ← このプログラム
+//   ├── apply_patch.exe        ← このプログラム（patch.zip を埋め込み可）
 //   ├── _internal/             ← メインアプリの _internal（更新対象）
 //   │   ├── lib/mybeatsaberstats/
 //   │   └── version.json
-//   └── patch/                 ← パッチ内容（同フォルダに展開しておく）
+//   └── patch/                 ← パッチ内容（同フォルダに展開しておく、任意）
 //       ├── lib/
 //       │   └── mybeatsaberstats/
 //       │       ├── *.py
@@ -28,6 +28,8 @@ using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.IO;
+using System.IO.Compression;
+using System.Reflection;
 using System.Text.RegularExpressions;
 using System.Windows.Forms;
 
@@ -56,13 +58,14 @@ sealed class PatchDialog : Form
     // パス
     private readonly string _patchDir;
     private readonly string _internalDir;
+    private readonly string _tempPatchDir;
 
     public PatchDialog()
     {
         string exe       = System.Reflection.Assembly.GetExecutingAssembly().Location;
         string patcherDir = Path.GetDirectoryName(exe);
-        _patchDir    = Path.Combine(patcherDir, "patch");
         _internalDir = Path.Combine(patcherDir, "_internal");
+        _patchDir    = ResolvePatchDir(patcherDir, out _tempPatchDir);
 
         // ---------- フォーム設定 ----------
         this.Text            = "MyBeatSaberStats パッチ適用";
@@ -140,6 +143,12 @@ sealed class PatchDialog : Form
             "※ 適用前にメインアプリを終了してください。";
     }
 
+    protected override void OnClosed(EventArgs e)
+    {
+        base.OnClosed(e);
+        CleanupTemporaryPatchDir();
+    }
+
     // ------------------------------------------------------------------
     //  バリデーション
     // ------------------------------------------------------------------
@@ -148,8 +157,9 @@ sealed class PatchDialog : Form
     {
         string[] managedRoots = LoadManagedInternalRoots();
         if (!Directory.Exists(_patchDir))
-            return "patch フォルダが見つかりません。\r\n" +
-                   "apply_patch.exe と同じフォルダに patch/ フォルダを置いてください。\r\n" +
+            return "パッチ内容が見つかりません。\r\n" +
+                   "apply_patch.exe と同じフォルダに patch/ フォルダを置くか、\r\n" +
+                   "埋め込みパッチ付きの apply_patch.exe を使用してください。\r\n" +
                    "(" + _patchDir + ")";
         if (!File.Exists(Path.Combine(_patchDir, "version.json")))
             return "patch/version.json が見つかりません。";
@@ -269,6 +279,56 @@ sealed class PatchDialog : Form
             Invoke((Action)(() => _progressLabel.Text = msg));
         else
             _progressLabel.Text = msg;
+    }
+
+    private static string ResolvePatchDir(string patcherDir, out string tempPatchDir)
+    {
+        string patchDir = Path.Combine(patcherDir, "patch");
+        tempPatchDir = null;
+        if (Directory.Exists(patchDir))
+            return patchDir;
+
+        string resourceName = FindEmbeddedPatchResourceName();
+        if (resourceName == null)
+            return patchDir;
+
+        tempPatchDir = Path.Combine(Path.GetTempPath(), "MyBeatSaberStatsPatch_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempPatchDir);
+        string zipPath = Path.Combine(tempPatchDir, "patch_payload.zip");
+
+        using (Stream stream = Assembly.GetExecutingAssembly().GetManifestResourceStream(resourceName))
+        {
+            if (stream == null)
+                return patchDir;
+            using (FileStream fs = File.Create(zipPath))
+                stream.CopyTo(fs);
+        }
+
+        string extractDir = Path.Combine(tempPatchDir, "patch");
+        ZipFile.ExtractToDirectory(zipPath, extractDir);
+        return extractDir;
+    }
+
+    private static string FindEmbeddedPatchResourceName()
+    {
+        foreach (string name in Assembly.GetExecutingAssembly().GetManifestResourceNames())
+        {
+            if (name.EndsWith("patch_payload.zip", StringComparison.OrdinalIgnoreCase))
+                return name;
+        }
+        return null;
+    }
+
+    private void CleanupTemporaryPatchDir()
+    {
+        try
+        {
+            if (!string.IsNullOrEmpty(_tempPatchDir) && Directory.Exists(_tempPatchDir))
+                Directory.Delete(_tempPatchDir, recursive: true);
+        }
+        catch
+        {
+        }
     }
 
     private string[] LoadManagedInternalRoots()
