@@ -41,6 +41,22 @@ $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Python    = Join-Path $ScriptDir ".venv\Scripts\python.exe"
 $ReleaseDir = Join-Path $ScriptDir "release"
+$UpdateTargetsPath = Join-Path $ScriptDir "resources\update_targets.json"
+
+function Get-ManagedInternalRoots {
+    if (-not (Test-Path $UpdateTargetsPath)) {
+        Write-Error "update_targets.json が見つかりません: $UpdateTargetsPath"
+        exit 1
+    }
+
+    $config = Get-Content $UpdateTargetsPath -Raw | ConvertFrom-Json
+    $roots = @($config.internal_sync_dirs | Where-Object { $_ -and $_.ToString().Trim() -ne "" })
+    if ($roots.Count -eq 0) {
+        Write-Error "update_targets.json に internal_sync_dirs がありません。"
+        exit 1
+    }
+    return $roots
+}
 
 # ─────────────────────────────────────────────
 # 事前チェック
@@ -236,12 +252,26 @@ if ($Target -eq "patcher") {
 
     $patcherReleaseDir = Join-Path $ReleaseDir "MyBeatSaberPatcher"
     $patchContentDir   = Join-Path $patcherReleaseDir "patch"
-    $patchLibDir       = Join-Path $patchContentDir "lib\mybeatsaberstats"
+    $managedRoots = Get-ManagedInternalRoots
 
-    # patch/lib/mybeatsaberstats/ に src/mybeatsaberstats/ をコピー
-    New-Item $patchLibDir -ItemType Directory -Force | Out-Null
-    Copy-Item "$ScriptDir\src\mybeatsaberstats\*" $patchLibDir -Recurse -Force
-    Write-Host "  src/mybeatsaberstats/ → $patchLibDir"
+    if (Test-Path $patchContentDir) {
+        Remove-Item $patchContentDir -Recurse -Force
+    }
+
+    Write-Host "  patcher 用に MyBeatSaberStats 本体をビルドします..." -ForegroundColor Cyan
+    Build-Spec "MyBeatSaberStats.spec" "MyBeatSaberStats"
+
+    foreach ($rootName in $managedRoots) {
+        $statsDistDir = Join-Path $ScriptDir "dist\MyBeatSaberStats\_internal\$rootName"
+        $patchDir = Join-Path $patchContentDir $rootName
+        if (-not (Test-Path $statsDistDir)) {
+            Write-Error "patcher 用の $rootName フォルダが見つかりません: $statsDistDir"
+            exit 1
+        }
+        New-Item $patchDir -ItemType Directory -Force | Out-Null
+        Copy-Item "$statsDistDir\*" $patchDir -Recurse -Force
+        Write-Host "  dist/MyBeatSaberStats/_internal/$rootName/ → $patchDir"
+    }
 
     # patch/version.json をコピー
     Copy-Item "$ScriptDir\version.json" "$patchContentDir\version.json" -Force

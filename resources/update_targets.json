@@ -1,0 +1,7 @@
+{
+  "internal_sync_dirs": [
+    "lib",
+    "PySide6",
+    "resources"
+  ]
+}
