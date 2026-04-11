@@ -1,15 +1,40 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
 from typing import List, Optional, Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import math
+import traceback
 
 import requests
 import time
 
+from .snapshot import BASE_DIR
+
 
 BASE_URL = "https://api.beatleader.xyz"
+LOG_DIR = BASE_DIR / "logs"
+LOG_PATH = LOG_DIR / "beatleader_api.log"
+
+
+def _log_api_failure(api_name: str, message: str, exc: Optional[BaseException] = None) -> None:
+    try:
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        lines = [
+            f"[{datetime.now().isoformat(timespec='seconds')}] {api_name}",
+            f"message: {message}",
+        ]
+        if exc is not None:
+            lines.append(f"error: {exc.__class__.__name__}: {exc}")
+            lines.append("traceback:")
+            lines.append("".join(traceback.format_exception(type(exc), exc, exc.__traceback__)).rstrip())
+        lines.append("")
+        with LOG_PATH.open("a", encoding="utf-8") as fh:
+            fh.write("\n".join(lines))
+    except Exception:
+        pass
 
 
 @dataclass
@@ -39,19 +64,41 @@ def fetch_player(player_id: str, session: Optional[requests.Session] = None) -> 
         session = requests.Session()
 
     url = f"{BASE_URL}/player/{player_id}"
-    try:
-        # タイムアウトは短めにして UI フリーズを避ける
-        resp = session.get(url, timeout=3)
-        if resp.status_code == 404:
+    timeouts = (3, 5, 8)
+    resp = None
+    for attempt, timeout_sec in enumerate(timeouts, start=1):
+        try:
+            # 初回起動時は BeatLeader 側の応答が不安定なことがあるため、短い retry を行う。
+            resp = session.get(url, timeout=timeout_sec)
+            if resp.status_code == 404:
+                _log_api_failure("fetch_player", f"404 Not Found url={url} player_id={player_id}")
+                return None
+            resp.raise_for_status()
+            break
+        except requests.HTTPError as exc:
+            _log_api_failure(
+                "fetch_player",
+                f"HTTP error url={url} player_id={player_id} attempt={attempt}/{len(timeouts)} timeout={timeout_sec}",
+                exc,
+            )
             return None
-        resp.raise_for_status()
-    except Exception:
-        # BeatLeader 側が落ちている、タイムアウトなどは呼び出し元で無視できるよう None
+        except requests.RequestException as exc:
+            _log_api_failure(
+                "fetch_player",
+                f"Request failed url={url} player_id={player_id} attempt={attempt}/{len(timeouts)} timeout={timeout_sec}",
+                exc,
+            )
+            resp = None
+            if attempt >= len(timeouts):
+                return None
+            time.sleep(0.35 * attempt)
+    if resp is None:
         return None
 
     try:
         data = resp.json()
-    except Exception:
+    except Exception as exc:
+        _log_api_failure("fetch_player", f"Invalid JSON url={url} player_id={player_id}", exc)
         return None
     # API レスポンスのフィールドを安全に取り出す
     pid = str(data.get("id") or player_id)

@@ -8,6 +8,7 @@ from typing import Dict, List, Optional, Tuple
 
 import requests
 
+from .api_error_log import log_api_failure
 from .snapshot import BASE_DIR
 
 BASE_URL = "https://accsaber.com/api/categories"
@@ -104,8 +105,12 @@ def _fetch_leaderboard(
 
     url = f"{BASE_URL}/{category}/standings"
 
-    resp = session.get(url, timeout=30)
-    resp.raise_for_status()
+    try:
+        resp = session.get(url, timeout=30)
+        resp.raise_for_status()
+    except Exception as exc:
+        log_api_failure("accsaber", "_fetch_leaderboard", f"request failed url={url} category={category} country={country} page={page}", exc)
+        raise
 
     try:
         data = resp.json()
@@ -162,7 +167,8 @@ def _filter_by_country(
         resp = session.get(url, timeout=30)
         resp.raise_for_status()
         data = resp.json()
-    except Exception:
+    except Exception as exc:
+        log_api_failure("accsaber", "_filter_by_country", f"request failed url={url} category={category} country={country}", exc)
         # 国別エンドポイントが使えない場合は全データ内から avatarUrl や playerName でのフィルタは不可なので空返却
         return []
 
@@ -269,8 +275,12 @@ def _fetch_playlist_map_count(url: str, session: Optional[requests.Session] = No
     if session is None:
         session = requests.Session()
 
-    resp = session.get(url, timeout=30)
-    resp.raise_for_status()
+    try:
+        resp = session.get(url, timeout=30)
+        resp.raise_for_status()
+    except Exception as exc:
+        log_api_failure("accsaber", "_fetch_playlist_map_count", f"request failed url={url}", exc)
+        raise
 
     try:
         data = resp.json()
@@ -410,7 +420,8 @@ def fetch_and_save_accsaber_maps_cache(
         resp = session.get("https://accsaber.com/api/ranked-maps", timeout=30)
         if resp.status_code == 200:
             ranked_maps = resp.json()
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        log_api_failure("accsaber", "fetch_and_save_accsaber_maps_cache", "request failed url=https://accsaber.com/api/ranked-maps", exc)
         pass
 
     # カテゴリ別プレイリスト
@@ -420,7 +431,8 @@ def fetch_and_save_accsaber_maps_cache(
             resp = session.get(url, timeout=30)
             resp.raise_for_status()
             playlists[cat] = resp.json()
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            log_api_failure("accsaber", "fetch_and_save_accsaber_maps_cache", f"request failed url={url} category={cat}", exc)
             pass
 
     data = {
@@ -433,7 +445,8 @@ def fetch_and_save_accsaber_maps_cache(
         _ACCSABER_MAPS_CACHE_FILE.write_text(
             json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
         )
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        log_api_failure("accsaber", "fetch_and_save_accsaber_maps_cache", f"cache save failed path={_ACCSABER_MAPS_CACHE_FILE}", exc)
         pass
 
 

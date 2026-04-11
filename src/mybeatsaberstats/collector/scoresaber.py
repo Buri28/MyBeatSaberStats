@@ -12,6 +12,8 @@ from ..scoresaber import ScoreSaberPlayer
 from ..snapshot import BASE_DIR, StarClearStat
 from typing import Optional, Dict, TypedDict, Callable
 
+from ..api_error_log import log_api_failure
+
 CACHE_DIR = BASE_DIR / "cache"
 
 SCORESABER_LEADERBOARDS_URL = "https://scoresaber.com/api/leaderboards"
@@ -320,7 +322,13 @@ def _get_scoresaber_leaderboards_ranked(
                 progress(total_pages_new, total_pages_new)
             print("ScoreSaberリーダーボードのキャッシュ更新が完了しました。")
             return leaderboards
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        log_api_failure(
+            "scoresaber",
+            "_get_scoresaber_leaderboards_ranked",
+            f"metadata check failed url={SCORESABER_LEADERBOARDS_URL}",
+            exc,
+        )
         print("ScoreSaberリーダーボードのメタデータ確認に失敗しました。キャッシュを利用します。")
         # メタデータ確認に失敗した場合は、既存キャッシュをそのまま返す
         if progress is not None:
@@ -667,7 +675,13 @@ def _get_scoresaber_player_scores(
                 lb_id = str(lb_id_raw)
                 # APIからの最新データで上書き（再プレイ時に古いスコアを更新する）
                 scores_by_lb_id[lb_id] = item
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        log_api_failure(
+            "scoresaber",
+            "_get_scoresaber_player_scores",
+            f"freshness check failed scoresaber_id={scoresaber_id}",
+            exc,
+        )
         # If anything goes wrong during the freshness check, fall back to cached data
         pass
 
@@ -703,12 +717,24 @@ def _get_scoresaber_player_scores(
             if resp.status_code == 404:
                 break
             resp.raise_for_status()
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            log_api_failure(
+                "scoresaber",
+                "_get_scoresaber_player_scores",
+                f"paged fetch failed url={url} scoresaber_id={scoresaber_id} params={params}",
+                exc,
+            )
             break
 
         try:
             data = resp.json()
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            log_api_failure(
+                "scoresaber",
+                "_get_scoresaber_player_scores",
+                f"invalid json url={resp.url} scoresaber_id={scoresaber_id} params={params}",
+                exc,
+            )
             break
 
         append_pages.append({"page": page, "params": params, "data": data})
@@ -826,12 +852,14 @@ def _get_scoresaber_player_stats(scoresaber_id: str, session: requests.Session) 
         if resp.status_code == 404:
             return {}
         resp.raise_for_status()
-    except Exception:
+    except Exception as exc:
+        log_api_failure("scoresaber", "_get_scoresaber_player_stats", f"request failed url={url} scoresaber_id={scoresaber_id}", exc)
         return {}
 
     try:
         data = resp.json()
-    except Exception:
+    except Exception as exc:
+        log_api_failure("scoresaber", "_get_scoresaber_player_stats", f"invalid json url={url} scoresaber_id={scoresaber_id}", exc)
         return {}
 
     stats = data.get("playerStats") or data.get("scoreStats")
@@ -897,12 +925,14 @@ def _fetch_scoresaber_player_basic(
         if resp.status_code == 404:
             return None
         resp.raise_for_status()
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        log_api_failure("scoresaber", "_fetch_scoresaber_player_basic", f"request failed url={url} scoresaber_id={scoresaber_id}", exc)
         return None
 
     try:
         data = resp.json()
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        log_api_failure("scoresaber", "_fetch_scoresaber_player_basic", f"invalid json url={url} scoresaber_id={scoresaber_id}", exc)
         return None
 
     info = data.get("playerInfo") or data.get("player") or data
