@@ -1488,9 +1488,21 @@ def _sort_entries(entries: List[MapEntry], sort_mode: str) -> List[MapEntry]:
     elif sort_mode == "author_asc":
         result.sort(key=lambda e: e.song_author.lower())
     elif sort_mode == "playtime_desc":
-        result.sort(key=lambda e: (-e.played_at_ts, e.song_name.lower()))
+        result.sort(
+            key=lambda e: (
+                0 if e.cleared else 1 if e.nf_clear else 2,
+                -e.played_at_ts if e.cleared else 0,
+                e.song_name.lower(),
+            )
+        )
     elif sort_mode == "playtime_asc":
-        result.sort(key=lambda e: (e.played_at_ts if e.played_at_ts > 0 else 9_999_999_999, e.song_name.lower()))
+        result.sort(
+            key=lambda e: (
+                0 if not e.played else 1 if e.nf_clear and not e.cleared else 2,
+                e.played_at_ts if e.cleared else 0,
+                e.song_name.lower(),
+            )
+        )
     else:
         result.sort(key=lambda e: (e.stars, e.song_name))
     return result
