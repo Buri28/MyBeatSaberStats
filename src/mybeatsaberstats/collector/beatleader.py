@@ -1052,12 +1052,6 @@ def collect_beatleader_star_stats(
                             state["best_pp"] = pp_val
                 except (TypeError, ValueError):
                     pass
-
-        if score_count > 0 and (idx == 1 or idx == score_count or idx % 200 == 0):
-            _step(
-                f"Collecting BeatLeader star stats: aggregating {idx:,}/{score_count:,}",
-                0.90 + 0.10 * (idx / score_count),
-            )
         else:
             state["clear"] = True
 
@@ -1085,6 +1079,12 @@ def collect_beatleader_star_stats(
                             state["best_pp"] = pp_val
                 except (TypeError, ValueError):
                     pass
+
+        if score_count > 0 and (idx == 1 or idx == score_count or idx % 200 == 0):
+            _step(
+                f"Collecting BeatLeader star stats: aggregating {idx:,}/{score_count:,}",
+                0.90 + 0.10 * (idx / score_count),
+            )
 
     for state in per_leaderboard.values():
         star_bucket = int(state["star"])

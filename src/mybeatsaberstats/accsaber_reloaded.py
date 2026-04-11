@@ -510,6 +510,105 @@ def load_player_scores_from_cache(player_id: str) -> Optional[List[Dict]]:
     return None
 
 
+def compute_effective_played_counts_from_cache(player_id: str) -> Dict[str, int]:
+    """現在の AccSaber Reloaded 対象譜面に対する既プレイ数を cache から再計算する。
+
+    Playlist 画面と同様に、以下のいずれかにスコアがあれば既プレイとみなす。
+    - AccSaber Reloaded player scores (mapDifficultyId)
+    - BeatLeader player scores (blLeaderboardId)
+    - ScoreSaber player scores (ssLeaderboardId)
+
+    戻り値は {"overall": N, "true": N, "standard": N, "tech": N}。
+    全マップ cache が無い場合は空 dict を返す。
+    """
+
+    if not player_id:
+        return {}
+
+    all_maps = load_all_maps_from_cache()
+    if not isinstance(all_maps, list) or not all_maps:
+        return {}
+
+    rl_scores = load_player_scores_from_cache(player_id) or []
+    rl_played_diff_ids: set[str] = set()
+    for score in rl_scores:
+        if not isinstance(score, dict):
+            continue
+        diff_id = score.get("mapDifficultyId")
+        try:
+            ap = float(score.get("ap") or 0)
+        except (TypeError, ValueError):
+            ap = 0.0
+        if diff_id and ap > 0:
+            rl_played_diff_ids.add(str(diff_id))
+
+    def _load_score_dict(path: Path) -> Dict[str, dict]:
+        if not path.exists():
+            return {}
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            scores = data.get("scores")
+            return scores if isinstance(scores, dict) else {}
+        except Exception:
+            return {}
+
+    bl_scores = _load_score_dict(BASE_DIR / "cache" / f"beatleader_player_scores_{player_id}.json")
+    ss_scores = _load_score_dict(BASE_DIR / "cache" / f"scoresaber_player_scores_{player_id}.json")
+
+    def _has_bl_score(leaderboard_id: str) -> bool:
+        if not leaderboard_id:
+            return False
+        entry = bl_scores.get(str(leaderboard_id)) or {}
+        try:
+            return float(entry.get("pp") or 0) > 0 or int(entry.get("baseScore") or 0) > 0
+        except (TypeError, ValueError):
+            return False
+
+    def _has_ss_score(leaderboard_id: str) -> bool:
+        if not leaderboard_id:
+            return False
+        entry = ss_scores.get(str(leaderboard_id)) or {}
+        score = entry.get("score") if isinstance(entry, dict) else None
+        if not isinstance(score, dict):
+            score = entry if isinstance(entry, dict) else {}
+        try:
+            return float(score.get("pp") or 0) > 0 or int(score.get("baseScore") or score.get("modifiedScore") or score.get("score") or 0) > 0
+        except (TypeError, ValueError):
+            return False
+
+    uuid_to_cat = {v: k for k, v in CATEGORY_IDS.items() if k != "overall"}
+    counts: Dict[str, int] = {"true": 0, "standard": 0, "tech": 0}
+    seen_diff_ids: set[str] = set()
+
+    for song in all_maps:
+        if not isinstance(song, dict):
+            continue
+        for diff in song.get("difficulties") or []:
+            if not isinstance(diff, dict):
+                continue
+            if not diff.get("active", False):
+                continue
+            cat = uuid_to_cat.get(str(diff.get("categoryId") or ""))
+            if not cat:
+                continue
+
+            diff_id = str(diff.get("id") or "")
+            if not diff_id or diff_id in seen_diff_ids:
+                continue
+            seen_diff_ids.add(diff_id)
+
+            played = (
+                diff_id in rl_played_diff_ids
+                or _has_bl_score(str(diff.get("blLeaderboardId") or ""))
+                or _has_ss_score(str(diff.get("ssLeaderboardId") or ""))
+            )
+            if played:
+                counts[cat] += 1
+
+    counts["overall"] = counts.get("true", 0) + counts.get("standard", 0) + counts.get("tech", 0)
+    return counts
+
+
 def build_unplayed_bplist(
     all_maps: List[Dict],
     played_set: set,

@@ -53,6 +53,7 @@ from ..accsaber_reloaded import fetch_player_xp as _fetch_accsaber_reloaded_xp
 from ..accsaber_reloaded import fetch_reloaded_map_counts as _fetch_reloaded_map_counts
 from ..accsaber_reloaded import fetch_and_save_all_maps_cache as _fetch_and_save_rl_maps
 from ..accsaber_reloaded import fetch_and_save_player_scores_cache as _fetch_and_save_rl_player_scores
+from ..accsaber_reloaded import compute_effective_played_counts_from_cache as _compute_rl_effective_played_counts
 
 # キャッシュディレクトリ(app.py と同じ BASE_DIR / "cache" を利用)
 CACHE_DIR = BASE_DIR / "cache"
@@ -1848,6 +1849,16 @@ def create_snapshot_for_steam_id(
         try:
             _step(0.66, "Fetching AccSaber Reloaded player scores for cache...")
             _fetch_and_save_rl_player_scores(_rl_player_id, session=session)
+        except Exception as exc:  # noqa: BLE001
+            _rethrow_if_cancelled(exc)
+
+        try:
+            _rl_effective_play_counts = _compute_rl_effective_played_counts(_rl_player_id)
+            if _rl_effective_play_counts:
+                accsaber_reloaded_overall_ranked_plays = _rl_effective_play_counts.get("overall")
+                accsaber_reloaded_true_ranked_plays = _rl_effective_play_counts.get("true")
+                accsaber_reloaded_standard_ranked_plays = _rl_effective_play_counts.get("standard")
+                accsaber_reloaded_tech_ranked_plays = _rl_effective_play_counts.get("tech")
         except Exception as exc:  # noqa: BLE001
             _rethrow_if_cancelled(exc)
     else:
