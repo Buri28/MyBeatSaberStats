@@ -260,6 +260,7 @@ if ($Target -eq "patcher") {
 
     Write-Host "  patcher 用に MyBeatSaberStats 本体をビルドします..." -ForegroundColor Cyan
     Build-Spec "MyBeatSaberStats.spec" "MyBeatSaberStats"
+    Copy-CommonFiles "MyBeatSaberStats"
 
     foreach ($rootName in $managedRoots) {
         $statsDistDir = Join-Path $ScriptDir "dist\MyBeatSaberStats\_internal\$rootName"
