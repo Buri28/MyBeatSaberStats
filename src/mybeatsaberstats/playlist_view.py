@@ -58,6 +58,7 @@ from PySide6.QtWidgets import (
 )
 
 from .snapshot import BASE_DIR, RESOURCES_DIR
+from .accsaber_reloaded import format_pending_song_name as _format_rl_pending_song_name, is_pending_difficulty as _is_rl_pending_difficulty
 from .theme import detect_system_dark, is_dark, table_stylesheet
 
 
@@ -158,6 +159,7 @@ class MapEntry:
     score_source: str = ""  # スコア表示元: "BL" | "SS" | "AS" | ""
     duration_seconds: int = 0  # 譜面時間 (秒)
     played_at_ts: int = 0  # プレイ日時 (Unix秒)
+    pending: bool = False
 
     @property
     def status_str(self) -> str:
@@ -178,6 +180,10 @@ class MapEntry:
     @property
     def played(self) -> bool:
         return self.cleared or self.nf_clear
+
+    @property
+    def display_song_name(self) -> str:
+        return _format_rl_pending_song_name(self.song_name, self.pending)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -801,7 +807,7 @@ def _make_bplist(title: str, entries: List[MapEntry], image: str = "") -> dict:
         diff = e.difficulty or "ExpertPlus"
         songs.append({
             "hash": e.song_hash,
-            "songName": e.song_name,
+            "songName": e.display_song_name,
             "difficulties": [{"characteristic": char, "name": diff}],
         })
     return {
@@ -1289,6 +1295,7 @@ def load_accsaber_reloaded_maps(
             ap = rl_score[0]
             rl_rank = rl_score[1]
             rl_played_at_ts = rl_score[2]
+            pending = _is_rl_pending_difficulty(diff)
 
             # BL ランクマップからスター取得 (hash+char+diff 一致)
             bl_entry = bl_index.get(key)
@@ -1317,6 +1324,7 @@ def load_accsaber_reloaded_maps(
                 score_source=score_src,
                 duration_seconds=bl_entry.duration_seconds if bl_entry else 0,
                 played_at_ts=rl_played_at_ts if rl_played_at_ts else played_at_ts,
+                pending=pending,
             ))
 
     if on_progress:
@@ -3394,7 +3402,7 @@ class PlaylistWindow(QMainWindow):
             table.setItem(row, _COL_STATUS, status_item)
 
             # 曲名
-            table.setItem(row, _COL_SONG, QTableWidgetItem(e.song_name))
+            table.setItem(row, _COL_SONG, QTableWidgetItem(e.display_song_name))
             # プレイ日時
             #プレイ日時は左寄せ
             played_at_item = _played_at_item(e.played_at_ts)
