@@ -23,6 +23,11 @@ GitHub リリース手順:
   2. git tag v1.0.1 && git push origin v1.0.1
   3. GitHub で Release を作成 (タグ v1.0.1 を指定)
      → リリースノートが UpdateDialog に表示される
+
+補足:
+    - 通常は src/mybeatsaberstats/*.py と resources/* を raw URL から更新する
+    - frozen 配布では release zip を正として _internal/lib、_internal/PySide6、
+        _internal/resources を同期する
 """
 
 from __future__ import annotations
@@ -30,7 +35,9 @@ from __future__ import annotations
 import json
 import shutil
 import sys
+import tempfile
 import threading
+import zipfile
 from pathlib import Path
 from typing import Callable, NamedTuple
 
@@ -51,6 +58,8 @@ GITHUB_REPO  = "MyBeatSaberStats"
 # GitHub リポジトリ上でのソースコードの場所
 _SOURCE_PREFIX    = "src/mybeatsaberstats/"
 _RESOURCES_PREFIX = "resources/"
+_UPDATE_TARGETS_FILE = "update_targets.json"
+_DEFAULT_MANAGED_INTERNAL_ROOTS = ("lib", "PySide6", "resources")
 
 _API_BASE = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}"
 
@@ -100,6 +109,24 @@ def _version_file() -> Path:
     return _internal_dir() / "version.json"
 
 
+def _update_targets_file() -> Path:
+    return _resources_dir() / _UPDATE_TARGETS_FILE
+
+
+def _load_managed_internal_roots() -> tuple[str, ...]:
+    """同期対象の _internal 直下ディレクトリ一覧を返す。"""
+    path = _update_targets_file()
+    try:
+        data = json.loads(path.read_text("utf-8"))
+        roots = data.get("internal_sync_dirs") or []
+        normalized = tuple(str(root).strip() for root in roots if str(root).strip())
+        if normalized:
+            return normalized
+    except Exception:
+        pass
+    return _DEFAULT_MANAGED_INTERNAL_ROOTS
+
+
 # ------------------------------------------------------------------ #
 #  バージョン管理
 # ------------------------------------------------------------------ #
@@ -138,6 +165,7 @@ class UpdateInfo(NamedTuple):
     latest_tag:       str          # 例: 'v1.0.1'  (raw URL 取得に使用)
     release_notes:    str          # GitHub Release の body
     files:            list[str]    # "src/mybeatsaberstats/xxx.py" 形式
+    release_zip_url:  str | None   # frozen 配布物の zip アセット URL
 
 
 def check_for_updates() -> UpdateInfo:
@@ -152,6 +180,7 @@ def check_for_updates() -> UpdateInfo:
     notes  = release.get("body") or ""
     latest = tag.lstrip("v")            # 例: "1.0.1"
     current = get_current_version()
+    release_zip_url = _find_release_zip_asset_url(release)
 
     if current is not None and not _version_gt(latest, current):
         # 同バージョンでもリソース再取得のためにファイル一覧を取得する
@@ -163,6 +192,7 @@ def check_for_updates() -> UpdateInfo:
             latest_tag=tag,
             release_notes=notes,
             files=files,
+            release_zip_url=release_zip_url,
         )
 
     # ダウンロード対象ファイル一覧をリリースタグの Git tree から取得
@@ -175,7 +205,30 @@ def check_for_updates() -> UpdateInfo:
         latest_tag=tag,
         release_notes=notes,
         files=files,
+        release_zip_url=release_zip_url,
     )
+
+
+def _current_release_asset_prefix() -> str:
+    """現在の実行アプリに対応する release zip の接頭辞を返す。"""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).stem
+    return "MyBeatSaberStats"
+
+
+def _find_release_zip_asset_url(release: dict) -> str | None:
+    """現在のアプリに対応する release zip のダウンロード URL を返す。"""
+    prefix = _current_release_asset_prefix()
+    prefix_with_dash = f"{prefix}-"
+    for asset in release.get("assets", []):
+        name = str(asset.get("name") or "")
+        if not name.lower().endswith(".zip"):
+            continue
+        if name == f"{prefix}.zip" or name.startswith(prefix_with_dash):
+            url = asset.get("browser_download_url") or asset.get("url")
+            if url:
+                return str(url)
+    return None
 
 
 def _list_source_files_at_tag(tag: str) -> list[str]:
@@ -212,7 +265,9 @@ def apply_update(
     lib   = _lib_dir()
     res   = _resources_dir()
     files = info.files
-    total = len(files)
+    managed_roots = _managed_internal_roots_for_update(info)
+    needs_internal_sync = bool(managed_roots)
+    total = len(files) + (1 if needs_internal_sync else 0)
     raw_base = (
         f"https://raw.githubusercontent.com/{GITHUB_OWNER}/{GITHUB_REPO}"
         f"/{info.latest_tag}"
@@ -252,7 +307,108 @@ def apply_update(
     for cache_dir in lib.rglob("__pycache__"):
         shutil.rmtree(cache_dir, ignore_errors=True)
 
+    if needs_internal_sync:
+        if progress:
+            progress("配布物の _internal を同期中...", len(files), total)
+        _sync_internal_files_from_release_zip(
+            str(info.release_zip_url),
+            managed_roots,
+            progress,
+            total,
+        )
+
     save_current_version(info.latest_version)
+
+
+def _managed_internal_roots_for_update(info: UpdateInfo) -> set[str]:
+    """今回の更新で release zip と同期すべき _internal 直下のディレクトリ名を返す。"""
+    managed_roots = set(_load_managed_internal_roots())
+    if not getattr(sys, "frozen", False) or not info.release_zip_url:
+        return set()
+    if info.has_update:
+        return managed_roots
+    if "resources" in managed_roots and any(path.startswith(_RESOURCES_PREFIX) for path in info.files):
+        return {"resources"}
+    return set()
+
+
+def _sync_internal_files_from_release_zip(
+    release_zip_url: str,
+    managed_roots: set[str],
+    progress: Callable[[str, int, int], None] | None,
+    total: int,
+) -> None:
+    """release zip を正として _internal 配下の管理対象を同期する。"""
+    internal_root = _internal_dir()
+    with tempfile.TemporaryDirectory() as temp_dir:
+        zip_path = Path(temp_dir) / "release.zip"
+        resp = requests.get(release_zip_url, timeout=120)
+        resp.raise_for_status()
+        zip_path.write_bytes(resp.content)
+
+        expected_files: dict[Path, zipfile.ZipInfo] = {}
+        with zipfile.ZipFile(zip_path) as archive:
+            for member in archive.infolist():
+                if member.is_dir():
+                    continue
+                rel_path = _release_member_to_internal_path(member.filename)
+                if rel_path is None or rel_path.parts[0] not in managed_roots:
+                    continue
+                expected_files[rel_path] = member
+
+            deleted = _delete_unexpected_internal_files(internal_root, set(expected_files))
+            synced = 0
+            for rel_path, member in expected_files.items():
+                dest = internal_root / rel_path
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                with archive.open(member) as src, dest.open("wb") as dst:
+                    shutil.copyfileobj(src, dst)
+                synced += 1
+
+        if progress:
+            progress(
+                f"配布物の _internal を同期しました ({synced} 件更新, {deleted} 件削除)",
+                total,
+                total,
+            )
+
+
+def _delete_unexpected_internal_files(internal_root: Path, expected_files: set[Path]) -> int:
+    """管理対象ディレクトリから release zip に存在しないファイルを削除する。"""
+    deleted = 0
+    managed_roots = {rel.parts[0] for rel in expected_files if rel.parts}
+    for root_name in managed_roots:
+        root = internal_root / root_name
+        if not root.exists():
+            continue
+        for path in sorted(root.rglob("*"), key=lambda p: len(p.parts), reverse=True):
+            if path.is_dir():
+                if path.name == "__pycache__" or not any(path.iterdir()):
+                    shutil.rmtree(path, ignore_errors=True)
+                continue
+            rel_path = path.relative_to(internal_root)
+            if rel_path not in expected_files:
+                path.unlink(missing_ok=True)
+                deleted += 1
+        for path in sorted(root.rglob("*"), key=lambda p: len(p.parts), reverse=True):
+            if path.is_dir() and not any(path.iterdir()):
+                path.rmdir()
+    return deleted
+
+
+def _release_member_to_internal_path(member_name: str) -> Path | None:
+    """release zip 内のパスをローカル _internal 相対パスへ変換する。"""
+    normalized = member_name.replace("\\", "/")
+    for root_name in _load_managed_internal_roots():
+        marker = f"/_internal/{root_name}/"
+        if marker not in normalized:
+            continue
+        tail = normalized.split(marker, 1)[1].strip("/")
+        if not tail:
+            return None
+        head = marker.removeprefix("/_internal/").strip("/")
+        return Path(head) / Path(tail)
+    return None
 
 
 # ------------------------------------------------------------------ #

@@ -12,6 +12,11 @@
 //       │   └── mybeatsaberstats/
 //       │       ├── *.py
 //       │       └── collector/*.py
+//       ├── PySide6/
+//       │   ├── QtSvg.pyd
+//       │   └── Qt6Svg.dll
+//       ├── resources/
+//       │   └── *
 //       └── version.json
 //
 // ビルド: .NET Framework 4.x の csc.exe で単一 EXE にコンパイル
@@ -20,6 +25,7 @@
 //           apply_patch.cs
 
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.IO;
 using System.Text.RegularExpressions;
@@ -38,6 +44,8 @@ static class Program
 
 sealed class PatchDialog : Form
 {
+    private static readonly string[] DefaultManagedRoots = { "lib", "PySide6", "resources" };
+
     // UI パーツ
     private readonly Label        _infoLabel;
     private readonly Label        _progressLabel;
@@ -138,14 +146,18 @@ sealed class PatchDialog : Form
 
     private string ValidatePatch()
     {
+        string[] managedRoots = LoadManagedInternalRoots();
         if (!Directory.Exists(_patchDir))
             return "patch フォルダが見つかりません。\r\n" +
                    "apply_patch.exe と同じフォルダに patch/ フォルダを置いてください。\r\n" +
                    "(" + _patchDir + ")";
         if (!File.Exists(Path.Combine(_patchDir, "version.json")))
             return "patch/version.json が見つかりません。";
-        if (!Directory.Exists(Path.Combine(_patchDir, "lib")))
-            return "patch/lib フォルダが見つかりません。";
+        foreach (string root in managedRoots)
+        {
+            if (!Directory.Exists(Path.Combine(_patchDir, root)))
+                return "patch/" + root + " フォルダが見つかりません。";
+        }
         if (!Directory.Exists(_internalDir))
             return "_internal フォルダが見つかりません。\r\n" +
                    "メインアプリと同じフォルダで実行してください。\r\n" +
@@ -194,17 +206,22 @@ sealed class PatchDialog : Form
     {
         try
         {
-            string libSrc  = Path.Combine(_patchDir,    "lib");
-            string libDest = Path.Combine(_internalDir, "lib");
+            string[] managedRoots = LoadManagedInternalRoots();
             string verSrc  = Path.Combine(_patchDir,    "version.json");
             string verDest = Path.Combine(_internalDir, "version.json");
 
-            SetProgress("既存の lib フォルダを削除中...");
-            if (Directory.Exists(libDest))
-                Directory.Delete(libDest, recursive: true);
+            foreach (string root in managedRoots)
+            {
+                string src = Path.Combine(_patchDir, root);
+                string dest = Path.Combine(_internalDir, root);
 
-            SetProgress("新しい lib フォルダをコピー中...");
-            CopyDirectory(libSrc, libDest);
+                SetProgress("既存の " + root + " フォルダを削除中...");
+                if (Directory.Exists(dest))
+                    Directory.Delete(dest, recursive: true);
+
+                SetProgress("新しい " + root + " フォルダをコピー中...");
+                CopyDirectory(src, dest);
+            }
 
             SetProgress("version.json を更新中...");
             File.Copy(verSrc, verDest, overwrite: true);
@@ -252,6 +269,38 @@ sealed class PatchDialog : Form
             Invoke((Action)(() => _progressLabel.Text = msg));
         else
             _progressLabel.Text = msg;
+    }
+
+    private string[] LoadManagedInternalRoots()
+    {
+        string configPath = Path.Combine(_patchDir, "resources", "update_targets.json");
+        try
+        {
+            if (!File.Exists(configPath))
+                return DefaultManagedRoots;
+
+            string text = File.ReadAllText(configPath, System.Text.Encoding.UTF8);
+            Match arrayMatch = Regex.Match(
+                text,
+                @"""internal_sync_dirs""\s*:\s*\[(.*?)\]",
+                RegexOptions.Singleline);
+            if (!arrayMatch.Success)
+                return DefaultManagedRoots;
+
+            var roots = new List<string>();
+            MatchCollection matches = Regex.Matches(arrayMatch.Groups[1].Value, @"""([^""]+)""");
+            foreach (Match match in matches)
+            {
+                string value = match.Groups[1].Value.Trim();
+                if (value.Length > 0)
+                    roots.Add(value);
+            }
+            return roots.Count > 0 ? roots.ToArray() : DefaultManagedRoots;
+        }
+        catch
+        {
+            return DefaultManagedRoots;
+        }
     }
 
     private static void CopyDirectory(string src, string dest)
