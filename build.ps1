@@ -153,9 +153,6 @@ if ($Target -eq "ranking" -or $Target -eq "all") {
     Build-Spec "MyBeatSaberRanking.spec" "MyBeatSaberRanking"
 }
 if ($Target -eq "patcher") {
-    Write-Host ""
-    Write-Host "[BUILD] apply_patch.cs を csc.exe でビルド中..." -ForegroundColor Cyan
-
     # .NET Framework 4.x の csc.exe を検索（64bit → 32bit の順）
     $csc = $null
     foreach ($candidate in @(
@@ -171,30 +168,10 @@ if ($Target -eq "patcher") {
     Write-Host "  csc: $csc"
 
     $patcherReleaseDir = Join-Path $ReleaseDir "MyBeatSaberPatcher"
+    if (Test-Path $patcherReleaseDir) {
+        Remove-Item $patcherReleaseDir -Recurse -Force
+    }
     New-Item $patcherReleaseDir -ItemType Directory -Force | Out-Null
-
-    $outExe  = Join-Path $patcherReleaseDir "apply_patch.exe"
-    $srcCs   = Join-Path $ScriptDir "apply_patch.cs"
-    $iconIco = Join-Path $ScriptDir "resources\app_icon.ico"
-
-    $cscArgs = @(
-        "/nologo",
-        "/target:winexe",
-        "/out:`"$outExe`"",
-        "/reference:System.Windows.Forms.dll",
-        "/reference:System.Drawing.dll",
-        "`"$srcCs`""
-    )
-    if (Test-Path $iconIco) {
-        $cscArgs = @("/win32icon:`"$iconIco`"") + $cscArgs
-    }
-
-    & $csc @cscArgs
-    if ($LASTEXITCODE -ne 0) {
-        Write-Error "csc.exe が失敗しました (exit code $LASTEXITCODE)"
-        exit $LASTEXITCODE
-    }
-    Write-Host "  → $outExe" -ForegroundColor Green
 }
 
 # ─────────────────────────────────────────────
@@ -252,6 +229,7 @@ if ($Target -eq "patcher") {
 
     $patcherReleaseDir = Join-Path $ReleaseDir "MyBeatSaberPatcher"
     $patchContentDir   = Join-Path $patcherReleaseDir "patch"
+    $patchPayloadZip   = Join-Path $patcherReleaseDir "patch_payload.zip"
     $managedRoots = Get-ManagedInternalRoots
 
     if (Test-Path $patchContentDir) {
@@ -277,6 +255,44 @@ if ($Target -eq "patcher") {
     # patch/version.json をコピー
     Copy-Item "$ScriptDir\version.json" "$patchContentDir\version.json" -Force
     Write-Host "  version.json → $patchContentDir"
+
+    Write-Host "  埋め込み用 patch_payload.zip を作成中..." -ForegroundColor Cyan
+    if (Test-Path $patchPayloadZip) {
+        Remove-Item $patchPayloadZip -Force
+    }
+    Compress-Archive -Path "$patchContentDir\*" -DestinationPath $patchPayloadZip -CompressionLevel Optimal
+
+    Write-Host ""
+    Write-Host "[BUILD] apply_patch.cs を csc.exe でビルド中..." -ForegroundColor Cyan
+
+    $outExe  = Join-Path $patcherReleaseDir "apply_patch.exe"
+    $srcCs   = Join-Path $ScriptDir "apply_patch.cs"
+    $iconIco = Join-Path $ScriptDir "resources\app_icon.ico"
+
+    $cscArgs = @(
+        "/nologo",
+        "/target:winexe",
+        "/out:`"$outExe`"",
+        "/reference:System.Windows.Forms.dll",
+        "/reference:System.Drawing.dll",
+        "/reference:System.IO.Compression.dll",
+        "/reference:System.IO.Compression.FileSystem.dll",
+        "/resource:`"$patchPayloadZip`",patch_payload.zip",
+        "`"$srcCs`""
+    )
+    if (Test-Path $iconIco) {
+        $cscArgs = @("/win32icon:`"$iconIco`"") + $cscArgs
+    }
+
+    & $csc @cscArgs
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "csc.exe が失敗しました (exit code $LASTEXITCODE)"
+        exit $LASTEXITCODE
+    }
+    Write-Host "  → $outExe" -ForegroundColor Green
+
+    Remove-Item $patchPayloadZip -Force
+    Remove-Item $patchContentDir -Recurse -Force
 }
 
 # ─────────────────────────────────────────────
@@ -305,8 +321,8 @@ if ($Target -eq "patcher") {
     Write-Host "    フォルダ: $path"
     Write-Host ""
     Write-Host "配布手順 (patcher):" -ForegroundColor Cyan
-    Write-Host "  release\MyBeatSaberPatcher\ の内容を ZIP して配布"
-    Write-Host "  ユーザーは ZIP を MyBeatSaberStats フォルダに展開し apply_patch.exe を実行"
+    Write-Host "  release\MyBeatSaberPatcher\apply_patch.exe を単体で配布"
+    Write-Host "  ユーザーは apply_patch.exe を MyBeatSaberStats フォルダに置いて実行"
 }
 
 Write-Host ""
