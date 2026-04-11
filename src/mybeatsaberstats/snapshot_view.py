@@ -340,11 +340,12 @@ class SnapshotCompareDialog(QDialog):
         self._metric_preferred_width: int = 425
         # 全テーブル共通の行高（▲▼ボタンで変更）
         self._row_height: int = 21
+        self._ui_state_restored: bool = False
         # スプリッター位置の保存用（_rebalance_splitter と共用）
-        self._saved_splitter_sizes: list[int] = [459, 1065]      # _splitter (Metric / right)
+        self._saved_splitter_sizes: list[int] = [440, 1045]      # _splitter (Metric / right)
         self._saved_right_vsplitter_sizes: list[int] = [615, 190]  # _right_vsplitter (star / acc)
         self._saved_star_hsplitter_ss: int = 392                  # _star_hsplitter SS 側幅
-        self._saved_metric_vsplitter_sizes: list[int] = [303, 500]  # _metric_vsplitter (SS/BL / AccSaber)
+        self._saved_metric_vsplitter_sizes: list[int] = [367, 436]  # _metric_vsplitter (SS/BL / AccSaber)
 
         root_layout = QVBoxLayout(self)
         root_layout.setContentsMargins(2, 2, 2, 2)
@@ -429,7 +430,7 @@ class SnapshotCompareDialog(QDialog):
         self.btn_toggle_header.setToolTip("各テーブルのタイトルヘッダの表示/非表示")
         self.btn_toggle_header.setStyleSheet(toggle_button_stylesheet())
 
-        self.btn_bl_below = QPushButton("BL⇩", self)
+        self.btn_bl_below = QPushButton("BL⇨", self)
         self.btn_bl_below.setCheckable(False)
         self.btn_bl_below.setFixedWidth(45)
         self.btn_bl_below.setToolTip("BeatLeaderをScoreSaberの下に配置する / 左右並びに戻す")
@@ -439,12 +440,12 @@ class SnapshotCompareDialog(QDialog):
         top_grid.addWidget(QLabel("  "), 0, 10 + 1)  # BL と AccSaber の間のスペーサ
 
         # AccSaber モード切り替えボタン (AccSaber / AccSaber Reloaded) — Metric/SS/BL の右隣
-        self._acc_mode: str = "AS"  # "AS" or "RL"
+        self._acc_mode: str = "RL"  # "AS" or "RL"
         self._acc_position: str = "Left"  # "Left" or "Bottom"
-        self._bl_below: bool = False
+        self._bl_below: bool = True
         self.btn_acc_as = QPushButton("AccSaber", self)
         self.btn_acc_as.setCheckable(True)
-        self.btn_acc_as.setChecked(True)
+        self.btn_acc_as.setChecked(False)
         self.btn_acc_as.setFixedWidth(100)
         self.btn_acc_as.setToolTip("AccSaberを表示")
         self.btn_acc_as.setIcon(self._icon_accsaber)
@@ -454,7 +455,7 @@ class SnapshotCompareDialog(QDialog):
 
         self.btn_acc_rl = QPushButton("AccSaber RL", self)
         self.btn_acc_rl.setCheckable(True)
-        self.btn_acc_rl.setChecked(False)
+        self.btn_acc_rl.setChecked(True)
         self.btn_acc_rl.setFixedWidth(100)
         self.btn_acc_rl.setToolTip("AccSaber Reloadedを表示")
         self.btn_acc_rl.setIcon(self._icon_accsaber_rl)
@@ -880,11 +881,12 @@ class SnapshotCompareDialog(QDialog):
         self._v_splitter.setCollapsible(0, True)
         self._v_splitter.setCollapsible(1, False)
         # デフォルトの分割比率
-        self._splitter.setSizes([300, 865])
+        self._star_hsplitter.setOrientation(Qt.Orientation.Vertical)
+        self._splitter.setSizes([440, 1045])
         self._v_splitter.setSizes([53, 660])
-        self._right_vsplitter.setSizes([510, 180])
-        self._star_hsplitter.setSizes([380, 485])
-        self._metric_vsplitter.setSizes([300, 300])
+        self._right_vsplitter.setSizes([615, 190])
+        self._star_hsplitter.setSizes([392, 485])
+        self._metric_vsplitter.setSizes([367, 436])
 
         self._load_snapshots()
         # Stats 画面から steam_id が渡されている場合はそちらを優先し、
@@ -929,6 +931,8 @@ class SnapshotCompareDialog(QDialog):
 
         self._apply_row_height()
         self._update_view2()
+        if not self._ui_state_restored:
+            QTimer.singleShot(0, self._apply_default_layout_initial_geometry)
 
     # -------------------- internal helpers --------------------
 
@@ -1122,6 +1126,7 @@ class SnapshotCompareDialog(QDialog):
 
     def _restore_ui_state(self, data: dict) -> None:
         """JSON data からトグル/チェックボックスの状態を復元する。"""
+        self._ui_state_restored = True
         acc_mode = data.get("ui_acc_mode")
         if acc_mode in ("AS", "RL"):
             self._acc_mode = acc_mode
@@ -1428,16 +1433,24 @@ class SnapshotCompareDialog(QDialog):
         self._apply_row_height()
         self._update_view2()
 
-        def _apply() -> None:
-            self._right_vsplitter.setSizes(self._saved_right_vsplitter_sizes)
-            self._metric_vsplitter.setSizes(self._saved_metric_vsplitter_sizes)
-            self._rebalance_splitter()
-            self._apply_acc_position()
-            self._restore_v_splitter(53)
+        self._apply_default_layout_initial_geometry(save=False)
+
+        def _save() -> None:
             self._save_last_selection()
 
         from PySide6.QtCore import QTimer
-        QTimer.singleShot(0, _apply)
+        QTimer.singleShot(0, _save)
+
+    def _apply_default_layout_initial_geometry(self, save: bool = False) -> None:
+        """Default Layout 相当の描画後ジオメトリを適用する。"""
+
+        self._right_vsplitter.setSizes(self._saved_right_vsplitter_sizes)
+        self._metric_vsplitter.setSizes(self._saved_metric_vsplitter_sizes)
+        self._rebalance_splitter()
+        self._apply_acc_position()
+        self._restore_v_splitter(53)
+        if save:
+            self._save_last_selection()
 
     def _on_toggle_bl_below(self) -> None:
         """BeatLeader を ScoreSaber の下に配置する / 左右並びに戻す。"""

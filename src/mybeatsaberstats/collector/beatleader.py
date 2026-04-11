@@ -683,7 +683,11 @@ def _extract_beatleader_accuracy(score_info: dict) -> Optional[float]:
         return None
 
 
-def collect_beatleader_star_stats(beatleader_id: str, session: Optional[requests.Session] = None) -> list[StarClearStat]:
+def collect_beatleader_star_stats(
+    beatleader_id: str,
+    session: Optional[requests.Session] = None,
+    progress: Optional[Callable[[str, float], None]] = None,
+) -> list[StarClearStat]:
     """
     BeatLeaderのRanked譜面・プレイヤースコアから星別クリア数・NF数・平均精度を集計。
     """
@@ -694,7 +698,30 @@ def collect_beatleader_star_stats(beatleader_id: str, session: Optional[requests
     if session is None:
         session = requests.Session()
 
-    leaderboards = _get_beatleader_leaderboards_ranked(session)
+    def _step(message: str, fraction: float) -> None:
+        if progress is not None:
+            progress(message, max(0.0, min(1.0, fraction)))
+
+    def _leaderboard_progress(page: int, max_pages: Optional[int]) -> None:
+        if max_pages and max_pages > 0:
+            frac = max(0.0, min(1.0, page / max_pages))
+            page_text = f"{page}/{max_pages}"
+        else:
+            frac = 0.0 if page <= 1 else 1.0
+            page_text = f"{page}/?"
+        _step(f"Collecting BeatLeader star stats: maps {page_text}", 0.45 * frac)
+
+    def _scores_progress(page: int, max_pages: Optional[int]) -> None:
+        if max_pages and max_pages > 0:
+            frac = max(0.0, min(1.0, page / max_pages))
+            page_text = f"{page}/{max_pages}"
+        else:
+            frac = 0.0 if page <= 1 else 1.0
+            page_text = f"{page}/?"
+        _step(f"Collecting BeatLeader star stats: scores {page_text}", 0.45 + 0.45 * frac)
+
+    _step("Collecting BeatLeader star stats: maps...", 0.0)
+    leaderboards = _get_beatleader_leaderboards_ranked(session, progress=_leaderboard_progress)
     if not leaderboards:
         return []
 
@@ -740,7 +767,8 @@ def collect_beatleader_star_stats(beatleader_id: str, session: Optional[requests
     if not star_map_count or not leaderboard_star_bucket:
         return []
 
-    scores = _get_beatleader_player_scores(beatleader_id, session)
+    _step("Collecting BeatLeader star stats: scores...", 0.45)
+    scores = _get_beatleader_player_scores(beatleader_id, session, progress=_scores_progress)
 
     star_clear_count: dict[int, int] = defaultdict(int)
     star_nf_count: dict[int, int] = defaultdict(int)
@@ -758,7 +786,8 @@ def collect_beatleader_star_stats(beatleader_id: str, session: Optional[requests
 
     per_leaderboard: dict[str, dict] = {}
 
-    for item in scores:
+    score_count = len(scores)
+    for idx, item in enumerate(scores, start=1):
         leaderboard = item.get("leaderboard") if isinstance(item, dict) else None
         if leaderboard is None and isinstance(item, dict):
             leaderboard = item
@@ -827,6 +856,12 @@ def collect_beatleader_star_stats(beatleader_id: str, session: Optional[requests
                             state["best_pp"] = pp_val
                 except (TypeError, ValueError):
                     pass
+
+        if score_count > 0 and (idx == 1 or idx == score_count or idx % 200 == 0):
+            _step(
+                f"Collecting BeatLeader star stats: aggregating {idx:,}/{score_count:,}",
+                0.90 + 0.10 * (idx / score_count),
+            )
         else:
             state["clear"] = True
 
@@ -975,4 +1010,5 @@ def collect_beatleader_star_stats(beatleader_id: str, session: Optional[requests
             pp_solo=pp_solo,
         ))
 
+    _step("Collecting BeatLeader star stats: done", 1.0)
     return stats
