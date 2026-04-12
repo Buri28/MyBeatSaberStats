@@ -2296,7 +2296,7 @@ class PlaylistWindow(QMainWindow):
         _batch_title.setStyleSheet("font-weight: bold; font-size: 13px;")
         _batch_title_row.addWidget(_batch_title)
         _batch_title_row.addStretch()
-        self._btn_bq_load = QPushButton("Load")
+        self._btn_bq_load = QPushButton("⏴ Load")
         self._btn_bq_load.setToolTip("選択中の1件から Source / Filter / Export Style を復元")
         self._btn_bq_load.setEnabled(False)
         self._btn_bq_load.clicked.connect(self._batch_restore_selected)
