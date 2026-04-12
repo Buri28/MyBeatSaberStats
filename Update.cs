@@ -132,6 +132,8 @@ sealed class CommandLineOptions
             options.ZipSource = Path.GetFullPath(options.ZipSource);
         }
 
+        options.ExePath = UpdateInstaller.ValidateInstallDirectory(options.InstallDir, options.ExePath);
+
         return options;
     }
 
@@ -725,6 +727,41 @@ static class UpdateInstaller
         return others.Length == 1 ? others[0] : null;
     }
 
+    public static string ValidateInstallDirectory(string installDir, string exePath)
+    {
+        if (string.IsNullOrEmpty(installDir))
+            throw new InvalidOperationException("更新先フォルダが空です。");
+
+        string fullInstallDir = Path.GetFullPath(installDir);
+        if (!Directory.Exists(fullInstallDir))
+            throw new InvalidOperationException("更新先フォルダが見つかりません: " + fullInstallDir);
+
+        string resolvedExe = exePath;
+        if (!string.IsNullOrEmpty(resolvedExe))
+            resolvedExe = Path.GetFullPath(resolvedExe);
+        if (string.IsNullOrEmpty(resolvedExe) || !File.Exists(resolvedExe))
+            resolvedExe = InferTargetExePath(fullInstallDir);
+
+        if (string.IsNullOrEmpty(resolvedExe) || !File.Exists(resolvedExe))
+        {
+            throw new InvalidOperationException(
+                "更新先フォルダに対象アプリの exe が見つかりません。\r\n"
+                + "Update.exe と同じフォルダに MyBeatSaberStats.exe を置いて実行してください。\r\n"
+                + "対象フォルダ: " + fullInstallDir);
+        }
+
+        string exeDir = Path.GetDirectoryName(resolvedExe);
+        if (!string.Equals(exeDir, fullInstallDir, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException(
+                "対象アプリの exe が更新先フォルダ直下にありません。\r\n"
+                + "更新先フォルダ: " + fullInstallDir + "\r\n"
+                + "検出した exe: " + resolvedExe);
+        }
+
+        return resolvedExe;
+    }
+
     public static string ResolveAssetPrefix(string installDir, string exePath)
     {
         if (!string.IsNullOrEmpty(exePath))
@@ -799,6 +836,7 @@ static class UpdateInstaller
         string targetVersion,
         bool preserveUpdater)
     {
+        exePath = ValidateInstallDirectory(installDir, exePath);
         WaitForProcessExit(waitPid);
         string stageRoot = !string.IsNullOrEmpty(cleanupDir) ? cleanupDir : Path.GetDirectoryName(zipPath);
         string extractDir = Path.Combine(stageRoot, "unzipped");
