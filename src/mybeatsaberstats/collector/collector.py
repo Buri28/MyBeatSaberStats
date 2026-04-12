@@ -1,4 +1,4 @@
-﻿
+
 from __future__ import annotations
 def _is_steam_id(value: str | None) -> bool:
     return isinstance(value, str) and value.isdigit() and len(value) == 17
