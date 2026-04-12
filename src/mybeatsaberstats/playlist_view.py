@@ -58,7 +58,7 @@ from PySide6.QtWidgets import (
 )
 
 from .snapshot import BASE_DIR, RESOURCES_DIR
-from .accsaber_reloaded import format_pending_song_name as _format_rl_pending_song_name, is_pending_difficulty as _is_rl_pending_difficulty
+from .accsaber_reloaded import is_pending_difficulty as _is_rl_pending_difficulty
 from .theme import detect_system_dark, is_dark, table_stylesheet
 
 
@@ -163,15 +163,16 @@ class MapEntry:
 
     @property
     def status_str(self) -> str:
+        queued_suffix = "[Q]" if self.pending else ""
         if self.cleared:
-            return STATUS_CLEARED
+            return f"{STATUS_CLEARED}{queued_suffix}"
         if self.nf_clear:
             mods_upper = self.player_mods.upper()
             if not self.player_mods or "NF" in mods_upper:
-                return STATUS_NF
+                return f"{STATUS_NF}{queued_suffix}"
             # SC 等の NF 以外のモディファイアで無効化されている場合
-            return f"{STATUS_WARN}{self.player_mods}"
-        return STATUS_UNPLAYED
+            return f"{STATUS_WARN}{self.player_mods}{queued_suffix}"
+        return f"{STATUS_UNPLAYED}{queued_suffix}"
 
     @property
     def sort_stars(self) -> float:
@@ -183,7 +184,7 @@ class MapEntry:
 
     @property
     def display_song_name(self) -> str:
-        return _format_rl_pending_song_name(self.song_name, self.pending)
+        return self.song_name
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -807,7 +808,7 @@ def _make_bplist(title: str, entries: List[MapEntry], image: str = "") -> dict:
         diff = e.difficulty or "ExpertPlus"
         songs.append({
             "hash": e.song_hash,
-            "songName": e.display_song_name,
+            "songName": e.song_name,
             "difficulties": [{"characteristic": char, "name": diff}],
         })
     return {
@@ -1374,6 +1375,7 @@ class _BatchConfig:
     show_cleared: bool = True
     show_nf: bool = True
     show_unplayed: bool = True
+    show_queued: bool = False
     # Category filter (RL only)
     cat_true: bool = True
     cat_standard: bool = True
@@ -1406,7 +1408,7 @@ class _BatchConfig:
         elif self.source == "acc":
             cats = [n for flag, n in [(self.cat_true, "Tr"), (self.cat_standard, "Std"), (self.cat_tech, "Tch")] if flag]
             src = f"Acc[{'+'.join(cats) or 'none'}]"
-        sts = "".join([s for flag, s in [(self.show_cleared, "✓"), (self.show_nf, "⚠"), (self.show_unplayed, "✗")] if flag])
+        sts = "".join([s for flag, s in [(self.show_cleared, "✓"), (self.show_nf, "⚠"), (self.show_unplayed, "✗"), (self.show_queued, "Q")] if flag])
         sort_label = {
             "star_asc": "Star↑", "star_desc": "Star↓",
             "pp_high": "PP↓", "pp_low": "PP↑",
@@ -1528,12 +1530,16 @@ def _apply_config_filter(maps: List[MapEntry], cfg: "_BatchConfig") -> List[MapE
                 continue
         if e.stars < cfg.star_min or e.stars >= cfg.star_max:
             continue
-        if e.cleared and not cfg.show_cleared:
-            continue
-        if e.nf_clear and not cfg.show_nf:
-            continue
-        if not e.played and not cfg.show_unplayed:
-            continue
+        if e.pending:
+            if not cfg.show_queued:
+                continue
+        else:
+            if e.cleared and not cfg.show_cleared:
+                continue
+            if e.nf_clear and not cfg.show_nf:
+                continue
+            if not e.played and not cfg.show_unplayed:
+                continue
         if cfg.source in ("rl", "acc"):
             if e.acc_category == "true" and not cfg.cat_true:
                 continue
@@ -1585,7 +1591,9 @@ def _config_export_tag(cfg: "_BatchConfig") -> str:
         sts.append("NF")
     if cfg.show_unplayed:
         sts.append("Unplayed")
-    if len(sts) < 3:
+    if cfg.show_queued:
+        sts.append("Que")
+    if len(sts) < 4:
         parts.append("+".join(sts) if sts else "none")
     if cfg.star_min > 0.0 or cfg.star_max < 20.0:
         parts.append(f"star{cfg.star_min:g}-{cfg.star_max:g}")
@@ -1683,13 +1691,15 @@ def _playlist_title(
 
     # --- フィルター部分（全ステータスが有効な場合は省略）---
     filter_parts: List[str] = []
-    if not (cfg.show_cleared and cfg.show_nf and cfg.show_unplayed):
+    if not (cfg.show_cleared and cfg.show_nf and cfg.show_unplayed and cfg.show_queued):
         if cfg.show_nf:
             filter_parts.append("NF")
         if cfg.show_unplayed:
             filter_parts.append("Unplayed")
         if cfg.show_cleared:
             filter_parts.append("Cleared")
+        if cfg.show_queued:
+            filter_parts.append("Que")
     filter_str = "+".join(filter_parts)
 
     if cfg.song_filter:
@@ -1939,6 +1949,12 @@ class PlaylistWindow(QMainWindow):
         def _set_standard_button_height(*buttons: QPushButton, height: int = 26) -> None:
             for button in buttons:
                 button.setMinimumHeight(height)
+
+        def _set_nonshrinking_button_width(*buttons: QPushButton) -> None:
+            for button in buttons:
+                button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+                button.setMinimumWidth(max(button.minimumWidth(), button.sizeHint().width()))
+
         def _register_secondary_buttons(*buttons: QPushButton) -> None:
             _set_standard_button_height(*buttons)
             self._secondary_buttons.extend(buttons)
@@ -1993,19 +2009,17 @@ class PlaylistWindow(QMainWindow):
 
         # ─ Filter ───────────────────────────────────────────────────
         filter_group = QGroupBox("Filter")
-        filter_row = QHBoxLayout(filter_group)
-        filter_row.setSpacing(8)
+        filter_layout = QVBoxLayout(filter_group)
+        filter_layout.setSpacing(6)
+        filter_layout.setContentsMargins(6, 16, 6, 9)
+        filter_row1 = QHBoxLayout()
+        filter_row1.setSpacing(8)
+        filter_row2 = QHBoxLayout()
+        filter_row2.setSpacing(8)
 
-        filter_row.addWidget(QLabel("🔍 Song:"))
-        self._search_edit = QLineEdit()
-        self._search_edit.setPlaceholderText("Search by song / author / mapper...")
-        self._search_edit.setToolTip("スペース区切りで複数キーワードのAND検索ができます\n例: \"good pp\" → \"good\" と \"pp\" を両方含む曲")
-        self._search_edit.setMinimumWidth(180)
-        self._search_edit.textChanged.connect(self._apply_filter)
-        filter_row.addWidget(self._search_edit)
-
-        self._star_label = QLabel("★")
-        filter_row.addWidget(self._star_label)
+        filter_row1.addSpacing(6)
+        self._star_label = QLabel("★ Stars:")
+        filter_row1.addWidget(self._star_label)
         self._star_min = QDoubleSpinBox()
         self._star_min.setRange(0.0, 20.0)
         self._star_min.setDecimals(1)
@@ -2013,9 +2027,9 @@ class PlaylistWindow(QMainWindow):
         self._star_min.setValue(0.0)
         self._star_min.setFixedWidth(68)
         self._star_min.valueChanged.connect(self._apply_filter)
-        filter_row.addWidget(self._star_min)
+        filter_row1.addWidget(self._star_min)
         self._star_sep_label = QLabel("–")
-        filter_row.addWidget(self._star_sep_label)
+        filter_row1.addWidget(self._star_sep_label)
         self._star_max = QDoubleSpinBox()
         self._star_max.setRange(0.0, 20.0)
         self._star_max.setDecimals(1)
@@ -2023,27 +2037,12 @@ class PlaylistWindow(QMainWindow):
         self._star_max.setValue(20.0)
         self._star_max.setFixedWidth(68)
         self._star_max.valueChanged.connect(self._apply_filter)
-        filter_row.addWidget(self._star_max)
+        filter_row1.addWidget(self._star_max)
 
-        filter_row.addSpacing(8)
-        filter_row.addWidget(QLabel("Status:"))
-        self._cb_sts_cleared = QCheckBox("Cleared ✔")
-        self._cb_sts_cleared.setChecked(True)
-        self._cb_sts_cleared.toggled.connect(self._apply_filter)
-        self._cb_sts_nf = QCheckBox("NF ⚠")
-        self._cb_sts_nf.setChecked(True)
-        self._cb_sts_nf.toggled.connect(self._apply_filter)
-        self._cb_sts_unplayed = QCheckBox("Unplayed ✖")
-        self._cb_sts_unplayed.setChecked(True)
-        self._cb_sts_unplayed.toggled.connect(self._apply_filter)
-        filter_row.addWidget(self._cb_sts_cleared)
-        filter_row.addWidget(self._cb_sts_nf)
-        filter_row.addWidget(self._cb_sts_unplayed)
-
-        filter_row.addSpacing(8)
+        #filter_row1.addSpacing(8)
         self._cat_filter_label = QLabel("Category:")
         self._cat_filter_label.setVisible(False)
-        filter_row.addWidget(self._cat_filter_label)
+        filter_row1.addWidget(self._cat_filter_label)
         self._cb_cat_true = QCheckBox("True")
         self._cb_cat_true.setChecked(True)
         self._cb_cat_true.setVisible(False)
@@ -2056,13 +2055,47 @@ class PlaylistWindow(QMainWindow):
         self._cb_cat_tech.setChecked(True)
         self._cb_cat_tech.setVisible(False)
         self._cb_cat_tech.toggled.connect(self._apply_filter)
-        filter_row.addWidget(self._cb_cat_true)
-        filter_row.addWidget(self._cb_cat_standard)
-        filter_row.addWidget(self._cb_cat_tech)
-
-        filter_row.addStretch()
+        filter_row1.addWidget(self._cb_cat_true)
+        filter_row1.addWidget(self._cb_cat_standard)
+        filter_row1.addWidget(self._cb_cat_tech)
+        filter_row1.addStretch()
         self._count_label = QLabel("0 maps")
-        filter_row.addWidget(self._count_label)
+        filter_row1.addWidget(self._count_label)
+
+        filter_row2.addWidget(QLabel("🔍 Song: "))
+        self._search_edit = QLineEdit()
+        self._search_edit.setPlaceholderText("Search by song / author / mapper...")
+        self._search_edit.setToolTip("スペース区切りで複数キーワードのAND検索ができます\n例: \"good pp\" → \"good\" と \"pp\" を両方含む曲")
+        self._search_edit.setMinimumWidth(180)
+        self._search_edit.textChanged.connect(self._apply_filter)
+        filter_row2.addWidget(self._search_edit)
+
+        filter_row2.addSpacing(12)
+        filter_row2.addWidget(QLabel("Status:"))
+        self._cb_sts_cleared = QCheckBox("Cleared ✔")
+        self._cb_sts_cleared.setChecked(True)
+        self._cb_sts_cleared.toggled.connect(self._apply_filter)
+        self._cb_sts_nf = QCheckBox("NF ⚠")
+        self._cb_sts_nf.setChecked(True)
+        self._cb_sts_nf.toggled.connect(self._apply_filter)
+        self._cb_sts_unplayed = QCheckBox("Unplayed ✖")
+        self._cb_sts_unplayed.setChecked(True)
+        self._cb_sts_unplayed.toggled.connect(self._apply_filter)
+        self._cb_sts_queued = QCheckBox("Que [Q]")
+        self._cb_sts_queued.setChecked(False)
+        self._cb_sts_queued.toggled.connect(self._apply_filter)
+        filter_row2.addWidget(self._cb_sts_cleared)
+        filter_row2.addWidget(self._cb_sts_nf)
+        filter_row2.addWidget(self._cb_sts_unplayed)
+        filter_row2.addWidget(self._cb_sts_queued)
+        filter_row2.addStretch()
+        self._btn_filter_reset = QPushButton("Reset")
+        _register_secondary_buttons(self._btn_filter_reset)
+        self._btn_filter_reset.clicked.connect(self._on_reset_filters_clicked)
+        filter_row2.addWidget(self._btn_filter_reset)
+
+        filter_layout.addLayout(filter_row1)
+        filter_layout.addLayout(filter_row2)
 
         root.addWidget(filter_group)
 
@@ -2093,6 +2126,9 @@ class PlaylistWindow(QMainWindow):
         self._sort_label.setToolTip("テーブルヘッダをクリックしてソートを変えるとここに反映されます")
         export_row.addWidget(self._sort_label)
 
+        self._export_info_label = QLabel("")
+        export_row.addWidget(self._export_info_label)
+
         export_row.addStretch()
 
         self._btn_export = QPushButton("📤 Export")
@@ -2113,9 +2149,6 @@ class PlaylistWindow(QMainWindow):
         )
         self._btn_add_to_batch.clicked.connect(self._add_to_batch)
         export_row.addWidget(self._btn_add_to_batch)
-
-        self._export_info_label = QLabel("")
-        export_row.addWidget(self._export_info_label)
 
         root.addWidget(export_group)
 
@@ -2196,8 +2229,6 @@ class PlaylistWindow(QMainWindow):
         _top_layout.addWidget(self._batch_queue_list, 1)
 
         _queue_btn_row = QHBoxLayout()
-        self._batch_count_label = QLabel("0 items")
-        _queue_btn_row.addWidget(self._batch_count_label)
         _btn_bq_all = QPushButton("All")
         _btn_bq_all.setToolTip("すべてを有効化")
         _btn_bq_all.clicked.connect(lambda: self._batch_set_all_enabled(True))
@@ -2206,6 +2237,8 @@ class PlaylistWindow(QMainWindow):
         _btn_bq_none.setToolTip("すべてを無効化")
         _btn_bq_none.clicked.connect(lambda: self._batch_set_all_enabled(False))
         _queue_btn_row.addWidget(_btn_bq_none)
+        self._batch_count_label = QLabel("0 items")
+        _queue_btn_row.addWidget(self._batch_count_label)
         _queue_btn_row.addStretch()
         _btn_bq_remove = QPushButton("Remove")
         _btn_bq_remove.setToolTip("選択行を削除")
@@ -2216,6 +2249,7 @@ class PlaylistWindow(QMainWindow):
         _btn_bq_clear.clicked.connect(self._batch_clear)
         _queue_btn_row.addWidget(_btn_bq_clear)
         _register_secondary_buttons(_btn_bq_all, _btn_bq_none, _btn_bq_remove, _btn_bq_clear)
+        _set_nonshrinking_button_width(_btn_bq_all, _btn_bq_none, _btn_bq_remove, _btn_bq_clear)
         _top_layout.addLayout(_queue_btn_row)
 
         _export_all_btn_row = QHBoxLayout()
@@ -2265,6 +2299,7 @@ class PlaylistWindow(QMainWindow):
         _preset_btn_row.addStretch()
         self._btn_add_presets = QPushButton("➕ Add to Batch")
         _register_secondary_buttons(_btn_pa, _btn_pn, self._btn_add_presets)
+        _set_nonshrinking_button_width(_btn_pa, _btn_pn, self._btn_add_presets)
         self._btn_add_presets.clicked.connect(self._batch_add_presets)
         _preset_btn_row.addWidget(self._btn_add_presets)
         _bot_layout.addLayout(_preset_btn_row)
@@ -2277,6 +2312,20 @@ class PlaylistWindow(QMainWindow):
             "QPushButton:disabled { background-color: #444; color: #888; }"
         )
         _bot_layout.addWidget(self._btn_quick_export)
+
+        _right_w.setMinimumWidth(max(
+            180,
+            _batch_title.sizeHint().width() + self._btn_preview_cover.sizeHint().width() + 48,
+            self._batch_count_label.sizeHint().width()
+            + _btn_bq_all.minimumWidth()
+            + _btn_bq_none.minimumWidth()
+            + _btn_bq_remove.minimumWidth()
+            + _btn_bq_clear.minimumWidth()
+            + 72,
+            _btn_pa.minimumWidth() + _btn_pn.minimumWidth() + self._btn_add_presets.minimumWidth() + 56,
+            self._btn_batch_export_all.sizeHint().width() + 24,
+            self._btn_quick_export.sizeHint().width() + 24,
+        ))
 
         _right_splitter.setSizes([300, 250])
 
@@ -2368,6 +2417,7 @@ class PlaylistWindow(QMainWindow):
         show_cleared: bool = True,
         show_nf: bool = True,
         show_unplayed: bool = True,
+        show_queued: bool = False,
         sort_mode: str = "status_desc",
     ) -> None:
         """Stats 画面からの遷移用。ソース・星範囲・カテゴリ・ソートをプリセットして Load する。
@@ -2376,6 +2426,9 @@ class PlaylistWindow(QMainWindow):
         categories: None = 全カテゴリ / ["true"/"standard"/"tech"] で絞り込み
         sort_mode: "status_desc" | "pp_high" | "ap_high" など
         """
+        # 前回の手動フィルタを残さず、既定値に戻してから preset を適用する
+        self._reset_filters()
+
         # ソースラジオボタンを切り替え（シグナルで _on_source_changed が呼ばれる）
         _rb_map = {"ss": self._rb_ss, "bl": self._rb_bl, "acc": self._rb_acc, "acc_rl": self._rb_acc_rl}
         rb = _rb_map.get(source)
@@ -2405,6 +2458,7 @@ class PlaylistWindow(QMainWindow):
             (show_cleared, self._cb_sts_cleared),
             (show_nf, self._cb_sts_nf),
             (show_unplayed, self._cb_sts_unplayed),
+            (show_queued, self._cb_sts_queued),
         ]:
             cb.blockSignals(True)
             cb.setChecked(checked)
@@ -2431,7 +2485,7 @@ class PlaylistWindow(QMainWindow):
         self._update_sort_label()
 
         # データをロード
-        self._load_data()
+        self._load_data(reset_filters=False)
 
     # ──────────────────────────────────────────────────────────────────────────
     # ソース選択イベント
@@ -2460,6 +2514,9 @@ class PlaylistWindow(QMainWindow):
         is_acc = self._rb_acc.isChecked() or self._rb_acc_rl.isChecked() or (
             self._rb_open.isChecked() and self._svc_combo.currentData() == "accsaber_rl"
         )
+        is_rl = self._rb_acc_rl.isChecked() or (
+            self._rb_open.isChecked() and self._svc_combo.currentData() == "accsaber_rl"
+        )
         # AccSaber / AccSaber RL ではカテゴリ別分割なので Split ラベルを切り替え
         self._rb_exp_split.setText("Split by Category (True / Standard / Tech)" if is_acc else "Split by ★")
         # Category filter チェックボックスは AccSaber / AccSaber RL のときのみ表示
@@ -2468,6 +2525,7 @@ class PlaylistWindow(QMainWindow):
         # ★レンジは AccSaber / AccSaber RL では非表示
         for w in [self._star_label, self._star_min, self._star_sep_label, self._star_max]:
             w.setVisible(not is_acc)
+        self._cb_sts_queued.setVisible(is_rl)
 
     def _on_svc_combo_changed(self) -> None:
         """サービスコンボ変更時に Filter/Export UI とテーブルヘッダを更新する。"""
@@ -2561,8 +2619,10 @@ class PlaylistWindow(QMainWindow):
             sts_parts.append("nf")
         if self._cb_sts_unplayed.isChecked():
             sts_parts.append("unplayed")
+        if self._cb_sts_queued.isChecked():
+            sts_parts.append("que")
         # 全チェックならタグなし（デフォルト）
-        if len(sts_parts) < 3:
+        if len(sts_parts) < 4:
             parts.append("+".join(sts_parts) if sts_parts else "none")
 
         # 検索テキスト
@@ -2652,13 +2712,49 @@ class PlaylistWindow(QMainWindow):
                 if idx >= 0:
                     self._svc_combo.setCurrentIndex(idx)
 
+    def _reset_filters(self) -> None:
+        widgets = [
+            self._search_edit,
+            self._star_min,
+            self._star_max,
+            self._cb_sts_cleared,
+            self._cb_sts_nf,
+            self._cb_sts_unplayed,
+            self._cb_sts_queued,
+            self._cb_cat_true,
+            self._cb_cat_standard,
+            self._cb_cat_tech,
+        ]
+        for widget in widgets:
+            widget.blockSignals(True)
+        try:
+            self._search_edit.clear()
+            self._star_min.setValue(0.0)
+            self._star_max.setValue(20.0)
+            self._cb_sts_cleared.setChecked(True)
+            self._cb_sts_nf.setChecked(True)
+            self._cb_sts_unplayed.setChecked(True)
+            self._cb_sts_queued.setChecked(False)
+            self._cb_cat_true.setChecked(True)
+            self._cb_cat_standard.setChecked(True)
+            self._cb_cat_tech.setChecked(True)
+        finally:
+            for widget in widgets:
+                widget.blockSignals(False)
+
+    def _on_reset_filters_clicked(self) -> None:
+        self._reset_filters()
+        self._apply_filter()
+
     # ──────────────────────────────────────────────────────────────────────────
     # データ読み込み
     # ──────────────────────────────────────────────────────────────────────────
 
-    def _load_data(self) -> None:
+    def _load_data(self, reset_filters: bool = True) -> None:
         """選択されたソースに応じてマップデータを読み込む。"""
         self._btn_load.setEnabled(False)
+        if reset_filters:
+            self._reset_filters()
         self._all_entries = []
         self._filtered = []
         self._table.setRowCount(0)
@@ -2904,13 +3000,15 @@ class PlaylistWindow(QMainWindow):
         """バッチキューの表示を更新する。"""
         self._batch_queue_list.blockSignals(True)
         self._batch_queue_list.clear()
+        enabled_count = 0
         for cfg in self._batch_configs:
             item = QListWidgetItem(cfg.display_text())
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             item.setCheckState(Qt.CheckState.Checked if cfg.enabled else Qt.CheckState.Unchecked)
             self._batch_queue_list.addItem(item)
-        n = len(self._batch_configs)
-        self._batch_count_label.setText(f"{n} item{'s' if n != 1 else ''}")
+            if cfg.enabled:
+                enabled_count += 1
+        self._batch_count_label.setText(f"{enabled_count} item{'s' if enabled_count != 1 else ''}")
         self._batch_queue_list.blockSignals(False)
 
     def _on_batch_item_changed(self, item: QListWidgetItem) -> None:
@@ -2919,6 +3017,8 @@ class PlaylistWindow(QMainWindow):
         if 0 <= row < len(self._batch_configs):
             self._batch_configs[row].enabled = (item.checkState() == Qt.CheckState.Checked)
             self._batch_save_configs()
+            enabled_count = sum(1 for cfg in self._batch_configs if cfg.enabled)
+            self._batch_count_label.setText(f"{enabled_count} item{'s' if enabled_count != 1 else ''}")
 
     def _batch_remove_selected(self) -> None:
         rows = sorted(
@@ -2982,6 +3082,7 @@ class PlaylistWindow(QMainWindow):
             show_cleared=self._cb_sts_cleared.isChecked(),
             show_nf=self._cb_sts_nf.isChecked(),
             show_unplayed=self._cb_sts_unplayed.isChecked(),
+            show_queued=self._cb_sts_queued.isChecked(),
             cat_true=self._cb_cat_true.isChecked() if is_acc_any else True,
             cat_standard=self._cb_cat_standard.isChecked() if is_acc_any else True,
             cat_tech=self._cb_cat_tech.isChecked() if is_acc_any else True,
@@ -3031,6 +3132,7 @@ class PlaylistWindow(QMainWindow):
                 show_cleared=not p.uncleared,
                 show_nf=True,
                 show_unplayed=True,
+                show_queued=False,
                 cat_true=cat_true,
                 cat_standard=cat_standard,
                 cat_tech=cat_tech,
@@ -3046,6 +3148,7 @@ class PlaylistWindow(QMainWindow):
                     existing.show_cleared == new.show_cleared and
                     existing.show_nf == new.show_nf and
                     existing.show_unplayed == new.show_unplayed and
+                    existing.show_queued == new.show_queued and
                     existing.cat_true == new.cat_true and
                     existing.cat_standard == new.cat_standard and
                     existing.cat_tech == new.cat_tech
@@ -3131,6 +3234,7 @@ class PlaylistWindow(QMainWindow):
                 show_cleared=not p.uncleared,
                 show_nf=True,
                 show_unplayed=True,
+                show_queued=False,
                 cat_true=cat_true,
                 cat_standard=cat_standard,
                 cat_tech=cat_tech,
@@ -3333,6 +3437,11 @@ class PlaylistWindow(QMainWindow):
         show_cleared = self._cb_sts_cleared.isChecked()
         show_nf = self._cb_sts_nf.isChecked()
         show_unplayed = self._cb_sts_unplayed.isChecked()
+        show_queued = self._cb_sts_queued.isChecked() and (
+            self._rb_acc_rl.isChecked() or (
+                self._rb_open.isChecked() and self._svc_combo.currentData() == "accsaber_rl"
+            )
+        )
         rl_mode = self._rb_acc.isChecked() or self._rb_acc_rl.isChecked()
         cat_filter: Optional[set] = None
         if rl_mode:
@@ -3356,12 +3465,16 @@ class PlaylistWindow(QMainWindow):
                 if not all(any(kw in t for t in targets) for kw in keywords):
                     continue
             # ステータスフィルタ
-            if e.cleared and not show_cleared:
-                continue
-            if e.nf_clear and not show_nf:
-                continue
-            if not e.played and not show_unplayed:
-                continue
+            if e.pending:
+                if not show_queued:
+                    continue
+            else:
+                if e.cleared and not show_cleared:
+                    continue
+                if e.nf_clear and not show_nf:
+                    continue
+                if not e.played and not show_unplayed:
+                    continue
             # カテゴリフィルタ (AccSaber RL)
             if cat_filter is not None and e.acc_category not in cat_filter:
                 continue
@@ -3402,7 +3515,7 @@ class PlaylistWindow(QMainWindow):
             table.setItem(row, _COL_STATUS, status_item)
 
             # 曲名
-            table.setItem(row, _COL_SONG, QTableWidgetItem(e.display_song_name))
+            table.setItem(row, _COL_SONG, QTableWidgetItem(e.song_name))
             # プレイ日時
             #プレイ日時は左寄せ
             played_at_item = _played_at_item(e.played_at_ts)
