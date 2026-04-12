@@ -13,7 +13,6 @@
       "stats"   → MyBeatSaberStats.exe のみ (デフォルト)
       "ranking" → MyBeatSaberRanking.exe のみ
       "all"     → 両方ビルド
-      "patcher" → パッチ適用プログラム + パッチフォルダを生成
 
 .PARAMETER Version
     リリースバージョン (例: 1.0.1)。指定すると version.json を更新する。
@@ -29,7 +28,7 @@
 #>
 
 param(
-    [ValidateSet("stats", "ranking", "all", "patcher")]
+    [ValidateSet("stats", "ranking", "all")]
     [string]$Target = "stats",
 
     [string]$Version = "",
@@ -270,16 +269,6 @@ if ($Target -eq "stats" -or $Target -eq "ranking" -or $Target -eq "all") {
             "System.Web.Extensions.dll"
         )
 }
-if ($Target -eq "patcher") {
-    $csc = Get-CSharpCompiler
-    Write-Host "  csc: $csc"
-
-    $patcherReleaseDir = Join-Path $ReleaseDir "MyBeatSaberPatcher"
-    if (Test-Path $patcherReleaseDir) {
-        Remove-Item $patcherReleaseDir -Recurse -Force
-    }
-    New-Item $patcherReleaseDir -ItemType Directory -Force | Out-Null
-}
 
 # ─────────────────────────────────────────────
 # 共通ファイルのコピー (version.json)
@@ -337,78 +326,6 @@ if ($Target -eq "ranking" -or $Target -eq "all") {
     Copy-CommonFiles "MyBeatSaberRanking"
 }
 
-# patcher ターゲット: patch/ フォルダを生成
-if ($Target -eq "patcher") {
-    Write-Host "  パッチフォルダを生成中..." -ForegroundColor Yellow
-
-    $patcherReleaseDir = Join-Path $ReleaseDir "MyBeatSaberPatcher"
-    $patchContentDir   = Join-Path $patcherReleaseDir "patch"
-    $patchPayloadZip   = Join-Path $patcherReleaseDir "patch_payload.zip"
-    $managedRoots = Get-ManagedInternalRoots
-
-    if (Test-Path $patchContentDir) {
-        Remove-Item $patchContentDir -Recurse -Force
-    }
-
-    Write-Host "  patcher 用に MyBeatSaberStats 本体をビルドします..." -ForegroundColor Cyan
-    Build-Spec "MyBeatSaberStats.spec" "MyBeatSaberStats"
-    Copy-CommonFiles "MyBeatSaberStats"
-
-    foreach ($rootName in $managedRoots) {
-        $statsDistDir = Join-Path $ScriptDir "dist\MyBeatSaberStats\_internal\$rootName"
-        $patchDir = Join-Path $patchContentDir $rootName
-        if (-not (Test-Path $statsDistDir)) {
-            Write-Error "patcher 用の $rootName フォルダが見つかりません: $statsDistDir"
-            exit 1
-        }
-        New-Item $patchDir -ItemType Directory -Force | Out-Null
-        Copy-Item "$statsDistDir\*" $patchDir -Recurse -Force
-        Write-Host "  dist/MyBeatSaberStats/_internal/$rootName/ → $patchDir"
-    }
-
-    # patch/version.json をコピー
-    Copy-Item "$ScriptDir\version.json" "$patchContentDir\version.json" -Force
-    Write-Host "  version.json → $patchContentDir"
-
-    Write-Host "  埋め込み用 patch_payload.zip を作成中..." -ForegroundColor Cyan
-    if (Test-Path $patchPayloadZip) {
-        Remove-Item $patchPayloadZip -Force
-    }
-    Compress-Archive -Path "$patchContentDir\*" -DestinationPath $patchPayloadZip -CompressionLevel Optimal
-
-    Write-Host ""
-    Write-Host "[BUILD] apply_patch.cs を csc.exe でビルド中..." -ForegroundColor Cyan
-
-    $outExe  = Join-Path $patcherReleaseDir "apply_patch.exe"
-    $srcCs   = Join-Path $ScriptDir "apply_patch.cs"
-    $iconIco = Join-Path $ScriptDir "resources\app_icon.ico"
-
-    $cscArgs = @(
-        "/nologo",
-        "/target:winexe",
-        "/out:`"$outExe`"",
-        "/reference:System.Windows.Forms.dll",
-        "/reference:System.Drawing.dll",
-        "/reference:System.IO.Compression.dll",
-        "/reference:System.IO.Compression.FileSystem.dll",
-        "/resource:`"$patchPayloadZip`",patch_payload.zip",
-        "`"$srcCs`""
-    )
-    if (Test-Path $iconIco) {
-        $cscArgs = @("/win32icon:`"$iconIco`"") + $cscArgs
-    }
-
-    & $csc @cscArgs
-    if ($LASTEXITCODE -ne 0) {
-        Write-Error "csc.exe が失敗しました (exit code $LASTEXITCODE)"
-        exit $LASTEXITCODE
-    }
-    Write-Host "  → $outExe" -ForegroundColor Green
-
-    Remove-Item $patchPayloadZip -Force
-    Remove-Item $patchContentDir -Recurse -Force
-}
-
 # ─────────────────────────────────────────────
 # 完了メッセージ
 # ─────────────────────────────────────────────
@@ -427,16 +344,6 @@ if ($Target -eq "ranking" -or $Target -eq "all") {
     $size = (Get-ChildItem $path -Recurse -File | Measure-Object -Property Length -Sum).Sum
     Write-Host ("  MyBeatSaberRanking: {0:N0} MB" -f ($size / 1MB)) -ForegroundColor Cyan
     Write-Host "    フォルダ: $path"
-}
-if ($Target -eq "patcher") {
-    $path = Join-Path $ReleaseDir "MyBeatSaberPatcher"
-    $size = (Get-ChildItem $path -Recurse -File | Measure-Object -Property Length -Sum).Sum
-    Write-Host ("  MyBeatSaberPatcher: {0:N0} MB" -f ($size / 1MB)) -ForegroundColor Cyan
-    Write-Host "    フォルダ: $path"
-    Write-Host ""
-    Write-Host "配布手順 (patcher):" -ForegroundColor Cyan
-    Write-Host "  release\MyBeatSaberPatcher\apply_patch.exe を単体で配布"
-    Write-Host "  ユーザーは apply_patch.exe を MyBeatSaberStats フォルダに置いて実行"
 }
 
 Write-Host ""
