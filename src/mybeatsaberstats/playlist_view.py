@@ -1584,17 +1584,14 @@ def _pregenerate_covers(configs: "List[_BatchConfig]") -> Dict[str, str]:
 def _config_export_tag(cfg: "_BatchConfig") -> str:
     """_BatchConfig のフィルタ・ソート条件からファイル名タグを生成する。"""
     parts: List[str] = []
-    sts = []
-    if cfg.show_cleared:
-        sts.append("Cleared")
-    if cfg.show_nf:
-        sts.append("NF")
-    if cfg.show_unplayed:
-        sts.append("Unplayed")
-    if cfg.show_queued:
-        sts.append("Que")
-    if len(sts) < 4:
-        parts.append("+".join(sts) if sts else "none")
+    status_tag = _status_filter_tag(
+        cfg.show_cleared,
+        cfg.show_nf,
+        cfg.show_unplayed,
+        cfg.show_queued,
+    )
+    if status_tag is not None:
+        parts.append(status_tag)
     if cfg.star_min > 0.0 or cfg.star_max < 20.0:
         parts.append(f"star{cfg.star_min:g}-{cfg.star_max:g}")
     if cfg.source in ("rl", "acc"):
@@ -1663,6 +1660,29 @@ _SRC_LABEL: Dict[str, str] = {
 }
 
 
+def _status_filter_tag(
+    show_cleared: bool,
+    show_nf: bool,
+    show_unplayed: bool,
+    show_queued: bool,
+) -> Optional[str]:
+    if show_cleared and show_nf and show_unplayed:
+        if show_queued:
+            return "+Q"
+        return None
+
+    parts: List[str] = []
+    if show_cleared:
+        parts.append("Cleared")
+    if show_nf:
+        parts.append("NF")
+    if show_unplayed:
+        parts.append("Unplayed")
+    if show_queued:
+        parts.append("Q")
+    return "+".join(parts) if parts else "none"
+
+
 def _playlist_title(
     cfg: "_BatchConfig",
     star_group: Optional[int] = None,
@@ -1690,20 +1710,15 @@ def _playlist_title(
             head = src
 
     # --- フィルター部分（全ステータスが有効な場合は省略）---
-    filter_parts: List[str] = []
-    if not (cfg.show_cleared and cfg.show_nf and cfg.show_unplayed and cfg.show_queued):
-        if cfg.show_nf:
-            filter_parts.append("NF")
-        if cfg.show_unplayed:
-            filter_parts.append("Unplayed")
-        if cfg.show_cleared:
-            filter_parts.append("Cleared")
-        if cfg.show_queued:
-            filter_parts.append("Que")
-    filter_str = "+".join(filter_parts)
+    filter_str = _status_filter_tag(
+        cfg.show_cleared,
+        cfg.show_nf,
+        cfg.show_unplayed,
+        cfg.show_queued,
+    ) or ""
 
     if cfg.song_filter:
-        filter_parts.append(f'"{cfg.song_filter}"')
+        filter_parts = [p for p in [filter_str, f'"{cfg.song_filter}"'] if p]
         filter_str = "+".join(filter_parts)
 
     parts = [p for p in [head, filter_str, sort_sym] if p]
@@ -2105,7 +2120,7 @@ class PlaylistWindow(QMainWindow):
         export_row.setSpacing(12)
 
         # Split 条件
-        export_row.addWidget(QLabel("Style:"))
+        export_row.addWidget(QLabel("Style:  "))
         self._export_style_grp = QButtonGroup(self)
         self._rb_exp_single = QRadioButton("Single file")
         self._rb_exp_single.setToolTip("単一ファイルとして出力します")
@@ -2214,6 +2229,12 @@ class PlaylistWindow(QMainWindow):
         _batch_title.setStyleSheet("font-weight: bold; font-size: 13px;")
         _batch_title_row.addWidget(_batch_title)
         _batch_title_row.addStretch()
+        self._btn_bq_load = QPushButton("Load")
+        self._btn_bq_load.setToolTip("選択中の1件から Source / Filter / Export Style を復元")
+        self._btn_bq_load.setEnabled(False)
+        self._btn_bq_load.clicked.connect(self._batch_restore_selected)
+        _register_secondary_buttons(self._btn_bq_load)
+        _batch_title_row.addWidget(self._btn_bq_load)
         self._btn_preview_cover = QPushButton("🖼️ Playlist Covers")
         _register_secondary_buttons(self._btn_preview_cover)
         self._btn_preview_cover.setToolTip("出力フォルダを選んで .bplist のカバー画像を一覧表示します")
@@ -2240,16 +2261,17 @@ class PlaylistWindow(QMainWindow):
         self._batch_count_label = QLabel("0 items")
         _queue_btn_row.addWidget(self._batch_count_label)
         _queue_btn_row.addStretch()
-        _btn_bq_remove = QPushButton("Remove")
-        _btn_bq_remove.setToolTip("選択行を削除")
-        _btn_bq_remove.clicked.connect(self._batch_remove_selected)
-        _queue_btn_row.addWidget(_btn_bq_remove)
+        self._btn_bq_remove = QPushButton("Remove")
+        self._btn_bq_remove.setToolTip("選択行を削除")
+        self._btn_bq_remove.setEnabled(False)
+        self._btn_bq_remove.clicked.connect(self._batch_remove_selected)
+        _queue_btn_row.addWidget(self._btn_bq_remove)
         _btn_bq_clear = QPushButton("Clear")
         _btn_bq_clear.setToolTip("すべてを削除")
         _btn_bq_clear.clicked.connect(self._batch_clear)
         _queue_btn_row.addWidget(_btn_bq_clear)
-        _register_secondary_buttons(_btn_bq_all, _btn_bq_none, _btn_bq_remove, _btn_bq_clear)
-        _set_nonshrinking_button_width(_btn_bq_all, _btn_bq_none, _btn_bq_remove, _btn_bq_clear)
+        _register_secondary_buttons(_btn_bq_all, _btn_bq_none, self._btn_bq_remove, _btn_bq_clear)
+        _set_nonshrinking_button_width(_btn_bq_all, _btn_bq_none, self._btn_bq_load, self._btn_bq_remove, _btn_bq_clear)
         _top_layout.addLayout(_queue_btn_row)
 
         _export_all_btn_row = QHBoxLayout()
@@ -2315,11 +2337,11 @@ class PlaylistWindow(QMainWindow):
 
         _right_w.setMinimumWidth(max(
             180,
-            _batch_title.sizeHint().width() + self._btn_preview_cover.sizeHint().width() + 48,
+            _batch_title.sizeHint().width() + self._btn_bq_load.minimumWidth() + self._btn_preview_cover.sizeHint().width() + 64,
             self._batch_count_label.sizeHint().width()
             + _btn_bq_all.minimumWidth()
             + _btn_bq_none.minimumWidth()
-            + _btn_bq_remove.minimumWidth()
+            + self._btn_bq_remove.minimumWidth()
             + _btn_bq_clear.minimumWidth()
             + 72,
             _btn_pa.minimumWidth() + _btn_pn.minimumWidth() + self._btn_add_presets.minimumWidth() + 56,
@@ -2339,6 +2361,7 @@ class PlaylistWindow(QMainWindow):
         self._export_sigs.progress.connect(self._on_export_progress)
         self._batch_progress_dlg: Optional[QProgressDialog] = None
         self._batch_queue_list.itemChanged.connect(self._on_batch_item_changed)
+        self._batch_queue_list.itemSelectionChanged.connect(self._update_batch_queue_actions)
         self._batch_refresh_queue()
 
         # スプリッタ初期サイズ: 左を広く、右パネルを 252px
@@ -2612,18 +2635,14 @@ class PlaylistWindow(QMainWindow):
         parts: List[str] = []
 
         # ステータス
-        sts_parts: List[str] = []
-        if self._cb_sts_cleared.isChecked():
-            sts_parts.append("cleared")
-        if self._cb_sts_nf.isChecked():
-            sts_parts.append("nf")
-        if self._cb_sts_unplayed.isChecked():
-            sts_parts.append("unplayed")
-        if self._cb_sts_queued.isChecked():
-            sts_parts.append("que")
-        # 全チェックならタグなし（デフォルト）
-        if len(sts_parts) < 4:
-            parts.append("+".join(sts_parts) if sts_parts else "none")
+        status_tag = _status_filter_tag(
+            self._cb_sts_cleared.isChecked(),
+            self._cb_sts_nf.isChecked(),
+            self._cb_sts_unplayed.isChecked(),
+            self._cb_sts_queued.isChecked(),
+        )
+        if status_tag is not None:
+            parts.append(status_tag)
 
         # 検索テキスト
         search = self._search_edit.text().strip()
@@ -3010,6 +3029,70 @@ class PlaylistWindow(QMainWindow):
                 enabled_count += 1
         self._batch_count_label.setText(f"{enabled_count} item{'s' if enabled_count != 1 else ''}")
         self._batch_queue_list.blockSignals(False)
+        self._update_batch_queue_actions()
+
+    def _update_batch_queue_actions(self) -> None:
+        selected_count = len(self._batch_queue_list.selectedItems())
+        self._btn_bq_load.setEnabled(selected_count == 1)
+        self._btn_bq_remove.setEnabled(selected_count >= 1)
+
+    def _batch_restore_selected(self) -> None:
+        rows = sorted({self._batch_queue_list.row(item) for item in self._batch_queue_list.selectedItems()})
+        if len(rows) != 1:
+            return
+        row = rows[0]
+        if not (0 <= row < len(self._batch_configs)):
+            return
+        cfg = self._batch_configs[row]
+
+        radio_map = {
+            "ss": self._rb_ss,
+            "bl": self._rb_bl,
+            "acc": self._rb_acc,
+            "rl": self._rb_acc_rl,
+        }
+        source_button = radio_map.get(cfg.source)
+        if source_button is None:
+            QMessageBox.information(self, "Batch Load", f"Unsupported source: {cfg.source}")
+            return
+
+        self._reset_filters()
+        source_button.setChecked(True)
+
+        widgets = [
+            self._search_edit,
+            self._star_min,
+            self._star_max,
+            self._cb_sts_cleared,
+            self._cb_sts_nf,
+            self._cb_sts_unplayed,
+            self._cb_sts_queued,
+            self._cb_cat_true,
+            self._cb_cat_standard,
+            self._cb_cat_tech,
+            self._rb_exp_single,
+            self._rb_exp_split,
+        ]
+        for widget in widgets:
+            widget.blockSignals(True)
+        try:
+            self._search_edit.setText(cfg.song_filter)
+            self._star_min.setValue(cfg.star_min)
+            self._star_max.setValue(cfg.star_max)
+            self._cb_sts_cleared.setChecked(cfg.show_cleared)
+            self._cb_sts_nf.setChecked(cfg.show_nf)
+            self._cb_sts_unplayed.setChecked(cfg.show_unplayed)
+            self._cb_sts_queued.setChecked(cfg.show_queued)
+            self._cb_cat_true.setChecked(cfg.cat_true)
+            self._cb_cat_standard.setChecked(cfg.cat_standard)
+            self._cb_cat_tech.setChecked(cfg.cat_tech)
+            self._rb_exp_single.setChecked(cfg.split_mode == "single")
+            self._rb_exp_split.setChecked(cfg.split_mode != "single")
+        finally:
+            for widget in widgets:
+                widget.blockSignals(False)
+
+        self._load_data(reset_filters=False)
 
     def _on_batch_item_changed(self, item: QListWidgetItem) -> None:
         """チェックボックスの変化を _BatchConfig.enabled に反映して保存する。"""
