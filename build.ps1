@@ -43,6 +43,17 @@ $Python    = Join-Path $ScriptDir ".venv\Scripts\python.exe"
 $ReleaseDir = Join-Path $ScriptDir "release"
 $UpdateTargetsPath = Join-Path $ScriptDir "resources\update_targets.json"
 
+function Get-CSharpCompiler {
+    foreach ($candidate in @(
+        "${env:WINDIR}\Microsoft.NET\Framework64\v4.0.30319\csc.exe",
+        "${env:WINDIR}\Microsoft.NET\Framework\v4.0.30319\csc.exe"
+    )) {
+        if (Test-Path $candidate) { return $candidate }
+    }
+    Write-Error "csc.exe が見つかりません。.NET Framework 4.x がインストールされているか確認してください。"
+    exit 1
+}
+
 function Get-ManagedInternalRoots {
     if (-not (Test-Path $UpdateTargetsPath)) {
         Write-Error "update_targets.json が見つかりません: $UpdateTargetsPath"
@@ -56,6 +67,58 @@ function Get-ManagedInternalRoots {
         exit 1
     }
     return $roots
+}
+
+function Get-ProcessesUnderPath {
+    param([string]$RootPath)
+
+    $normalizedRoot = [System.IO.Path]::GetFullPath($RootPath)
+    if (-not $normalizedRoot.EndsWith("\")) {
+        $normalizedRoot += "\"
+    }
+
+    $results = @()
+    foreach ($process in Get-Process) {
+        try {
+            $processPath = $process.MainModule.FileName
+        } catch {
+            continue
+        }
+        if (-not $processPath) {
+            continue
+        }
+        $normalizedProcessPath = [System.IO.Path]::GetFullPath($processPath)
+        if ($normalizedProcessPath.StartsWith($normalizedRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+            $results += [PSCustomObject]@{
+                Name = $process.ProcessName
+                Id = $process.Id
+                Path = $normalizedProcessPath
+            }
+        }
+    }
+    return $results
+}
+
+function Assert-ReleaseTargetNotRunning {
+    param([string]$TargetDir)
+
+    if (-not (Test-Path $TargetDir)) {
+        return
+    }
+
+    $locked = @(Get-ProcessesUnderPath -RootPath $TargetDir)
+    if ($locked.Count -eq 0) {
+        return
+    }
+
+    $details = ($locked | ForEach-Object { "  $($_.Name) (PID=$($_.Id))  $($_.Path)" }) -join [Environment]::NewLine
+    Write-Error (
+        "release フォルダを使用中のプロセスがあるためビルドできません。`n" +
+        "対象: $TargetDir`n" +
+        "次のプロセスを終了してから再実行してください。`n" +
+        $details
+    )
+    exit 1
 }
 
 # ─────────────────────────────────────────────
@@ -85,7 +148,12 @@ if ($Version -ne "") {
     # 先頭の "v" を除去して正規化
     $Version = $Version.TrimStart("v")
     Write-Host "[0/4] version.json を $currentVersion → $Version に更新中..." -ForegroundColor Yellow
-    @{ version = $Version } | ConvertTo-Json | Set-Content $VersionJsonPath -Encoding UTF8
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText(
+        $VersionJsonPath,
+        (@{ version = $Version } | ConvertTo-Json),
+        $utf8NoBom
+    )
     Write-Host "  完了: version.json = $Version" -ForegroundColor Green
     $currentVersion = $Version
 } else {
@@ -130,6 +198,8 @@ function Build-Spec {
     $srcDir  = Join-Path $ScriptDir "dist\$ExeName"
     $destDir = Join-Path $ReleaseDir $ExeName
 
+    Assert-ReleaseTargetNotRunning $destDir
+
     if (Test-Path $destDir) {
         Remove-Item $destDir -Recurse -Force
     }
@@ -138,6 +208,42 @@ function Build-Spec {
     Copy-Item "$srcDir\*" $destDir -Recurse -Force
 
     Write-Host "  → $destDir" -ForegroundColor Green
+}
+
+function Build-CSharpWinExe {
+    param(
+        [string]$SourceFile,
+        [string]$ExeName,
+        [string[]]$References
+    )
+
+    Write-Host ""
+    Write-Host "[BUILD] $SourceFile を csc.exe でビルド中..." -ForegroundColor Cyan
+
+    $csc = Get-CSharpCompiler
+    $outExe = Join-Path $ScriptDir "dist\$ExeName.exe"
+    $iconIco = Join-Path $ScriptDir "resources\app_icon.ico"
+
+    $cscArgs = @(
+        "/nologo",
+        "/target:winexe",
+        "/out:`"$outExe`""
+    )
+    foreach ($reference in $References) {
+        $cscArgs += "/reference:$reference"
+    }
+    if (Test-Path $iconIco) {
+        $cscArgs = @("/win32icon:`"$iconIco`"") + $cscArgs
+    }
+    $cscArgs += "`"$SourceFile`""
+
+    & $csc @cscArgs
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "csc.exe が失敗しました (exit code $LASTEXITCODE)"
+        exit $LASTEXITCODE
+    }
+
+    Write-Host "  → $outExe" -ForegroundColor Green
 }
 
 # ─────────────────────────────────────────────
@@ -152,19 +258,20 @@ if ($Target -eq "stats" -or $Target -eq "all") {
 if ($Target -eq "ranking" -or $Target -eq "all") {
     Build-Spec "MyBeatSaberRanking.spec" "MyBeatSaberRanking"
 }
+if ($Target -eq "stats" -or $Target -eq "ranking" -or $Target -eq "all") {
+    Build-CSharpWinExe `
+        (Join-Path $ScriptDir "Update.cs") `
+        "Update" `
+        @(
+            "System.Windows.Forms.dll",
+            "System.Drawing.dll",
+            "System.IO.Compression.dll",
+            "System.IO.Compression.FileSystem.dll",
+            "System.Web.Extensions.dll"
+        )
+}
 if ($Target -eq "patcher") {
-    # .NET Framework 4.x の csc.exe を検索（64bit → 32bit の順）
-    $csc = $null
-    foreach ($candidate in @(
-        "${env:WINDIR}\Microsoft.NET\Framework64\v4.0.30319\csc.exe",
-        "${env:WINDIR}\Microsoft.NET\Framework\v4.0.30319\csc.exe"
-    )) {
-        if (Test-Path $candidate) { $csc = $candidate; break }
-    }
-    if (-not $csc) {
-        Write-Error "csc.exe が見つかりません。.NET Framework 4.x がインストールされているか確認してください。"
-        exit 1
-    }
+    $csc = Get-CSharpCompiler
     Write-Host "  csc: $csc"
 
     $patcherReleaseDir = Join-Path $ReleaseDir "MyBeatSaberPatcher"
@@ -183,11 +290,18 @@ Write-Host "[3/4] 共通ファイルをコピー中..." -ForegroundColor Yellow
 function Copy-CommonFiles {
     param([string]$ExeName)
     $internalDir = Join-Path $ReleaseDir "$ExeName\_internal"
+    $appDir = Join-Path $ReleaseDir $ExeName
+    $updaterExe = Join-Path $ScriptDir "dist\Update.exe"
 
     # version.json は spec の datas で既に _internal/ にコピーされているが、念のため上書き
     if (Test-Path $internalDir) {
         Copy-Item "$ScriptDir\version.json" "$internalDir\version.json" -Force
         Write-Host "  version.json → $internalDir"
+    }
+
+    if (Test-Path $updaterExe) {
+        Copy-Item $updaterExe (Join-Path $appDir "Update.exe") -Force
+        Write-Host "  Update.exe → $appDir"
     }
 
     # ユーザーに紐づかないキャッシュファイルを release/<ExeName>/cache/ にコピーする
