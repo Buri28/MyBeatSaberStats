@@ -3552,7 +3552,7 @@ class PlayerWindow(QMainWindow):
             2: ["standard"],
             3: ["tech"],
         }
-        self.open_playlist_with_filter("acc", categories=_row_categories.get(row))
+        self.open_playlist_with_filter("acc", categories=_row_categories.get(row), sort_mode="status_asc")
 
     def _on_acc_ap_clicked(self, row: int, col: int) -> None:
         """AccSaber テーブルの AP 列クリックで Playlist 画面を AP 高順で開く。"""
@@ -3576,7 +3576,7 @@ class PlayerWindow(QMainWindow):
             2: ["standard"],
             3: ["tech"],
         }
-        self.open_playlist_with_filter("acc_rl", categories=_row_categories.get(row))
+        self.open_playlist_with_filter("acc_rl", categories=_row_categories.get(row), sort_mode="status_asc")
 
     def _on_acc_rl_ap_clicked(self, row: int, col: int) -> None:
         """AccSaber Reloaded テーブルの AP 列クリックで Playlist 画面を AP 高順で開く。"""

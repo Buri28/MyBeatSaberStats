@@ -68,16 +68,6 @@ def _count_non_pending_map_counts(all_maps: List[Dict]) -> Dict[str, int]:
     return counts
 
 
-def format_pending_song_name(song_name: str, is_pending: bool) -> str:
-    """pending 譜面なら曲名の末尾に [Pending] を付ける。"""
-    base_name = song_name or ""
-    if not is_pending:
-        return base_name
-    if base_name.endswith(" [Pending]"):
-        return base_name
-    return f"{base_name} [Pending]"
-
-
 def _load_map_counts_file_cache() -> Dict[str, Dict]:
     """ファイルキャッシュから前回の総譜面数を読み込む。"""
     try:
@@ -720,7 +710,7 @@ def build_unplayed_bplist(
             if song_hash not in songs_dict:
                 songs_dict[song_hash] = {
                     "hash": song_hash,
-                    "songName": format_pending_song_name(song.get("songName", ""), pending),
+                    "songName": song.get("songName", ""),
                     "difficulties": [],
                 }
             songs_dict[song_hash]["difficulties"].append(
