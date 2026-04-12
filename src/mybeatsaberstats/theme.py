@@ -335,11 +335,30 @@ QHeaderView::section:vertical {
     padding-right: 4px;
 }
 QScrollBar:horizontal, QScrollBar:vertical {
-    background: #2d2d2d;
+    background: #181818;
+    border: 1px solid #303030;
 }
 QScrollBar::handle:horizontal, QScrollBar::handle:vertical {
-    background: #5a5a5a;
+    background: #6f6f6f;
+    border: 1px solid #a8a8a8;
     border-radius: 4px;
+    min-height: 28px;
+    min-width: 28px;
+}
+QScrollBar::handle:horizontal:hover, QScrollBar::handle:vertical:hover {
+    background: #858585;
+    border-color: #c0c0c0;
+}
+QScrollBar::handle:horizontal:pressed, QScrollBar::handle:vertical:pressed {
+    background: #9a9a9a;
+    border-color: #d0d0d0;
+}
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal,
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+    background: transparent;
+    border: none;
+    width: 0px;
+    height: 0px;
 }
 QPushButton {
     background-color: #3a3a3a;
@@ -397,9 +416,33 @@ QProgressDialog QLabel {
 #  公開 API
 # ------------------------------------------------------------------ #
 
-# Windows がライトモードのとき: ネイティブ描画を壊さないよう QSS は最小限にする。
-# QPushButton を QSS で指定するとネイティブスタイルが無効になりボタンが小さくなるため含めない。
-_LIGHT_NATIVE_QSS = ""
+# Windows がライトモードのとき: ネイティブ描画を極力維持しつつ、見づらいスクロールバーだけ補正する。
+# QPushButton などは指定しない。スクロールバーのみ最小限の QSS を当てる。
+_LIGHT_NATIVE_QSS = """
+QScrollBar:horizontal, QScrollBar:vertical {
+    background: #efefef;
+    border: 1px solid #b8b8b8;
+}
+QScrollBar::handle:horizontal, QScrollBar::handle:vertical {
+    background: #7a7a7a;
+    border-radius: 4px;
+    min-height: 28px;
+    min-width: 28px;
+}
+QScrollBar::handle:horizontal:hover, QScrollBar::handle:vertical:hover {
+    background: #606060;
+}
+QScrollBar::handle:horizontal:pressed, QScrollBar::handle:vertical:pressed {
+    background: #4a4a4a;
+}
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal,
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+    background: transparent;
+    border: none;
+    width: 0px;
+    height: 0px;
+}
+"""
 
 # Windows がダークモードで強制ライトのとき: ネイティブダークスタイルを完全上書きする必要がある。
 _LIGHT_FORCED_QSS = """
@@ -424,11 +467,27 @@ QHeaderView::section:vertical {
     padding-right: 4px;
 }
 QScrollBar:horizontal, QScrollBar:vertical {
-    background: #f0f0f0;
+    background: #f3f3f3;
+    border: 1px solid #bbbbbb;
 }
 QScrollBar::handle:horizontal, QScrollBar::handle:vertical {
-    background: #c0c0c0;
+    background: #767676;
     border-radius: 4px;
+    min-height: 28px;
+    min-width: 28px;
+}
+QScrollBar::handle:horizontal:hover, QScrollBar::handle:vertical:hover {
+    background: #5f5f5f;
+}
+QScrollBar::handle:horizontal:pressed, QScrollBar::handle:vertical:pressed {
+    background: #4b4b4b;
+}
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal,
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+    background: transparent;
+    border: none;
+    width: 0px;
+    height: 0px;
 }
 QPushButton {
     background-color: #e1e1e1;
