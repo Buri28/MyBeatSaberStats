@@ -1660,6 +1660,40 @@ _SRC_LABEL: Dict[str, str] = {
 }
 
 
+def _sort_indicator_from_mode(sort_mode: str) -> Tuple[int, Qt.SortOrder]:
+    sort_col_map = {
+        "status_desc": (_COL_STATUS, Qt.SortOrder.DescendingOrder),
+        "status_asc": (_COL_STATUS, Qt.SortOrder.AscendingOrder),
+        "song_desc": (_COL_SONG, Qt.SortOrder.DescendingOrder),
+        "song_asc": (_COL_SONG, Qt.SortOrder.AscendingOrder),
+        "playtime_desc": (_COL_PLAY_TIME, Qt.SortOrder.DescendingOrder),
+        "playtime_asc": (_COL_PLAY_TIME, Qt.SortOrder.AscendingOrder),
+        "diff_desc": (_COL_DIFF, Qt.SortOrder.DescendingOrder),
+        "diff_asc": (_COL_DIFF, Qt.SortOrder.AscendingOrder),
+        "mode_desc": (_COL_MODE, Qt.SortOrder.DescendingOrder),
+        "mode_asc": (_COL_MODE, Qt.SortOrder.AscendingOrder),
+        "cat_desc": (_COL_ACC_CAT, Qt.SortOrder.DescendingOrder),
+        "cat_asc": (_COL_ACC_CAT, Qt.SortOrder.AscendingOrder),
+        "pp_high": (_COL_PLAYER_PP, Qt.SortOrder.DescendingOrder),
+        "pp_low": (_COL_PLAYER_PP, Qt.SortOrder.AscendingOrder),
+        "ap_high": (_COL_PLAYER_PP, Qt.SortOrder.DescendingOrder),
+        "ap_low": (_COL_PLAYER_PP, Qt.SortOrder.AscendingOrder),
+        "acc_high": (_COL_PLAYER_ACC, Qt.SortOrder.DescendingOrder),
+        "acc_low": (_COL_PLAYER_ACC, Qt.SortOrder.AscendingOrder),
+        "rank_low": (_COL_PLAYER_RANK, Qt.SortOrder.AscendingOrder),
+        "rank_high": (_COL_PLAYER_RANK, Qt.SortOrder.DescendingOrder),
+        "star_asc": (_COL_STARS, Qt.SortOrder.AscendingOrder),
+        "star_desc": (_COL_STARS, Qt.SortOrder.DescendingOrder),
+        "fc_desc": (_COL_FC, Qt.SortOrder.DescendingOrder),
+        "fc_asc": (_COL_FC, Qt.SortOrder.AscendingOrder),
+        "mapper_desc": (_COL_MAPPER, Qt.SortOrder.DescendingOrder),
+        "mapper_asc": (_COL_MAPPER, Qt.SortOrder.AscendingOrder),
+        "author_desc": (_COL_AUTHOR, Qt.SortOrder.DescendingOrder),
+        "author_asc": (_COL_AUTHOR, Qt.SortOrder.AscendingOrder),
+    }
+    return sort_col_map.get(sort_mode, (_COL_STATUS, Qt.SortOrder.DescendingOrder))
+
+
 def _status_filter_tag(
     show_cleared: bool,
     show_nf: bool,
@@ -2491,19 +2525,7 @@ class PlaylistWindow(QMainWindow):
         self._rb_exp_split.setChecked(True)
 
         # ソートインジケータを sort_mode に合わせて設定
-        _sort_col_map = {
-            "status_desc": (_COL_STATUS,    Qt.SortOrder.DescendingOrder),
-            "status_asc":  (_COL_STATUS,    Qt.SortOrder.AscendingOrder),
-            "playtime_desc": (_COL_PLAY_TIME, Qt.SortOrder.DescendingOrder),
-            "playtime_asc":  (_COL_PLAY_TIME, Qt.SortOrder.AscendingOrder),
-            "pp_high":     (_COL_PLAYER_PP, Qt.SortOrder.DescendingOrder),
-            "pp_low":      (_COL_PLAYER_PP, Qt.SortOrder.AscendingOrder),
-            "ap_high":     (_COL_PLAYER_PP, Qt.SortOrder.DescendingOrder),
-            "ap_low":      (_COL_PLAYER_PP, Qt.SortOrder.AscendingOrder),
-            "fc_desc":     (_COL_FC,        Qt.SortOrder.DescendingOrder),
-            "fc_asc":      (_COL_FC,        Qt.SortOrder.AscendingOrder),
-        }
-        sort_col, sort_order = _sort_col_map.get(sort_mode, (_COL_STATUS, Qt.SortOrder.DescendingOrder))
+        sort_col, sort_order = _sort_indicator_from_mode(sort_mode)
         self._table.horizontalHeader().setSortIndicator(sort_col, sort_order)
         self._update_sort_label()
 
@@ -3088,10 +3110,13 @@ class PlaylistWindow(QMainWindow):
             self._cb_cat_tech.setChecked(cfg.cat_tech)
             self._rb_exp_single.setChecked(cfg.split_mode == "single")
             self._rb_exp_split.setChecked(cfg.split_mode != "single")
+            sort_col, sort_order = _sort_indicator_from_mode(cfg.sort_mode)
+            self._table.horizontalHeader().setSortIndicator(sort_col, sort_order)
         finally:
             for widget in widgets:
                 widget.blockSignals(False)
 
+        self._update_sort_label()
         self._load_data(reset_filters=False)
 
     def _on_batch_item_changed(self, item: QListWidgetItem) -> None:
