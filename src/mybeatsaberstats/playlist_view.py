@@ -2235,8 +2235,41 @@ class PlaylistWindow(QMainWindow):
         self._table.setColumnWidth(_COL_MOD, 45)
         self._table.setColumnWidth(_COL_AUTHOR, 140)
         self._table.setColumnWidth(_COL_MAPPER, 120)
+        self._table.itemSelectionChanged.connect(self._update_selection_status)
 
         root.addWidget(self._table, 1)
+
+        self._selection_status_row = QWidget()
+        self._selection_status_row.setStyleSheet("background: transparent;")
+        _selection_status_layout = QHBoxLayout(self._selection_status_row)
+        _selection_status_layout.setContentsMargins(4, 0, 0, 0)
+        _selection_status_layout.setSpacing(0)
+        self._selection_status_label = QLabel("0 rows selected")
+        self._selection_status_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        self._selection_status_label.setMinimumHeight(18)
+        _selection_status_layout.addWidget(self._selection_status_label)
+        _selection_status_layout.addStretch()
+
+        self._btn_scroll_top = QPushButton("↑")
+        self._btn_scroll_top.setToolTip("一覧を一番上までスクロール")
+        self._btn_scroll_top.clicked.connect(self._scroll_table_to_top)
+        self._btn_scroll_bottom = QPushButton("↓")
+        self._btn_scroll_bottom.setToolTip("一覧を一番下までスクロール")
+        self._btn_scroll_bottom.clicked.connect(self._scroll_table_to_bottom)
+        _register_secondary_buttons(self._btn_scroll_top, self._btn_scroll_bottom)
+        self._btn_scroll_top.setFixedHeight(20)
+        self._btn_scroll_bottom.setFixedHeight(20)
+        self._btn_scroll_top.setFixedWidth(28)
+        self._btn_scroll_bottom.setFixedWidth(28)
+        self._btn_scroll_top.setStyleSheet("QPushButton { padding: 0px; }")
+        self._btn_scroll_bottom.setStyleSheet("QPushButton { padding: 0px; }")
+        _selection_status_layout.addWidget(self._btn_scroll_top)
+        _selection_status_layout.addSpacing(4)
+        _selection_status_layout.addWidget(self._btn_scroll_bottom)
+        root.addWidget(self._selection_status_row, 0)
+
+        self.statusBar().hide()
+        self._update_selection_status()
 
         # ─ Right panel: Batch Export ────────────────────────────────────
         _right_w = QWidget()
@@ -2359,6 +2392,7 @@ class PlaylistWindow(QMainWindow):
         self._btn_add_presets.clicked.connect(self._batch_add_presets)
         _preset_btn_row.addWidget(self._btn_add_presets)
         _bot_layout.addLayout(_preset_btn_row)
+
         self._btn_quick_export = QPushButton("📤 Quick Export")
         self._btn_quick_export.clicked.connect(self._quick_export_presets)
         self._btn_quick_export.setFixedHeight(26)
@@ -3532,6 +3566,12 @@ class PlaylistWindow(QMainWindow):
             return
         self._show_bplist_covers_dialog(f"Cover Preview — {Path(folder).name}", folder, bplist_files, [])
 
+    def _scroll_table_to_top(self) -> None:
+        self._table.scrollToTop()
+
+    def _scroll_table_to_bottom(self) -> None:
+        self._table.scrollToBottom()
+
     # ──────────────────────────────────────────────────────────────────────────
     # フィルタ
     # ──────────────────────────────────────────────────────────────────────────
@@ -3595,6 +3635,16 @@ class PlaylistWindow(QMainWindow):
     # ──────────────────────────────────────────────────────────────────────────
     # テーブル更新
     # ──────────────────────────────────────────────────────────────────────────
+
+    def _update_selection_status(self) -> None:
+        selection_model = self._table.selectionModel()
+        if selection_model is None:
+            selected_rows = 0
+        else:
+            selected_rows = len(selection_model.selectedRows())
+        self._selection_status_label.setText(
+            f"{selected_rows} row{'s' if selected_rows != 1 else ''} selected"
+        )
 
     def _refresh_table(self, entries: List[MapEntry]) -> None:
         table = self._table
@@ -3699,6 +3749,7 @@ class PlaylistWindow(QMainWindow):
             table.setItem(row, _COL_ACC_CAT, QTableWidgetItem(cat_text))
 
         table.setSortingEnabled(True)
+        self._update_selection_status()
 
     # ──────────────────────────────────────────────────────────────────────────
     # 一括出力
