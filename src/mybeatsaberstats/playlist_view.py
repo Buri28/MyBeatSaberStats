@@ -129,6 +129,237 @@ _EXPORT_DIR_PATH = _CACHE_DIR / "export_dir.json"
 _PLAYLIST_WINDOW_PATH = _CACHE_DIR / "playlist_window.json"
 
 
+def load_playlist_export_dir() -> str:
+    """前回のプレイリスト出力先フォルダを読み込む。"""
+    try:
+        if _EXPORT_DIR_PATH.exists():
+            data = json.loads(_EXPORT_DIR_PATH.read_text(encoding="utf-8"))
+            path = data.get("export_dir", "")
+            if path and Path(path).is_dir():
+                return path
+    except Exception:
+        pass
+    return ""
+
+
+def save_playlist_export_dir(folder: str) -> None:
+    """プレイリスト出力先フォルダを保存する。"""
+    try:
+        _EXPORT_DIR_PATH.write_text(
+            json.dumps({"export_dir": folder}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
+
+
+def load_playlist_batch_configs() -> List["_BatchConfig"]:
+    """保存済みの Batch Export 設定を読み込む。"""
+    try:
+        if _BATCH_CONFIG_PATH.exists():
+            data = json.loads(_BATCH_CONFIG_PATH.read_text(encoding="utf-8"))
+            return [_BatchConfig.from_dict(item) for item in data]
+    except Exception:
+        pass
+    return []
+
+
+def load_enabled_playlist_batch_configs() -> List["_BatchConfig"]:
+    """有効化されている Batch Export 設定だけを返す。"""
+    return [config for config in load_playlist_batch_configs() if config.enabled]
+
+
+def export_playlist_configs(
+    steam_id: Optional[str],
+    configs: List["_BatchConfig"],
+    folder_path: Path,
+    progress: Optional[Callable[[int, int, str], None]] = None,
+    covers: Optional[Dict[str, str]] = None,
+) -> Tuple[List[str], List[str]]:
+    """指定された Batch Export 設定を使って同期的にプレイリストを書き出す。"""
+    has_ss = any(config.source == "ss" for config in configs)
+    has_bl = any(config.source == "bl" for config in configs)
+    has_rl = any(config.source == "rl" for config in configs)
+    has_acc = any(config.source == "acc" for config in configs)
+
+    ss_maps: List[MapEntry] = []
+    bl_maps: List[MapEntry] = []
+    rl_maps: List[MapEntry] = []
+    acc_maps: List[MapEntry] = []
+
+    n_load = (1 if has_ss else 0) + (1 if has_bl else 0) + (1 if has_rl else 0) + (1 if has_acc else 0)
+    total = n_load + len(configs)
+    step = 0
+
+    def _emit(label: str) -> None:
+        if progress is not None:
+            progress(step, total, label)
+
+    if has_ss:
+        _emit("Loading SS ranked maps...")
+        ss_maps = load_ss_maps(steam_id)
+        step += 1
+    if has_bl:
+        _emit("Loading BL ranked maps...")
+        bl_maps = load_bl_maps(steam_id)
+        step += 1
+    if has_rl:
+        _emit("Fetching AccSaber RL maps...")
+
+        def _rl_prog(_done: int, _total: int, label: str) -> None:
+            if progress is not None:
+                progress(step, total, label)
+
+        rl_maps = load_accsaber_reloaded_maps(steam_id, "all", on_progress=_rl_prog)
+        step += 1
+    if has_acc:
+        _emit("Fetching AccSaber maps...")
+
+        def _acc_prog(_done: int, _total: int, label: str) -> None:
+            if progress is not None:
+                progress(step, total, label)
+
+        acc_maps = load_accsaber_maps(steam_id, "all", on_progress=_acc_prog)
+        step += 1
+
+    folder_path.mkdir(parents=True, exist_ok=True)
+    resolved_covers = covers if covers is not None else _pregenerate_covers(configs)
+    saved_files: List[str] = []
+    errors: List[str] = []
+
+    for config in configs:
+        _emit(f"Exporting: {config.label}...")
+        try:
+            base_maps = {"ss": ss_maps, "bl": bl_maps, "rl": rl_maps, "acc": acc_maps}.get(config.source, [])
+            maps = _apply_config_filter(list(base_maps), config)
+            _write_config_files(maps, config, folder_path, saved_files, errors, resolved_covers)
+        except Exception as exc:
+            errors.append(f"{config.label}: {exc}")
+        step += 1
+
+    return saved_files, errors
+
+
+def export_all_playlist_batches(
+    steam_id: Optional[str],
+    folder_path: Path,
+    progress: Optional[Callable[[int, int, str], None]] = None,
+) -> Tuple[List[str], List[str]]:
+    """有効な Batch Export 設定をすべて使って同期的にプレイリストを書き出す。"""
+    configs = load_enabled_playlist_batch_configs()
+    if not configs:
+        return [], []
+    return export_playlist_configs(steam_id, configs, folder_path, progress=progress)
+
+
+def show_bplist_covers_dialog(
+    parent: Optional[QWidget],
+    title: str,
+    folder: str,
+    filenames: List[str],
+    errors: List[str],
+) -> None:
+    """保存済み .bplist ファイルのカバー画像をサムネイルグリッドで表示する。"""
+    import base64 as _b64
+
+    dlg = QDialog(parent)
+    dlg.setWindowTitle("Export Complete" if title.startswith("Export Complete") else title)
+    dlg.resize(720, 540)
+
+    outer = QVBoxLayout(dlg)
+    outer.setSpacing(8)
+    outer.setContentsMargins(12, 12, 12, 12)
+
+    title_lbl = QLabel(title)
+    title_lbl.setStyleSheet("font-weight: bold; font-size: 13px;")
+    outer.addWidget(title_lbl)
+
+    folder_row = QHBoxLayout()
+    summary_lbl = QLabel(f"{len(filenames)} file(s) saved to:  {folder}")
+    summary_lbl.setWordWrap(True)
+    folder_row.addWidget(summary_lbl, 1)
+    btn_open_folder = QPushButton("Open Folder")
+    btn_open_folder.setFixedWidth(100)
+    btn_open_folder.clicked.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(folder)))
+    folder_row.addWidget(btn_open_folder)
+    outer.addLayout(folder_row)
+
+    scroll = QScrollArea()
+    scroll.setWidgetResizable(True)
+    scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+    grid_widget = QWidget()
+    grid = QGridLayout(grid_widget)
+    grid.setSpacing(10)
+    grid.setContentsMargins(8, 8, 8, 8)
+    scroll.setWidget(grid_widget)
+
+    cols = 5
+    thumb = 100
+
+    for idx, fname in enumerate(filenames):
+        fpath = Path(folder) / fname
+        pm = QPixmap()
+        try:
+            data = json.loads(fpath.read_text(encoding="utf-8"))
+            img_data = data.get("image", "")
+            if img_data.startswith("data:"):
+                raw = _b64.b64decode(img_data.split(",", 1)[1])
+                pm.loadFromData(raw)
+        except Exception:
+            pass
+
+        img_lbl = QLabel()
+        if not pm.isNull():
+            img_lbl.setPixmap(
+                pm.scaled(
+                    thumb,
+                    thumb,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+            )
+        else:
+            img_lbl.setText("(no image)")
+        img_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        img_lbl.setFixedSize(thumb + 4, thumb + 4)
+        img_lbl.setStyleSheet("border: 1px solid #555; background: #1a1a1a;")
+
+        short = fname if len(fname) <= 16 else fname[:7] + "…" + fname[-7:]
+        name_lbl = QLabel(short)
+        name_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        name_lbl.setWordWrap(True)
+        name_lbl.setMaximumWidth(thumb + 4)
+        name_lbl.setToolTip(fname)
+
+        cell = QWidget()
+        cell_layout = QVBoxLayout(cell)
+        cell_layout.setSpacing(2)
+        cell_layout.setContentsMargins(0, 0, 0, 0)
+        cell_layout.addWidget(img_lbl)
+        cell_layout.addWidget(name_lbl)
+
+        row, col = divmod(idx, cols)
+        grid.addWidget(cell, row, col)
+
+    outer.addWidget(scroll, 1)
+
+    if errors:
+        err_lbl = QLabel("Errors:\n" + "\n".join(errors[:10]))
+        err_lbl.setStyleSheet("color: #ff6666;")
+        err_lbl.setWordWrap(True)
+        outer.addWidget(err_lbl)
+
+    btn_row = QHBoxLayout()
+    btn_row.addStretch()
+    btn_ok = QPushButton("OK")
+    btn_ok.setDefault(True)
+    btn_ok.clicked.connect(dlg.accept)
+    btn_row.addWidget(btn_ok)
+    outer.addLayout(btn_row)
+
+    dlg.exec()
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # データクラス
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1827,61 +2058,14 @@ def _run_export_configs(
     """バッチ設定リストを使って最新データをロードしてエクスポートする（スレッド実行）。
     完了時: sigs.finished.emit([saved_files, errors])
     """
-    has_ss = any(c.source == "ss" for c in configs)
-    has_bl = any(c.source == "bl" for c in configs)
-    has_rl = any(c.source == "rl" for c in configs)
-    has_acc = any(c.source == "acc" for c in configs)
-
-    ss_maps: List[MapEntry] = []
-    bl_maps: List[MapEntry] = []
-    rl_maps: List[MapEntry] = []
-    acc_maps: List[MapEntry] = []
-
-    n_load = (1 if has_ss else 0) + (1 if has_bl else 0) + (1 if has_rl else 0) + (1 if has_acc else 0)
-    total = n_load + len(configs)
-    step = 0
-
     try:
-        if has_ss:
-            sigs.progress.emit(step, total, "Loading SS ranked maps...")
-            ss_maps = load_ss_maps(steam_id)
-            step += 1
-        if has_bl:
-            sigs.progress.emit(step, total, "Loading BL ranked maps...")
-            bl_maps = load_bl_maps(steam_id)
-            step += 1
-        if has_rl:
-            _rl_step = step
-
-            def _rl_prog(d: int, t: int, label: str) -> None:
-                sigs.progress.emit(_rl_step, total, label)
-
-            sigs.progress.emit(step, total, "Fetching AccSaber RL maps...")
-            rl_maps = load_accsaber_reloaded_maps(steam_id, "all", on_progress=_rl_prog)
-            step += 1
-        if has_acc:
-            _acc_step = step
-
-            def _acc_prog(d: int, t: int, label: str) -> None:
-                sigs.progress.emit(_acc_step, total, label)
-
-            sigs.progress.emit(step, total, "Fetching AccSaber maps...")
-            acc_maps = load_accsaber_maps(steam_id, "all", on_progress=_acc_prog)
-            step += 1
-
-        saved_files: List[str] = []
-        errors: List[str] = []
-
-        for cfg in configs:
-            sigs.progress.emit(step, total, f"Exporting: {cfg.label}...")
-            try:
-                base = {"ss": ss_maps, "bl": bl_maps, "rl": rl_maps, "acc": acc_maps}.get(cfg.source, [])
-                maps = _apply_config_filter(list(base), cfg)
-                _write_config_files(maps, cfg, folder_path, saved_files, errors, covers)
-            except Exception as exc:
-                errors.append(f"{cfg.label}: {exc}")
-            step += 1
-
+        saved_files, errors = export_playlist_configs(
+            steam_id,
+            configs,
+            folder_path,
+            progress=lambda done, total, label: sigs.progress.emit(done, total, label),
+            covers=covers,
+        )
         sigs.finished.emit([saved_files, errors])
     except Exception as top_exc:
         sigs.error.emit(str(top_exc))
@@ -2049,7 +2233,7 @@ class PlaylistWindow(QMainWindow):
             " QPushButton:pressed { background-color: #1565C0; }"
             " QPushButton:disabled { background-color: #555; color: #aaa; }"
         )
-        self._btn_load.clicked.connect(self._load_data)
+        self._btn_load.clicked.connect(self._on_load_clicked)
         src_row2.addWidget(self._btn_load)
         src_vbox.addLayout(src_row2)
 
@@ -2420,8 +2604,8 @@ class PlaylistWindow(QMainWindow):
         _right_splitter.setSizes([300, 250])
 
         # ── バッチ状態 ──
-        self._export_dir: str = self._load_export_dir()
-        self._batch_configs: List[_BatchConfig] = self._batch_load_configs()
+        self._export_dir: str = load_playlist_export_dir()
+        self._batch_configs: List[_BatchConfig] = load_playlist_batch_configs()
         self._export_sigs = _LoadSignals()
         self._export_sigs.finished.connect(self._on_export_finished)
         self._export_sigs.error.connect(self._on_export_error)
@@ -2821,6 +3005,9 @@ class PlaylistWindow(QMainWindow):
         self._reset_filters()
         self._apply_filter()
 
+    def _on_load_clicked(self) -> None:
+        self._load_data()
+
     # ──────────────────────────────────────────────────────────────────────────
     # データ読み込み
     # ──────────────────────────────────────────────────────────────────────────
@@ -3023,36 +3210,16 @@ class PlaylistWindow(QMainWindow):
 
     def _load_export_dir(self) -> str:
         """前回のエクスポート先フォルダを読み込む。"""
-        try:
-            if _EXPORT_DIR_PATH.exists():
-                d = json.loads(_EXPORT_DIR_PATH.read_text(encoding="utf-8"))
-                path = d.get("export_dir", "")
-                if path and Path(path).is_dir():
-                    return path
-        except Exception:
-            pass
-        return ""
+        return load_playlist_export_dir()
 
     def _save_export_dir(self, folder: str) -> None:
         """エクスポート先フォルダを保存する。"""
         self._export_dir = folder
-        try:
-            _EXPORT_DIR_PATH.write_text(
-                json.dumps({"export_dir": folder}, ensure_ascii=False),
-                encoding="utf-8",
-            )
-        except Exception:
-            pass
+        save_playlist_export_dir(folder)
 
     def _batch_load_configs(self) -> "List[_BatchConfig]":
         """保存済みバッチ設定を読み込む。"""
-        try:
-            if _BATCH_CONFIG_PATH.exists():
-                data = json.loads(_BATCH_CONFIG_PATH.read_text(encoding="utf-8"))
-                return [_BatchConfig.from_dict(d) for d in data]
-        except Exception:
-            pass
-        return []
+        return load_playlist_batch_configs()
 
     def _batch_save_configs(self) -> None:
         """バッチ設定をファイルに保存する。"""
@@ -3456,102 +3623,7 @@ class PlaylistWindow(QMainWindow):
         filenames: List[str],
         errors: List[str],
     ) -> None:
-        """保存済み .bplist ファイルのカバー画像をサムネイルグリッドで表示する。"""
-        import base64 as _b64
-
-        dlg = QDialog(self)
-        dlg.setWindowTitle("Export Complete" if title.startswith("Export Complete") else title)
-        dlg.resize(720, 540)
-
-        outer = QVBoxLayout(dlg)
-        outer.setSpacing(8)
-        outer.setContentsMargins(12, 12, 12, 12)
-
-        title_lbl = QLabel(title)
-        title_lbl.setStyleSheet("font-weight: bold; font-size: 13px;")
-        outer.addWidget(title_lbl)
-
-        folder_row = QHBoxLayout()
-        summary_lbl = QLabel(f"{len(filenames)} file(s) saved to:  {folder}")
-        summary_lbl.setWordWrap(True)
-        folder_row.addWidget(summary_lbl, 1)
-        btn_open_folder = QPushButton("Open Folder")
-        btn_open_folder.setFixedWidth(100)
-        btn_open_folder.clicked.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(folder)))
-        folder_row.addWidget(btn_open_folder)
-        outer.addLayout(folder_row)
-
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        grid_widget = QWidget()
-        grid = QGridLayout(grid_widget)
-        grid.setSpacing(10)
-        grid.setContentsMargins(8, 8, 8, 8)
-        scroll.setWidget(grid_widget)
-
-        COLS = 5
-        THUMB = 100
-
-        for idx, fname in enumerate(filenames):
-            fpath = Path(folder) / fname
-            pm = QPixmap()
-            try:
-                data = json.loads(fpath.read_text(encoding="utf-8"))
-                img_data = data.get("image", "")
-                if img_data.startswith("data:"):
-                    raw = _b64.b64decode(img_data.split(",", 1)[1])
-                    pm.loadFromData(raw)
-            except Exception:
-                pass
-
-            img_lbl = QLabel()
-            if not pm.isNull():
-                img_lbl.setPixmap(
-                    pm.scaled(THUMB, THUMB,
-                              Qt.AspectRatioMode.KeepAspectRatio,
-                              Qt.TransformationMode.SmoothTransformation)
-                )
-            else:
-                img_lbl.setText("(no image)")
-            img_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            img_lbl.setFixedSize(THUMB + 4, THUMB + 4)
-            img_lbl.setStyleSheet("border: 1px solid #555; background: #1a1a1a;")
-
-            short = fname if len(fname) <= 16 else fname[:7] + "…" + fname[-7:]
-            name_lbl = QLabel(short)
-            name_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            name_lbl.setWordWrap(True)
-            name_lbl.setMaximumWidth(THUMB + 4)
-            name_lbl.setToolTip(fname)
-
-            cell = QWidget()
-            cell_layout = QVBoxLayout(cell)
-            cell_layout.setSpacing(2)
-            cell_layout.setContentsMargins(0, 0, 0, 0)
-            cell_layout.addWidget(img_lbl)
-            cell_layout.addWidget(name_lbl)
-
-            r, c = divmod(idx, COLS)
-            grid.addWidget(cell, r, c)
-
-        outer.addWidget(scroll, 1)
-
-        if errors:
-            err_lbl = QLabel("Errors:\n" + "\n".join(errors[:10]))
-            err_lbl.setStyleSheet("color: #ff6666;")
-            err_lbl.setWordWrap(True)
-            outer.addWidget(err_lbl)
-
-        btn_row = QHBoxLayout()
-        btn_row.addStretch()
-        btn_ok = QPushButton("OK")
-        btn_ok.setDefault(True)
-        btn_ok.clicked.connect(dlg.accept)
-        btn_row.addWidget(btn_ok)
-        outer.addLayout(btn_row)
-
-        dlg.exec()
+        show_bplist_covers_dialog(self, title, folder, filenames, errors)
 
     def _show_cover_preview(self) -> None:
         """出力フォルダを選択して .bplist ファイルのカバー画像を一覧表示する。"""

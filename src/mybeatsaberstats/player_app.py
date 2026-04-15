@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QDateTimeEdit,
     QDialog,
     QDialogButtonBox,
+    QFileDialog,
     QFormLayout,
     QGridLayout,
     QGroupBox,
@@ -62,7 +63,11 @@ from mybeatsaberstats.collector.map_store import MapStore
 from .playlist_view import PlaylistWindow, _make_playlist_cover as _make_cover, \
     load_accsaber_reloaded_maps as _rl_load_maps_with_scores, \
     _apply_config_filter as _rl_apply_filter, _BatchConfig as _RLBatchConfig, \
-    _make_bplist as _rl_make_bplist
+    _make_bplist as _rl_make_bplist, load_playlist_export_dir as _load_playlist_export_dir, \
+    save_playlist_export_dir as _save_playlist_export_dir, \
+    load_enabled_playlist_batch_configs as _load_enabled_playlist_batch_configs, \
+    export_all_playlist_batches as _export_all_playlist_batches, \
+    show_bplist_covers_dialog as _show_playlist_covers_dialog
 
 
 def _format_bplist(bplist: dict) -> str:
@@ -134,6 +139,9 @@ def _extract_steam_id_from_input(text: str) -> str:
     return m.group(1) if m else text
 
 
+_TAKE_SNAPSHOT_DIALOG_PATH = BASE_DIR / "cache" / "take_snapshot_dialog.json"
+
+
 class TakeSnapshotDialog(QDialog):
     """スナップショット取得時にSteamIDとデータ取得オプションを選択するダイアログ。"""
 
@@ -141,6 +149,7 @@ class TakeSnapshotDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Take Snapshot")
         self.setMinimumWidth(420)
+        self._saved_state = self._load_state()
 
         layout = QVBoxLayout(self)
 
@@ -343,14 +352,53 @@ class TakeSnapshotDialog(QDialog):
         self._cb_bl_fetch_all.toggled.connect(_bl_all_toggled)
         self._cb_bl_until.toggled.connect(_bl_until_toggled)
 
-        # OK / Cancel
+        playlist_export_group = QGroupBox("Playlist Export", self)
+        playlist_export_layout = QVBoxLayout(playlist_export_group)
+        playlist_export_layout.setContentsMargins(9, 12, 9, 9)
+        playlist_export_layout.setSpacing(6)
+
+        self._cb_playlist_export_all = QCheckBox("Export All after snapshot", self)
+        playlist_export_layout.addWidget(self._cb_playlist_export_all)
+
+        playlist_dir_row = QHBoxLayout()
+        playlist_dir_row.setSpacing(8)
+        playlist_dir_row.addWidget(QLabel("Folder:", self))
+        self._playlist_export_dir_edit = QLineEdit(_load_playlist_export_dir(), self)
+        self._playlist_export_dir_edit.setReadOnly(True)
+        self._playlist_export_dir_edit.setPlaceholderText("Select playlist export folder...")
+        playlist_dir_row.addWidget(self._playlist_export_dir_edit, 1)
+        self._btn_playlist_export_dir = QPushButton("Change...", self)
+        self._btn_playlist_export_dir.clicked.connect(self._browse_playlist_export_dir)
+        playlist_dir_row.addWidget(self._btn_playlist_export_dir)
+        playlist_export_layout.addLayout(playlist_dir_row)
+
+        self._cb_playlist_export_all.toggled.connect(self._update_playlist_export_ui)
+        layout.addWidget(playlist_export_group)
+
+        button_row = QHBoxLayout()
+        self._btn_save_settings = QPushButton("Save Settings", self)
+        self._btn_save_settings.clicked.connect(self._on_save_settings_clicked)
+        button_row.addWidget(self._btn_save_settings)
+        button_row.addStretch()
+
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
             self,
         )
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
+        button_row.addWidget(buttons)
+        layout.addLayout(button_row)
+
+        self._restore_state()
+
+        _ss_enabled_toggled(self._cb_scoresaber.isChecked())
+        _bl_enabled_toggled(self._cb_beatleader.isChecked())
+        _ss_all_toggled(self._cb_ss_fetch_all.isChecked())
+        _ss_until_toggled(self._cb_ss_until.isChecked())
+        _bl_all_toggled(self._cb_bl_fetch_all.isChecked())
+        _bl_until_toggled(self._cb_bl_until.isChecked())
+        self._update_playlist_export_ui(self._cb_playlist_export_all.isChecked())
 
     def _on_id_text_changed(self, text: str) -> None:
         """URL が貼られたとき SteamID を抽出してテキストボックスを置き換える。"""
@@ -362,6 +410,117 @@ class TakeSnapshotDialog(QDialog):
 
     def steam_id(self) -> str:
         return self._id_edit.text().strip()
+
+    def _restore_state(self) -> None:
+        widgets = [
+            self._cb_ss_ranked_maps,
+            self._cb_bl_ranked_maps,
+            self._cb_scoresaber,
+            self._cb_beatleader,
+            self._cb_accsaber,
+            self._cb_accsaber_rl,
+            self._cb_ss_fetch_all,
+            self._cb_ss_until,
+            self._cb_bl_fetch_all,
+            self._cb_bl_until,
+            self._cb_playlist_export_all,
+        ]
+        for widget in widgets:
+            widget.blockSignals(True)
+        try:
+            self._cb_ss_ranked_maps.setChecked(bool(self._saved_state.get("fetch_ss_ranked_maps", True)))
+            self._cb_bl_ranked_maps.setChecked(bool(self._saved_state.get("fetch_bl_ranked_maps", True)))
+            self._cb_scoresaber.setChecked(bool(self._saved_state.get("fetch_scoresaber", True)))
+            self._cb_beatleader.setChecked(bool(self._saved_state.get("fetch_beatleader", True)))
+            self._cb_accsaber.setChecked(bool(self._saved_state.get("fetch_accsaber", True)))
+            self._cb_accsaber_rl.setChecked(bool(self._saved_state.get("fetch_accsaber_rl", True)))
+            self._cb_ss_fetch_all.setChecked(bool(self._saved_state.get("ss_fetch_all", False)))
+            self._cb_ss_until.setChecked(bool(self._saved_state.get("ss_fetch_from_enabled", False)))
+            self._cb_bl_fetch_all.setChecked(bool(self._saved_state.get("bl_fetch_all", False)))
+            self._cb_bl_until.setChecked(bool(self._saved_state.get("bl_fetch_from_enabled", False)))
+            self._cb_playlist_export_all.setChecked(bool(self._saved_state.get("export_all_after_snapshot", False)))
+
+            ss_until = self._saved_state.get("ss_fetch_from_datetime", "")
+            if isinstance(ss_until, str) and ss_until:
+                qdt = QDateTime.fromString(ss_until, Qt.DateFormat.ISODate)
+                if qdt.isValid():
+                    self._dt_ss_until.setDateTime(qdt)
+            bl_until = self._saved_state.get("bl_fetch_from_datetime", "")
+            if isinstance(bl_until, str) and bl_until:
+                qdt = QDateTime.fromString(bl_until, Qt.DateFormat.ISODate)
+                if qdt.isValid():
+                    self._dt_bl_until.setDateTime(qdt)
+
+            saved_export_dir = self._saved_state.get("playlist_export_dir", "")
+            if isinstance(saved_export_dir, str) and saved_export_dir:
+                self._playlist_export_dir_edit.setText(saved_export_dir)
+            else:
+                self._playlist_export_dir_edit.setText(_load_playlist_export_dir())
+        finally:
+            for widget in widgets:
+                widget.blockSignals(False)
+
+    def _load_state(self) -> dict:
+        try:
+            if _TAKE_SNAPSHOT_DIALOG_PATH.exists():
+                data = json.loads(_TAKE_SNAPSHOT_DIALOG_PATH.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    return data
+        except Exception:
+            pass
+        return {}
+
+    def _save_state(self) -> None:
+        try:
+            _TAKE_SNAPSHOT_DIALOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+            _TAKE_SNAPSHOT_DIALOG_PATH.write_text(
+                json.dumps(
+                    {
+                        "fetch_ss_ranked_maps": self._cb_ss_ranked_maps.isChecked(),
+                        "fetch_bl_ranked_maps": self._cb_bl_ranked_maps.isChecked(),
+                        "fetch_scoresaber": self._cb_scoresaber.isChecked(),
+                        "fetch_beatleader": self._cb_beatleader.isChecked(),
+                        "fetch_accsaber": self._cb_accsaber.isChecked(),
+                        "fetch_accsaber_rl": self._cb_accsaber_rl.isChecked(),
+                        "ss_fetch_all": self._cb_ss_fetch_all.isChecked(),
+                        "ss_fetch_from_enabled": self._cb_ss_until.isChecked(),
+                        "ss_fetch_from_datetime": self._dt_ss_until.dateTime().toString(Qt.DateFormat.ISODate),
+                        "bl_fetch_all": self._cb_bl_fetch_all.isChecked(),
+                        "bl_fetch_from_enabled": self._cb_bl_until.isChecked(),
+                        "bl_fetch_from_datetime": self._dt_bl_until.dateTime().toString(Qt.DateFormat.ISODate),
+                        "export_all_after_snapshot": self._cb_playlist_export_all.isChecked(),
+                        "playlist_export_dir": self._playlist_export_dir_edit.text().strip(),
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
+
+    def _on_save_settings_clicked(self) -> None:
+        self._save_state()
+        folder = self._playlist_export_dir_edit.text().strip()
+        if folder:
+            _save_playlist_export_dir(folder)
+        QMessageBox.information(self, "Save Settings", "Settings saved.")
+
+    def _update_playlist_export_ui(self, checked: bool) -> None:
+        self._playlist_export_dir_edit.setEnabled(checked)
+        self._btn_playlist_export_dir.setEnabled(checked)
+
+    def _browse_playlist_export_dir(self) -> None:
+        initial_dir = self._playlist_export_dir_edit.text().strip() or str(BASE_DIR)
+        folder = QFileDialog.getExistingDirectory(self, "Select playlist export folder", initial_dir)
+        if folder:
+            self._playlist_export_dir_edit.setText(folder)
+
+    def should_export_playlists(self) -> bool:
+        return self._cb_playlist_export_all.isChecked()
+
+    def playlist_export_dir(self) -> str:
+        return self._playlist_export_dir_edit.text().strip()
 
     def snapshot_options(self) -> SnapshotOptions:
         ss_until: Optional[datetime] = None
@@ -1713,6 +1872,16 @@ class PlayerWindow(QMainWindow):
             return False
 
         options = dlg.snapshot_options()
+        export_playlists = dlg.should_export_playlists()
+        playlist_export_dir = dlg.playlist_export_dir()
+        if export_playlists:
+            if not playlist_export_dir:
+                QMessageBox.warning(self, "Take Snapshot", "Playlist export folder is empty.")
+                return False
+            if not Path(playlist_export_dir).is_dir():
+                QMessageBox.warning(self, "Take Snapshot", f"Playlist export folder not found:\n{playlist_export_dir}")
+                return False
+            _save_playlist_export_dir(playlist_export_dir)
 
         # スナップショット取得処理の途中でキャンセルできるように、Cancel ボタン付きの
         # QProgressDialog を用意し、キャンセル状態をフラグで管理する。
@@ -1723,7 +1892,8 @@ class PlayerWindow(QMainWindow):
         dlg = QProgressDialog("Taking snapshot...", "Cancel", 0, 100, self)
         dlg.setWindowTitle("Take Snapshot")
         dlg.setWindowModality(Qt.WindowModality.WindowModal)
-        dlg.setAutoClose(True)
+        dlg.setAutoClose(False)
+        dlg.setAutoReset(False)
         dlg.canceled.connect(lambda: cancelled.__setitem__("value", True))
         status_label = QLabel("Taking snapshot...", dlg)
         status_label.setWordWrap(True)
@@ -1762,6 +1932,20 @@ class PlayerWindow(QMainWindow):
             _render_progress_label(current_progress_message["value"])
             QApplication.processEvents()
 
+        def _on_playlist_export_progress(_done: int, _total: int, label: str) -> None:
+            if cancelled["value"]:
+                raise RuntimeError("SNAPSHOT_CANCELLED")
+            current_progress_message["value"] = label
+            _render_progress_label(label)
+            QApplication.processEvents()
+
+        snapshot: Optional[Snapshot] = None
+        playlist_saved_files: List[str] = []
+        playlist_errors: List[str] = []
+        playlist_export_exception: Optional[Exception] = None
+        playlist_export_cancelled = False
+        enabled_playlist_configs = _load_enabled_playlist_batch_configs() if export_playlists else []
+
         try:
             # print文は日本語
             print(f"1.スナップショットを取得中: {steam_id}")
@@ -1773,6 +1957,24 @@ class PlayerWindow(QMainWindow):
             )
             map_store_instance = MapStore()
             map_store_instance.snapshots[steam_id] = snapshot
+
+            if export_playlists:
+                if enabled_playlist_configs:
+                    dlg.setRange(0, 0)
+                    _on_playlist_export_progress(0, 0, "Exporting playlists...")
+                    try:
+                        playlist_saved_files, playlist_errors = _export_all_playlist_batches(
+                            steam_id,
+                            Path(playlist_export_dir),
+                            progress=_on_playlist_export_progress,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        if cancelled["value"]:
+                            playlist_export_cancelled = True
+                        else:
+                            playlist_export_exception = exc
+                else:
+                    _on_warning("Playlist Export All is checked, but no enabled batch items were found.")
 
         except Exception as exc:  # noqa: BLE001
             # キャンセルによる中断の場合はエラーダイアログを出さずに静かに抜ける
@@ -1790,10 +1992,49 @@ class PlayerWindow(QMainWindow):
                 self.player_combo.setCurrentIndex(idx)
                 break
 
+        if (
+            export_playlists
+            and enabled_playlist_configs
+            and not playlist_export_cancelled
+            and playlist_export_exception is None
+        ):
+            _show_playlist_covers_dialog(
+                self,
+                f"Export Complete — {len(playlist_saved_files)} file(s)",
+                playlist_export_dir,
+                playlist_saved_files,
+                playlist_errors,
+            )
+
         QMessageBox.information(
             self,
             "Take Snapshot",
             f"Snapshot taken at {snapshot.taken_at} for {steam_id}."
+            + (
+                f"\n\nPlaylist Export: {len(playlist_saved_files)} file(s) saved to\n{playlist_export_dir}"
+                if export_playlists and playlist_export_exception is None and not playlist_export_cancelled
+                else ""
+            )
+            + (
+                "\n\nPlaylist Export: no enabled batch items." 
+                if export_playlists and not enabled_playlist_configs
+                else ""
+            )
+            + (
+                "\n\nPlaylist Export: canceled after snapshot completed."
+                if playlist_export_cancelled
+                else ""
+            )
+            + (
+                f"\n\nPlaylist Export failed:\n{playlist_export_exception}"
+                if playlist_export_exception is not None
+                else ""
+            )
+            + (
+                "\n\nPlaylist Export warnings:\n" + "\n".join(playlist_errors)
+                if playlist_errors
+                else ""
+            )
             + ("\n\n⚠ " + "\n⚠ ".join(snapshot.warnings) if snapshot.warnings else ""),
         )
         return True
