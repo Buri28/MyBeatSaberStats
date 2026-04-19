@@ -10,6 +10,7 @@ import requests
 from .snapshot import BASE_DIR
 
 _CACHE_PATH = BASE_DIR / "cache" / "beatsaver_map_details.json"
+_BEATSAVER_REQUEST_TIMEOUT = (3, 6)
 
 
 def _normalize_hash(song_hash: object) -> str:
@@ -168,9 +169,25 @@ def _seed_meta_from_hash_and_key(song_hash: object, beatsaver_key: object) -> Op
     }
 
 
+def _has_full_beatsaver_meta(entry: Optional[dict]) -> bool:
+    if not isinstance(entry, dict):
+        return False
+    return bool(
+        str(entry.get("beatsaver_cover_url") or "").strip()
+        or str(entry.get("beatsaver_preview_url") or "").strip()
+        or str(entry.get("beatsaver_description") or "").strip()
+        or int(entry.get("beatsaver_uploaded_ts") or 0) > 0
+        or int(entry.get("beatsaver_votes") or 0) > 0
+        or float(entry.get("beatsaver_rating") or 0.0) > 0.0
+    )
+
+
 def _fetch_beatsaver_map_by_hash(session: requests.Session, song_hash: str) -> Optional[dict]:
     try:
-        resp = session.get(f"https://api.beatsaver.com/maps/hash/{song_hash}", timeout=15)
+        resp = session.get(
+            f"https://api.beatsaver.com/maps/hash/{song_hash}",
+            timeout=_BEATSAVER_REQUEST_TIMEOUT,
+        )
         if resp.status_code == 404:
             return None
         resp.raise_for_status()
@@ -205,12 +222,14 @@ def update_beatsaver_meta_cache(
         if not beatsaver_key:
             continue
         existing = cache.get(song_hash)
-        if existing and str(existing.get("beatsaver_key") or "").strip():
+        if _has_full_beatsaver_meta(existing):
             continue
         seeded = _seed_meta_from_hash_and_key(song_hash, beatsaver_key)
         if seeded is not None:
-            cache[song_hash] = seeded
-            updated = True
+            merged = _merge_meta_entry(existing or {}, seeded)
+            if merged != existing:
+                cache[song_hash] = merged
+                updated = True
 
     missing_hashes = []
     for raw_hash in song_hashes:
@@ -218,7 +237,7 @@ def update_beatsaver_meta_cache(
         if not song_hash:
             continue
         existing = cache.get(song_hash)
-        if existing and str(existing.get("beatsaver_key") or "").strip():
+        if _has_full_beatsaver_meta(existing):
             continue
         missing_hashes.append(song_hash)
 
