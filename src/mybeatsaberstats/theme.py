@@ -639,6 +639,25 @@ def toggle(app: QApplication | None = None) -> bool:
     return _dark_mode
 
 
+def set_theme_mode(mode: str, app: QApplication | None = None) -> bool:
+    """テーマモードを直接指定して適用する。"""
+    global _theme_mode
+    if mode not in ("default", "dark", "light"):
+        mode = "default"
+    _theme_mode = mode
+    if mode == "dark":
+        apply_dark(app)
+    elif mode == "light":
+        apply_light(app)
+    else:
+        if detect_system_dark():
+            apply_dark(app)
+        else:
+            apply_light(app)
+    _save_pref(_theme_mode)
+    return _dark_mode
+
+
 def init_theme(app: QApplication | None = None) -> None:
     """起動時のテーマを決定して適用する。
 

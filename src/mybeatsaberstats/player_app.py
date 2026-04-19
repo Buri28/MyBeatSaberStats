@@ -40,7 +40,7 @@ from PySide6.QtWidgets import (
 )
 
 from .snapshot import Snapshot, SNAPSHOT_DIR, BASE_DIR, RESOURCES_DIR, StarClearStat, resource_path
-from .theme import table_stylesheet, toggle as _toggle_theme, is_dark, label_cell_color, label_cell_text_color, init_theme as _init_theme, button_label as _theme_button_label
+from .theme import table_stylesheet, toggle as _toggle_theme, is_dark, label_cell_color, label_cell_text_color, init_theme as _init_theme, button_label as _theme_button_label, current_theme_mode as _current_theme_mode, set_theme_mode as _set_theme_mode
 from .updater import StartupUpdateChecker, get_current_version
 from .accsaber import AccSaberPlayer, get_accsaber_playlist_map_counts_with_meta, get_accsaber_playlist_map_counts_from_cache
 from .accsaber_reloaded import get_reloaded_map_counts_from_cache as _get_reloaded_map_counts_from_cache
@@ -52,6 +52,10 @@ from .accsaber_reloaded import CATEGORY_IDS as _RL_CATEGORY_IDS
 from .snapshot_view import SnapshotCompareDialog, AccPlayCountBarDelegate, ACC_PLAY_COLORS, ACC_PLAY_COL_CATS
 from .snapshot_graph import SnapshotGraphDialog
 from .app import MainWindow as RankingWindow
+from .settings_store import (
+    load_export_all_after_snapshot as _load_export_all_after_snapshot_setting,
+    save_export_all_after_snapshot as _save_export_all_after_snapshot_setting,
+)
 from .collector.collector import (
     collect_beatleader_star_stats,
     create_snapshot_for_steam_id,
@@ -65,6 +69,8 @@ from .playlist_view import PlaylistWindow, _make_playlist_cover as _make_cover, 
     _apply_config_filter as _rl_apply_filter, _BatchConfig as _RLBatchConfig, \
     _make_bplist as _rl_make_bplist, load_playlist_export_dir as _load_playlist_export_dir, \
     save_playlist_export_dir as _save_playlist_export_dir, \
+    load_beatsaber_dir as _load_beatsaber_dir, \
+    save_beatsaber_dir as _save_beatsaber_dir, \
     load_enabled_playlist_batch_configs as _load_enabled_playlist_batch_configs, \
     export_all_playlist_batches as _export_all_playlist_batches, \
     show_bplist_covers_dialog as _show_playlist_covers_dialog
@@ -140,6 +146,38 @@ def _extract_steam_id_from_input(text: str) -> str:
 
 
 _TAKE_SNAPSHOT_DIALOG_PATH = BASE_DIR / "cache" / "take_snapshot_dialog.json"
+
+
+def _load_take_snapshot_dialog_state() -> dict:
+    try:
+        if _TAKE_SNAPSHOT_DIALOG_PATH.exists():
+            data = json.loads(_TAKE_SNAPSHOT_DIALOG_PATH.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return data
+    except Exception:
+        pass
+    return {}
+
+
+def _save_take_snapshot_dialog_state(updates: dict) -> None:
+    try:
+        payload = _load_take_snapshot_dialog_state()
+        payload.update(updates)
+        _TAKE_SNAPSHOT_DIALOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _TAKE_SNAPSHOT_DIALOG_PATH.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
+
+
+def _load_export_all_after_snapshot() -> bool:
+    return _load_export_all_after_snapshot_setting()
+
+
+def _save_export_all_after_snapshot(enabled: bool) -> None:
+    _save_export_all_after_snapshot_setting(enabled)
 
 
 class TakeSnapshotDialog(QDialog):
@@ -302,6 +340,28 @@ class TakeSnapshotDialog(QDialog):
 
         layout.addWidget(fetch_mode_group)
 
+        playlist_export_group = QGroupBox("Playlist Export", self)
+        playlist_export_layout = QVBoxLayout(playlist_export_group)
+        playlist_export_layout.setContentsMargins(9, 12, 9, 9)
+        playlist_export_layout.setSpacing(6)
+
+        self._cb_playlist_export_all = QCheckBox("Export All after snapshot", self)
+        playlist_export_layout.addWidget(self._cb_playlist_export_all)
+
+        playlist_dir_row = QHBoxLayout()
+        playlist_dir_row.setSpacing(8)
+        playlist_dir_row.addWidget(QLabel("Folder:", self))
+        self._playlist_export_dir_edit = QLineEdit(_load_playlist_export_dir(), self)
+        self._playlist_export_dir_edit.setReadOnly(True)
+        self._playlist_export_dir_edit.setPlaceholderText("Select playlist export folder...")
+        playlist_dir_row.addWidget(self._playlist_export_dir_edit, 1)
+        self._btn_playlist_export_dir = QPushButton("Change...", self)
+        self._btn_playlist_export_dir.clicked.connect(self._browse_playlist_export_dir)
+        playlist_dir_row.addWidget(self._btn_playlist_export_dir)
+        playlist_export_layout.addLayout(playlist_dir_row)
+        self._cb_playlist_export_all.toggled.connect(self._update_playlist_export_ui)
+        layout.addWidget(playlist_export_group)
+
         # 親チェックの ON/OFF に応じてモード行全体を有効/無効化
         def _ss_enabled_toggled(checked: bool) -> None:
             self._cb_ss_fetch_all.setEnabled(checked and not self._cb_ss_until.isChecked())
@@ -352,33 +412,12 @@ class TakeSnapshotDialog(QDialog):
         self._cb_bl_fetch_all.toggled.connect(_bl_all_toggled)
         self._cb_bl_until.toggled.connect(_bl_until_toggled)
 
-        playlist_export_group = QGroupBox("Playlist Export", self)
-        playlist_export_layout = QVBoxLayout(playlist_export_group)
-        playlist_export_layout.setContentsMargins(9, 12, 9, 9)
-        playlist_export_layout.setSpacing(6)
-
-        self._cb_playlist_export_all = QCheckBox("Export All after snapshot", self)
-        playlist_export_layout.addWidget(self._cb_playlist_export_all)
-
-        playlist_dir_row = QHBoxLayout()
-        playlist_dir_row.setSpacing(8)
-        playlist_dir_row.addWidget(QLabel("Folder:", self))
-        self._playlist_export_dir_edit = QLineEdit(_load_playlist_export_dir(), self)
-        self._playlist_export_dir_edit.setReadOnly(True)
-        self._playlist_export_dir_edit.setPlaceholderText("Select playlist export folder...")
-        playlist_dir_row.addWidget(self._playlist_export_dir_edit, 1)
-        self._btn_playlist_export_dir = QPushButton("Change...", self)
-        self._btn_playlist_export_dir.clicked.connect(self._browse_playlist_export_dir)
-        playlist_dir_row.addWidget(self._btn_playlist_export_dir)
-        playlist_export_layout.addLayout(playlist_dir_row)
-
-        self._cb_playlist_export_all.toggled.connect(self._update_playlist_export_ui)
-        layout.addWidget(playlist_export_group)
-
         button_row = QHBoxLayout()
-        self._btn_save_settings = QPushButton("Save Settings", self)
-        self._btn_save_settings.clicked.connect(self._on_save_settings_clicked)
-        button_row.addWidget(self._btn_save_settings)
+
+        self._btn_save = QPushButton("Save", self)
+        self._btn_save.clicked.connect(self._save_current_settings)
+        button_row.addWidget(self._btn_save)
+
         button_row.addStretch()
 
         buttons = QDialogButtonBox(
@@ -438,7 +477,8 @@ class TakeSnapshotDialog(QDialog):
             self._cb_ss_until.setChecked(bool(self._saved_state.get("ss_fetch_from_enabled", False)))
             self._cb_bl_fetch_all.setChecked(bool(self._saved_state.get("bl_fetch_all", False)))
             self._cb_bl_until.setChecked(bool(self._saved_state.get("bl_fetch_from_enabled", False)))
-            self._cb_playlist_export_all.setChecked(bool(self._saved_state.get("export_all_after_snapshot", False)))
+            self._cb_playlist_export_all.setChecked(_load_export_all_after_snapshot())
+            self._playlist_export_dir_edit.setText(_load_playlist_export_dir())
 
             ss_until = self._saved_state.get("ss_fetch_from_datetime", "")
             if isinstance(ss_until, str) and ss_until:
@@ -450,61 +490,31 @@ class TakeSnapshotDialog(QDialog):
                 qdt = QDateTime.fromString(bl_until, Qt.DateFormat.ISODate)
                 if qdt.isValid():
                     self._dt_bl_until.setDateTime(qdt)
-
-            saved_export_dir = self._saved_state.get("playlist_export_dir", "")
-            if isinstance(saved_export_dir, str) and saved_export_dir:
-                self._playlist_export_dir_edit.setText(saved_export_dir)
-            else:
-                self._playlist_export_dir_edit.setText(_load_playlist_export_dir())
         finally:
             for widget in widgets:
                 widget.blockSignals(False)
 
     def _load_state(self) -> dict:
-        try:
-            if _TAKE_SNAPSHOT_DIALOG_PATH.exists():
-                data = json.loads(_TAKE_SNAPSHOT_DIALOG_PATH.read_text(encoding="utf-8"))
-                if isinstance(data, dict):
-                    return data
-        except Exception:
-            pass
-        return {}
+        return _load_take_snapshot_dialog_state()
 
     def _save_state(self) -> None:
-        try:
-            _TAKE_SNAPSHOT_DIALOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-            _TAKE_SNAPSHOT_DIALOG_PATH.write_text(
-                json.dumps(
-                    {
-                        "fetch_ss_ranked_maps": self._cb_ss_ranked_maps.isChecked(),
-                        "fetch_bl_ranked_maps": self._cb_bl_ranked_maps.isChecked(),
-                        "fetch_scoresaber": self._cb_scoresaber.isChecked(),
-                        "fetch_beatleader": self._cb_beatleader.isChecked(),
-                        "fetch_accsaber": self._cb_accsaber.isChecked(),
-                        "fetch_accsaber_rl": self._cb_accsaber_rl.isChecked(),
-                        "ss_fetch_all": self._cb_ss_fetch_all.isChecked(),
-                        "ss_fetch_from_enabled": self._cb_ss_until.isChecked(),
-                        "ss_fetch_from_datetime": self._dt_ss_until.dateTime().toString(Qt.DateFormat.ISODate),
-                        "bl_fetch_all": self._cb_bl_fetch_all.isChecked(),
-                        "bl_fetch_from_enabled": self._cb_bl_until.isChecked(),
-                        "bl_fetch_from_datetime": self._dt_bl_until.dateTime().toString(Qt.DateFormat.ISODate),
-                        "export_all_after_snapshot": self._cb_playlist_export_all.isChecked(),
-                        "playlist_export_dir": self._playlist_export_dir_edit.text().strip(),
-                    },
-                    ensure_ascii=False,
-                    indent=2,
-                ),
-                encoding="utf-8",
-            )
-        except Exception:
-            pass
-
-    def _on_save_settings_clicked(self) -> None:
-        self._save_state()
-        folder = self._playlist_export_dir_edit.text().strip()
-        if folder:
-            _save_playlist_export_dir(folder)
-        QMessageBox.information(self, "Save Settings", "Settings saved.")
+        _save_take_snapshot_dialog_state(
+            {
+                "fetch_ss_ranked_maps": self._cb_ss_ranked_maps.isChecked(),
+                "fetch_bl_ranked_maps": self._cb_bl_ranked_maps.isChecked(),
+                "fetch_scoresaber": self._cb_scoresaber.isChecked(),
+                "fetch_beatleader": self._cb_beatleader.isChecked(),
+                "fetch_accsaber": self._cb_accsaber.isChecked(),
+                "fetch_accsaber_rl": self._cb_accsaber_rl.isChecked(),
+                "ss_fetch_all": self._cb_ss_fetch_all.isChecked(),
+                "ss_fetch_from_enabled": self._cb_ss_until.isChecked(),
+                "ss_fetch_from_datetime": self._dt_ss_until.dateTime().toString(Qt.DateFormat.ISODate),
+                "bl_fetch_all": self._cb_bl_fetch_all.isChecked(),
+                "bl_fetch_from_enabled": self._cb_bl_until.isChecked(),
+                "bl_fetch_from_datetime": self._dt_bl_until.dateTime().toString(Qt.DateFormat.ISODate),
+                "export_all_after_snapshot": self._cb_playlist_export_all.isChecked(),
+            }
+        )
 
     def _update_playlist_export_ui(self, checked: bool) -> None:
         self._playlist_export_dir_edit.setEnabled(checked)
@@ -515,6 +525,31 @@ class TakeSnapshotDialog(QDialog):
         folder = QFileDialog.getExistingDirectory(self, "Select playlist export folder", initial_dir)
         if folder:
             self._playlist_export_dir_edit.setText(folder)
+
+    def _persist_snapshot_settings(self) -> bool:
+        playlist_export_dir = self._playlist_export_dir_edit.text().strip()
+        if self._cb_playlist_export_all.isChecked() and not playlist_export_dir:
+            QMessageBox.warning(self, "Take Snapshot", "Playlist export folder is empty.")
+            return False
+        self._save_state()
+        _save_export_all_after_snapshot(self._cb_playlist_export_all.isChecked())
+        if playlist_export_dir:
+            _save_playlist_export_dir(playlist_export_dir)
+        parent = self.parent()
+        sync_settings = getattr(parent, "_sync_shared_settings_to_open_windows", None)
+        if callable(sync_settings):
+            sync_settings()
+        return True
+
+    def _save_current_settings(self) -> None:
+        if not self._persist_snapshot_settings():
+            return
+        QMessageBox.information(self, "Take Snapshot", "Settings saved.")
+
+    def accept(self) -> None:  # type: ignore[override]
+        if not self._persist_snapshot_settings():
+            return
+        super().accept()
 
     def should_export_playlists(self) -> bool:
         return self._cb_playlist_export_all.isChecked()
@@ -555,6 +590,158 @@ class TakeSnapshotDialog(QDialog):
             ss_fetch_all=self._cb_ss_fetch_all.isChecked(),
             bl_fetch_all=self._cb_bl_fetch_all.isChecked(),
         )
+
+
+class SettingsDialog(QDialog):
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Settings")
+        self.setMinimumWidth(480)
+        self._parent_window = parent if isinstance(parent, PlayerWindow) else None
+
+        layout = QVBoxLayout(self)
+
+        beatsaber_group = QGroupBox("Beat Saber", self)
+        beatsaber_layout = QVBoxLayout(beatsaber_group)
+        beatsaber_layout.setContentsMargins(9, 12, 9, 9)
+        beatsaber_layout.setSpacing(6)
+
+        beatsaber_dir_row = QHBoxLayout()
+        beatsaber_dir_row.setSpacing(8)
+        beatsaber_dir_row.addWidget(QLabel("Folder:", self))
+        self._beatsaber_dir_edit = QLineEdit(_load_beatsaber_dir(), self)
+        self._beatsaber_dir_edit.setReadOnly(True)
+        self._beatsaber_dir_edit.setPlaceholderText("Select Beat Saber folder...")
+        beatsaber_dir_row.addWidget(self._beatsaber_dir_edit, 1)
+        self._btn_beatsaber_dir = QPushButton("Change...", self)
+        self._btn_beatsaber_dir.clicked.connect(self._browse_beatsaber_dir)
+        beatsaber_dir_row.addWidget(self._btn_beatsaber_dir)
+        beatsaber_layout.addLayout(beatsaber_dir_row)
+        layout.addWidget(beatsaber_group)
+
+        theme_group = QGroupBox("Theme", self)
+        theme_layout = QFormLayout(theme_group)
+        self._theme_mode_combo = QComboBox(self)
+        self._theme_mode_combo.addItem("Default (System)", "default")
+        self._theme_mode_combo.addItem("Dark", "dark")
+        self._theme_mode_combo.addItem("Light", "light")
+        current_mode = _current_theme_mode()
+        current_index = max(0, self._theme_mode_combo.findData(current_mode))
+        self._theme_mode_combo.setCurrentIndex(current_index)
+        theme_layout.addRow("Mode:", self._theme_mode_combo)
+        layout.addWidget(theme_group)
+
+        playlist_export_group = QGroupBox("Playlist Export", self)
+        playlist_export_layout = QVBoxLayout(playlist_export_group)
+        playlist_export_layout.setContentsMargins(9, 12, 9, 9)
+        playlist_export_layout.setSpacing(6)
+
+        self._cb_playlist_export_all = QCheckBox("Export All after snapshot", self)
+        self._cb_playlist_export_all.setChecked(_load_export_all_after_snapshot())
+        playlist_export_layout.addWidget(self._cb_playlist_export_all)
+
+        playlist_dir_row = QHBoxLayout()
+        playlist_dir_row.setSpacing(8)
+        playlist_dir_row.addWidget(QLabel("Folder:", self))
+        self._playlist_export_dir_edit = QLineEdit(_load_playlist_export_dir(), self)
+        self._playlist_export_dir_edit.setReadOnly(True)
+        self._playlist_export_dir_edit.setPlaceholderText("Select playlist export folder...")
+        playlist_dir_row.addWidget(self._playlist_export_dir_edit, 1)
+        self._btn_playlist_export_dir = QPushButton("Change...", self)
+        self._btn_playlist_export_dir.clicked.connect(self._browse_playlist_export_dir)
+        playlist_dir_row.addWidget(self._btn_playlist_export_dir)
+        playlist_export_layout.addLayout(playlist_dir_row)
+
+        self._cb_playlist_export_all.toggled.connect(self._update_playlist_export_ui)
+        layout.addWidget(playlist_export_group)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
+            self,
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        self._update_playlist_export_ui(self._cb_playlist_export_all.isChecked())
+
+    def _update_playlist_export_ui(self, checked: bool) -> None:
+        self._playlist_export_dir_edit.setEnabled(checked)
+        self._btn_playlist_export_dir.setEnabled(checked)
+
+    def _browse_playlist_export_dir(self) -> None:
+        initial_dir = self._playlist_export_dir_edit.text().strip() or str(BASE_DIR)
+        folder = QFileDialog.getExistingDirectory(self, "Select playlist export folder", initial_dir)
+        if folder:
+            self._playlist_export_dir_edit.setText(folder)
+
+    def _browse_beatsaber_dir(self) -> None:
+        initial_dir = self._beatsaber_dir_edit.text().strip() or str(BASE_DIR)
+        folder = QFileDialog.getExistingDirectory(self, "Select Beat Saber folder", initial_dir)
+        if folder:
+            self._beatsaber_dir_edit.setText(folder)
+
+    def accept(self) -> None:  # type: ignore[override]
+        theme_mode = str(self._theme_mode_combo.currentData() or "default")
+        app = QApplication.instance()
+        _set_theme_mode(theme_mode, app if isinstance(app, QApplication) else None)
+
+        playlist_export_dir = self._playlist_export_dir_edit.text().strip()
+        _save_export_all_after_snapshot(self._cb_playlist_export_all.isChecked())
+        if playlist_export_dir:
+            _save_playlist_export_dir(playlist_export_dir)
+
+        beatsaber_dir = self._beatsaber_dir_edit.text().strip()
+        if beatsaber_dir:
+            _save_beatsaber_dir(beatsaber_dir)
+        if self._parent_window is not None:
+            self._parent_window._sync_shared_settings_to_open_windows()
+            self._parent_window._sync_ui_after_theme_change()
+        super().accept()
+
+
+class BeatSaberFolderDialog(QDialog):
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Beat Saber Folder")
+        self.setMinimumWidth(480)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("Beat Saber folder is not configured. Please select it.", self))
+
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        row.addWidget(QLabel("Folder:", self))
+        self._beatsaber_dir_edit = QLineEdit(_load_beatsaber_dir(), self)
+        self._beatsaber_dir_edit.setReadOnly(True)
+        self._beatsaber_dir_edit.setPlaceholderText("Select Beat Saber folder...")
+        row.addWidget(self._beatsaber_dir_edit, 1)
+        self._btn_browse = QPushButton("Change...", self)
+        self._btn_browse.clicked.connect(self._browse_beatsaber_dir)
+        row.addWidget(self._btn_browse)
+        layout.addLayout(row)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
+            self,
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _browse_beatsaber_dir(self) -> None:
+        initial_dir = self._beatsaber_dir_edit.text().strip() or str(BASE_DIR)
+        folder = QFileDialog.getExistingDirectory(self, "Select Beat Saber folder", initial_dir)
+        if folder:
+            self._beatsaber_dir_edit.setText(folder)
+
+    def accept(self) -> None:  # type: ignore[override]
+        beatsaber_dir = self._beatsaber_dir_edit.text().strip()
+        if not beatsaber_dir:
+            QMessageBox.warning(self, "Beat Saber Folder", "Beat Saber folder is empty.")
+            return
+        _save_beatsaber_dir(beatsaber_dir)
+        super().accept()
 
 
 class PercentageBarDelegate(QStyledItemDelegate):
@@ -1009,6 +1196,18 @@ class PlayerWindow(QMainWindow):
         self.playlist_button.setToolTip("プレイヤーのプレイリストを表示します")
         top_row.addWidget(self.playlist_button)
 
+        self.maps_button = QPushButton("🗺 Maps")
+        self.maps_button.clicked.connect(self.open_maps)
+        self.maps_button.setFixedHeight(_header_control_h)
+        self.maps_button.setToolTip("プレイヤーの未プレイ譜面マップ一覧を表示します")
+        top_row.addWidget(self.maps_button)
+
+        self.settings_button = QPushButton("⚙ Settings")
+        self.settings_button.clicked.connect(self.open_settings)
+        self.settings_button.setFixedHeight(_header_control_h)
+        self.settings_button.setToolTip("アプリ設定を開きます")
+        top_row.addWidget(self.settings_button)
+
         top_row.addStretch(1)
 
         _initial_dark = is_dark()
@@ -1088,6 +1287,8 @@ class PlayerWindow(QMainWindow):
             self.compare_button,
             self.graph_button,
             self.playlist_button,
+            self.maps_button,
+            self.settings_button,
             self.dark_mode_button,
             self.btn_row_height_up,
             self.btn_row_height_dn,
@@ -1236,7 +1437,7 @@ class PlayerWindow(QMainWindow):
         # サービスごとのアイコンをヘッダに設定
         resources_dir = RESOURCES_DIR
         icon_scoresaber = QIcon(str(resources_dir / "scoresaber_logo.svg"))
-        icon_beatleader = QIcon(str(resources_dir / "beatleader_logo.jpg"))
+        icon_beatleader = QIcon(str(resources_dir / "beatleader_logo.webp"))
         icon_accsaber = QIcon(str(resources_dir / "asssaber_logo.webp"))
         _rl_logo_path = resources_dir / "accsaberreloaded_logo.png"
         icon_accsaber_rl = QIcon(str(_rl_logo_path)) if _rl_logo_path.exists() else icon_accsaber
@@ -1878,8 +2079,10 @@ class PlayerWindow(QMainWindow):
             if not playlist_export_dir:
                 QMessageBox.warning(self, "Take Snapshot", "Playlist export folder is empty.")
                 return False
-            if not Path(playlist_export_dir).is_dir():
-                QMessageBox.warning(self, "Take Snapshot", f"Playlist export folder not found:\n{playlist_export_dir}")
+            try:
+                Path(playlist_export_dir).mkdir(parents=True, exist_ok=True)
+            except Exception as exc:  # noqa: BLE001
+                QMessageBox.warning(self, "Take Snapshot", f"Failed to create playlist export folder:\n{playlist_export_dir}\n\n{exc}")
                 return False
             _save_playlist_export_dir(playlist_export_dir)
 
@@ -2045,6 +2248,18 @@ class PlayerWindow(QMainWindow):
         if self.player_combo.count() != 0:
             return
         self._take_snapshot_for_current_player()
+
+    def _prompt_startup_dialogs_if_needed(self) -> None:
+        """起動時に必要なダイアログを順番に表示する。"""
+
+        if not _load_beatsaber_dir():
+            try:
+                dlg = BeatSaberFolderDialog(self)
+                dlg.exec()
+            except Exception as exc:  # noqa: BLE001
+                QMessageBox.warning(self, "Beat Saber Folder", f"Failed to open Beat Saber folder dialog:\n{exc}")
+
+        self._prompt_initial_snapshot_if_needed()
 
     def _collect_star_stats_from_beatleader(self, beatleader_id: Optional[str]) -> List[StarClearStat]:
         """BeatLeader の RankedMap 一覧とプレイヤースコアから★別統計を集計する。"""
@@ -2325,20 +2540,37 @@ class PlayerWindow(QMainWindow):
 
         return (overall_rank, true_rank, standard_rank, tech_rank)
 
-    def _sync_ui_after_ranking_theme_change(self) -> None:
-        """ランキング画面でテーマが切り替わったとき Stats 画面側の UI を更新する。
-
-        _toggle_theme() 自体はランキング画面側で呼ばれているので、
-        ここではテーマ状態を参照して表示だけを更新する。
-        """
+    def _sync_ui_after_theme_change(self) -> None:
+        """現在のテーマ状態に合わせて Stats 画面側の UI を更新する。"""
         dark = is_dark()
         self.dark_mode_button.setText(_theme_button_label())
         self.dark_mode_button.setChecked(dark)
+        self.dark_mode_button.setToolTip("ライトモードに切り替えます" if dark else "ダークモードに切り替えます")
         self._apply_header_control_style()
         _ver_color = "#cccccc" if dark else "black"
         self._ver_label.setStyleSheet(f"font-size: 12px; color: {_ver_color}; padding-right: 4px;")
         self._top_row.setSpacing(2)
         self._update_view()
+
+        rw = getattr(self, "_ranking_window", None)
+        if rw is not None:
+            rw.table.setStyleSheet(table_stylesheet())
+            rw._control_row.setSpacing(2)
+            rw.dark_mode_button.setChecked(dark)
+            rw.dark_mode_button.setText(_theme_button_label())
+
+        pw = getattr(self, "_playlist_window", None)
+        if pw is not None:
+            pw.apply_theme()
+
+    def _sync_shared_settings_to_open_windows(self) -> None:
+        pw = getattr(self, "_playlist_window", None)
+        if pw is not None:
+            pw._export_dir = _load_playlist_export_dir()
+
+    def _sync_ui_after_ranking_theme_change(self) -> None:
+        """ランキング画面でテーマが切り替わったとき Stats 画面側の UI を更新する。"""
+        self._sync_ui_after_theme_change()
 
     def _apply_header_control_style(self) -> None:
         """ヘッダーのコントロール余白をテーマ非依存で揃える。"""
@@ -2543,25 +2775,27 @@ class PlayerWindow(QMainWindow):
         self.acc_rl_table.setRowCount(0)
         self.star_table.setRowCount(0)
         self.bl_star_table.setRowCount(0)
-        self._apply_row_height()
+
         steam_id = self._current_player_id()
-        if steam_id is None:
-            self._ss_cache_label.setText("ScoreSaber scores: -")
-            self._bl_cache_label.setText("BeatLeader scores: -")
+        if not steam_id:
+            self._ss_cache_label.setText("／ SS scores: -")
+            self._bl_cache_label.setText("／ BL scores: -")
+            self._avatar_widget.set_ids(None, None, preferred=self._load_avatar_showing())
             return
 
-        snaps = self._snapshots_by_player.get(steam_id)
+        snaps = self._snapshots_by_player.get(steam_id) or []
         if not snaps:
-            self._ss_cache_label.setText("ScoreSaber scores: -")
-            self._bl_cache_label.setText("BeatLeader scores: -")
+            self._ss_cache_label.setText("／ SS scores: -")
+            self._bl_cache_label.setText("／ BL scores: -")
+            self._avatar_widget.set_ids(None, None, preferred=self._load_avatar_showing())
             return
 
-        snaps.sort(key=lambda s: s.taken_at)
         selected_taken_at = self.snapshot_combo.currentData()
-        if selected_taken_at is None:
-            snap = snaps[-1]
-        else:
-            snap = next((s for s in snaps if s.taken_at == selected_taken_at), snaps[-1])
+        snap = None
+        if isinstance(selected_taken_at, str) and selected_taken_at:
+            snap = next((s for s in snaps if s.taken_at == selected_taken_at), None)
+        if snap is None:
+            snap = max(snaps, key=lambda s: s.taken_at)
 
         # --- キャッシュ情報ラベル更新 ---
         ss_id = snap.scoresaber_id
@@ -3518,17 +3752,37 @@ class PlayerWindow(QMainWindow):
         except Exception as exc:  # noqa: BLE001
             QMessageBox.warning(self, "Snapshot Graph", f"Failed to open snapshot graph:\n{exc}")
 
-    def open_playlist(self) -> None:
-        """Playlist 画面を開く（現在プレイヤーのクリア情報を渡す）。"""
+    def _show_playlist_window(self, initial_source_tab: str = "snapshot") -> None:
         steam_id = self._current_player_id()
         if not hasattr(self, "_playlist_window") or self._playlist_window is None:
-            self._playlist_window = PlaylistWindow(steam_id=steam_id, parent=None)
+            self._playlist_window = PlaylistWindow(
+                steam_id=steam_id,
+                initial_source_tab=initial_source_tab,
+                parent=None,
+            )
         else:
             # プレイヤーが変わっていたら steam_id を更新
             self._playlist_window._steam_id = steam_id
+            self._playlist_window._export_dir = _load_playlist_export_dir()
+            self._playlist_window.select_source_tab(initial_source_tab)
         self._playlist_window.show()
         self._playlist_window.raise_()
         self._playlist_window.activateWindow()
+
+    def open_playlist(self) -> None:
+        """Playlist 画面を開く（現在プレイヤーのクリア情報を渡す）。"""
+        self._show_playlist_window("snapshot")
+
+    def open_maps(self) -> None:
+        """Playlist 画面を Maps タブ選択状態で開く。"""
+        self._show_playlist_window("maps")
+
+    def open_settings(self) -> None:
+        try:
+            dlg = SettingsDialog(self)
+            dlg.exec()
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "Settings", f"Failed to open settings:\n{exc}")
 
     def open_playlist_with_filter(
         self,
@@ -3843,9 +4097,7 @@ def run() -> None:
     # ウィンドウサイズは PlayerWindow.__init__ 内で復元される
     window.show()
 
-    # 起動直後にスナップショットが1つも無い場合は、最初にだけ
-    # Take Snapshot ダイアログを表示する。失敗・キャンセルしてもアプリは終了しない。
-    if window.player_combo.count() == 0:
-        QTimer.singleShot(0, window._prompt_initial_snapshot_if_needed)
+    # 起動直後に必要な設定/初回ダイアログを表示する。
+    QTimer.singleShot(0, window._prompt_startup_dialogs_if_needed)
 
     app.exec()

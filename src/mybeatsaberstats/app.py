@@ -261,7 +261,7 @@ class MainWindow(QMainWindow):
 
         for _icon_file, _attr in [
             ("scoresaber_logo.svg", "_fetched_ss_label"),
-            ("beatleader_logo.jpg", "_fetched_bl_label"),
+            ("beatleader_logo.webp", "_fetched_bl_label"),
             ("asssaber_logo.webp", "_fetched_acc_label"),
         ]:
             _icon_path = resource_path(_icon_file)
@@ -465,7 +465,7 @@ class MainWindow(QMainWindow):
 
         # Resolve icon files via helper that handles frozen/packaged/development layouts
         ss_icon_path = resource_path("scoresaber_logo.svg")
-        bl_icon_path = resource_path("beatleader_logo.jpg")
+        bl_icon_path = resource_path("beatleader_logo.webp")
         acc_icon_path = resource_path("asssaber_logo.webp")
 
         ss_icon = QIcon(str(ss_icon_path)) if ss_icon_path.exists() else QIcon()
