@@ -4053,6 +4053,7 @@ class PlaylistWindow(QMainWindow):
         table.itemSelectionChanged.connect(self._update_selection_status)
         table.itemSelectionChanged.connect(self._update_preview_from_selection)
         table.itemSelectionChanged.connect(table.viewport().update)
+        table.verticalScrollBar().valueChanged.connect(lambda _value, current_table=table: self._hydrate_visible_row_widgets(current_table))
         return table
 
     def _is_maps_tab(self, index: Optional[int] = None) -> bool:
@@ -5273,23 +5274,29 @@ class PlaylistWindow(QMainWindow):
             self._btn_load.setEnabled(True)
             return
 
-        self._show_load_progress_dialog("Preparing load...")
+        prep_steps = 4
+        self._update_load_progress_dialog(0, prep_steps, "Preparing load... 0%")
         if reset_filters and not self._rb_bs.isChecked():
             self._reset_filters()
+        self._update_load_progress_dialog(1, prep_steps, "Preparing load... 25%")
         self._all_entries = []
         self._filtered = []
         self._table.setRowCount(0)
         self._sync_active_table_state()
+        self._update_load_progress_dialog(2, prep_steps, "Preparing load... 50%")
         self._clear_preview()
+        self._update_load_progress_dialog(3, prep_steps, "Preparing load... 75%")
         self._setWindowTitle_source(pending_title)
         if pending_open_path is not None and pending_open_service == "accsaber_rl":
             self._open_bplist_path = pending_open_path
+        self._update_load_progress_dialog(4, prep_steps, "Preparing load... 100%")
         self._start_async_load(worker_fn)
 
     def _show_load_progress_dialog(self, label: str = "Loading...") -> None:
-        if self._progress_dlg is not None:
-            self._progress_dlg.setLabelText(label)
-            self._progress_dlg.show()
+        dlg = self._progress_dlg
+        if dlg is not None:
+            dlg.setLabelText(label)
+            dlg.show()
             QApplication.processEvents()
             return
         dlg = QProgressDialog(label, "Cancel", 0, 0, self)
@@ -5302,6 +5309,22 @@ class PlaylistWindow(QMainWindow):
         self._progress_dlg = dlg
         QApplication.processEvents()
 
+    def _close_load_progress_dialog(self) -> None:
+        dlg = self._progress_dlg
+        self._progress_dlg = None
+        if dlg is not None:
+            dlg.close()
+
+    def _update_load_progress_dialog(self, done: int, total: int, label: str) -> None:
+        self._show_load_progress_dialog(label)
+        dlg = self._progress_dlg
+        if dlg is None:
+            return
+        dlg.setRange(0, max(1, total))
+        dlg.setValue(max(0, min(done, total)))
+        dlg.setLabelText(label)
+        QApplication.processEvents()
+
     def _start_async_load(self, worker_fn) -> None:
         """API 取得をスレッドで実行してプログレスダイアログを表示する。"""
         self._show_load_progress_dialog("Loading...")
@@ -5309,6 +5332,7 @@ class PlaylistWindow(QMainWindow):
         if dlg is None:
             self._btn_load.setEnabled(True)
             return
+        dlg.setRange(0, 0)
 
         sigs = self._load_signals
 
@@ -5322,7 +5346,7 @@ class PlaylistWindow(QMainWindow):
 
         def _on_cancel() -> None:
             # キャンセルボタンは UI を閉じるだけ（スレッドは自然終了を待つ）
-            dlg.close()
+            self._close_load_progress_dialog()
             self._btn_load.setEnabled(True)
 
         dlg.canceled.connect(_on_cancel)
@@ -5426,16 +5450,15 @@ class PlaylistWindow(QMainWindow):
             sigs.error.emit(str(exc))
 
     def _on_load_progress(self, done: int, total: int, label: str) -> None:
-        if self._progress_dlg and not self._progress_dlg.wasCanceled():
+        dlg = self._progress_dlg
+        if dlg is not None and not dlg.wasCanceled():
             if total > 0:
-                self._progress_dlg.setMaximum(total)
-                self._progress_dlg.setValue(done)
-            self._progress_dlg.setLabelText(label)
+                dlg.setMaximum(total)
+                dlg.setValue(done)
+            dlg.setLabelText(label)
 
     def _on_load_finished(self, entries: List[MapEntry]) -> None:
-        if self._progress_dlg:
-            self._progress_dlg.close()
-            self._progress_dlg = None
+        self._close_load_progress_dialog()
         self._btn_load.setEnabled(True)
         self._all_entries = entries
         if self._pending_load_maps_tab:
@@ -5497,9 +5520,7 @@ class PlaylistWindow(QMainWindow):
         self._save_window_state()
 
     def _on_load_error(self, msg: str) -> None:
-        if self._progress_dlg:
-            self._progress_dlg.close()
-            self._progress_dlg = None
+        self._close_load_progress_dialog()
         self._btn_load.setEnabled(True)
         QMessageBox.critical(self, "Load Error", msg)
 
@@ -6610,6 +6631,36 @@ class PlaylistWindow(QMainWindow):
                     table.setItem(row, _COL_ONECLICK, oneclick_item)
                     table.setCellWidget(row, _COL_ONECLICK, self._make_oneclick_button(entry))
 
+    def _hydrate_visible_row_widgets(self, table: Optional[QTableWidget] = None) -> None:
+        target_table = self._table if table is None else table
+        row_count = target_table.rowCount()
+        if row_count <= 0:
+            return
+        if not target_table.isVisible() or target_table.viewport().height() <= 0:
+            return
+        top_row = target_table.rowAt(0)
+        if top_row < 0:
+            top_row = 0
+        bottom_row = target_table.rowAt(target_table.viewport().height() - 1)
+        if bottom_row < 0:
+            bottom_row = row_count - 1
+        start_row = max(0, top_row - 4)
+        end_row = min(row_count - 1, bottom_row + 4)
+        show_cover = not target_table.isColumnHidden(_COL_COVER)
+        show_oneclick = not target_table.isColumnHidden(_COL_ONECLICK)
+
+        for row in range(start_row, end_row + 1):
+            item = target_table.item(row, _COL_SONG)
+            if item is None:
+                continue
+            entry = item.data(Qt.ItemDataRole.UserRole)
+            if not isinstance(entry, MapEntry):
+                continue
+            if show_cover and target_table.cellWidget(row, _COL_COVER) is None:
+                target_table.setCellWidget(row, _COL_COVER, self._make_cover_cell_widget(entry))
+            if show_oneclick and target_table.cellWidget(row, _COL_ONECLICK) is None:
+                target_table.setCellWidget(row, _COL_ONECLICK, self._make_oneclick_button(entry))
+
     def _on_row_height_up(self) -> None:
         self._row_height = min(self._row_height + 4, 64)
         self._apply_row_height(refresh_table=True)
@@ -6733,6 +6784,7 @@ class PlaylistWindow(QMainWindow):
     def _refresh_table(self, entries: List[MapEntry]) -> None:
         table = self._table
         table.setSortingEnabled(False)
+        table.setUpdatesEnabled(False)
         table.setRowCount(0)
         table.setRowCount(len(entries))
         self._thumbnail_queue.clear()
@@ -6765,13 +6817,10 @@ class PlaylistWindow(QMainWindow):
             song_item = QTableWidgetItem(e.song_name)
             song_item.setData(Qt.ItemDataRole.UserRole, e)
             table.setItem(row, _COL_SONG, song_item)
-            if _show_cover:
-                table.setCellWidget(row, _COL_COVER, self._make_cover_cell_widget(e))
             oneclick_sort_val = 1.0 if self._is_beatsaver_entry_installed(e) else 0.0
             oneclick_item = _NumItem("", oneclick_sort_val)
             oneclick_item.setToolTip("Downloaded" if oneclick_sort_val > 0 else "Not downloaded")
             table.setItem(row, _COL_ONECLICK, oneclick_item)
-            table.setCellWidget(row, _COL_ONECLICK, self._make_oneclick_button(e))
             has_bl_stats_source = bool(e.leaderboard_id and e.source in ("beatleader", "beatsaver"))
             table.setItem(
                 row,
@@ -6900,12 +6949,14 @@ class PlaylistWindow(QMainWindow):
 
         self._update_table_visual_mode()
         table.setSortingEnabled(True)
+        table.setUpdatesEnabled(True)
         table.clearSelection()
         if not entries:
             self._clear_preview()
         else:
             self._clear_preview()
         self._update_selection_status()
+        self._hydrate_visible_row_widgets(table)
 
     # ──────────────────────────────────────────────────────────────────────────
     # 一括出力
