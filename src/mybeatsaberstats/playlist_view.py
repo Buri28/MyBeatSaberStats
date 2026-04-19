@@ -12,8 +12,11 @@ import json
 import math
 import os
 import re
+import shutil
 import tempfile
 import threading
+from urllib.parse import quote
+import zipfile
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -21,7 +24,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 import requests
 
-from PySide6.QtCore import Qt, QObject, Signal, QUrl, QSize
+from PySide6.QtCore import Qt, QObject, Signal, QUrl, QSize, QDate
 from PySide6.QtGui import QColor, QImage, QPainter, QFont, QPixmap, QDesktopServices, QIcon, QPalette
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
@@ -29,6 +32,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QDoubleSpinBox,
+    QDateEdit,
     QFileDialog,
     QGridLayout,
     QGroupBox,
@@ -55,7 +59,9 @@ from PySide6.QtWidgets import (
     QProgressDialog,
     QApplication,
     QCheckBox,
+    QMenu,
     QProxyStyle,
+    QSlider,
     QStyle,
     QStyleOptionHeader,
     QTextBrowser,
@@ -64,6 +70,7 @@ from PySide6.QtWidgets import (
 
 from .snapshot import BASE_DIR, RESOURCES_DIR
 from .accsaber_reloaded import is_pending_difficulty as _is_rl_pending_difficulty
+from .beatsaver_cache import load_beatsaver_meta_cache, update_beatsaver_meta_cache, upsert_beatsaver_meta_cache
 from .settings_store import (
     load_beatsaber_dir as _load_beatsaber_dir_setting,
     load_playlist_export_dir as _load_playlist_export_dir_setting,
@@ -312,13 +319,14 @@ def export_playlist_configs(
     has_bl = any(config.source == "bl" for config in configs)
     has_rl = any(config.source == "rl" for config in configs)
     has_acc = any(config.source == "acc" for config in configs)
+    bs_configs = [config for config in configs if config.source == "bs"]
 
     ss_maps: List[MapEntry] = []
     bl_maps: List[MapEntry] = []
     rl_maps: List[MapEntry] = []
     acc_maps: List[MapEntry] = []
 
-    n_load = (1 if has_ss else 0) + (1 if has_bl else 0) + (1 if has_rl else 0) + (1 if has_acc else 0)
+    n_load = (1 if has_ss else 0) + (1 if has_bl else 0) + (1 if has_rl else 0) + (1 if has_acc else 0) + len(bs_configs)
     total = n_load + len(configs)
     step = 0
 
@@ -361,7 +369,25 @@ def export_playlist_configs(
     for config in configs:
         _emit(f"Exporting: {config.label}...")
         try:
-            base_maps = {"ss": ss_maps, "bl": bl_maps, "rl": rl_maps, "acc": acc_maps}.get(config.source, [])
+            if config.source == "bs":
+                _emit(f"Loading BeatSaver: {config.label}...")
+                bs_from_dt = datetime.fromisoformat(config.bs_from_date).replace(tzinfo=timezone.utc) if config.bs_from_date else None
+                bs_to_dt = datetime.fromisoformat(config.bs_to_date).replace(tzinfo=timezone.utc) if config.bs_to_date else None
+                base_maps = load_beatsaver_maps(
+                    steam_id=steam_id,
+                    query=config.bs_query,
+                    days=config.bs_days,
+                    min_rating=config.bs_min_rating / 100.0,
+                    min_votes=config.bs_min_votes,
+                    max_maps=config.bs_max_maps,
+                    from_dt=bs_from_dt,
+                    to_dt=bs_to_dt,
+                    unranked_only=config.bs_unranked_only,
+                    exclude_ai=config.bs_exclude_ai,
+                )
+                step += 1
+            else:
+                base_maps = {"ss": ss_maps, "bl": bl_maps, "rl": rl_maps, "acc": acc_maps}.get(config.source, [])
             maps = _apply_config_filter(list(base_maps), config)
             _write_config_files(maps, config, folder_path, saved_files, errors, resolved_covers)
         except Exception as exc:
@@ -538,6 +564,8 @@ class MapEntry:
     beatleader_replay_url: str = ""
     beatleader_global1_replay_url: str = ""
     beatleader_local1_replay_url: str = ""
+    beatleader_attempts: int = 0
+    beatleader_plays: int = 0
 
     @property
     def status_str(self) -> str:
@@ -563,6 +591,20 @@ class MapEntry:
     @property
     def display_song_name(self) -> str:
         return self.song_name
+
+    @property
+    def beatleader_success_rate(self) -> float:
+        if self.beatleader_attempts <= 0:
+            return 0.0
+        return self.beatleader_plays / self.beatleader_attempts * 100.0
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "MapEntry":
+        known = {field_name for field_name in cls.__dataclass_fields__.keys()}  # type: ignore[attr-defined]
+        return cls(**{key: value for key, value in data.items() if key in known})
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -613,6 +655,122 @@ def _parse_unix_datetime_to_ts(value: object) -> int:
         return int(float(raw_value))
     except (TypeError, ValueError):
         return 0
+
+
+def _apply_beatsaver_meta(entry: MapEntry, meta: Optional[dict]) -> None:
+    beatsaver_key = str(entry.beatsaver_key or (meta or {}).get("beatsaver_key") or "").strip()
+    if beatsaver_key and not entry.beatsaver_key:
+        entry.beatsaver_key = beatsaver_key
+    if beatsaver_key:
+        if not entry.beatsaver_page_url:
+            entry.beatsaver_page_url = f"https://beatsaver.com/maps/{beatsaver_key}"
+        if not entry.beatsaver_download_url:
+            entry.beatsaver_download_url = f"https://beatsaver.com/api/download/key/{beatsaver_key}"
+
+    if not meta:
+        return
+
+    if not entry.beatsaver_cover_url:
+        entry.beatsaver_cover_url = str(meta.get("beatsaver_cover_url") or "")
+    if not entry.beatsaver_preview_url:
+        entry.beatsaver_preview_url = str(meta.get("beatsaver_preview_url") or "")
+    if not entry.beatsaver_page_url:
+        entry.beatsaver_page_url = str(meta.get("beatsaver_page_url") or "")
+    if not entry.beatsaver_download_url:
+        entry.beatsaver_download_url = str(meta.get("beatsaver_download_url") or "")
+    if not entry.beatsaver_description:
+        entry.beatsaver_description = str(meta.get("beatsaver_description") or "")
+    if entry.beatsaver_uploaded_ts <= 0:
+        entry.beatsaver_uploaded_ts = int(meta.get("beatsaver_uploaded_ts") or 0)
+    if entry.beatsaver_votes <= 0:
+        entry.beatsaver_votes = int(meta.get("beatsaver_votes") or 0)
+    if entry.beatsaver_upvotes <= 0:
+        entry.beatsaver_upvotes = int(meta.get("beatsaver_upvotes") or 0)
+    if entry.beatsaver_downvotes <= 0:
+        entry.beatsaver_downvotes = int(meta.get("beatsaver_downvotes") or 0)
+    if entry.beatsaver_rating <= 0:
+        entry.beatsaver_rating = float(meta.get("beatsaver_rating") or 0.0)
+
+
+def _enrich_entries_with_beatsaver_cache(entries: List[MapEntry]) -> List[MapEntry]:
+    if not entries:
+        return entries
+    cache = load_beatsaver_meta_cache()
+    for entry in entries:
+        song_hash = (entry.song_hash or "").upper()
+        _apply_beatsaver_meta(entry, cache.get(song_hash))
+    return entries
+
+
+def _cache_beatsaver_meta_from_entries(entries: List[MapEntry]) -> List[MapEntry]:
+    meta_entries = []
+    for entry in entries:
+        song_hash = (entry.song_hash or "").upper()
+        if not song_hash:
+            continue
+        if not any(
+            (
+                entry.beatsaver_key,
+                entry.beatsaver_page_url,
+                entry.beatsaver_download_url,
+                entry.beatsaver_cover_url,
+                entry.beatsaver_preview_url,
+                entry.beatsaver_description,
+            )
+        ):
+            continue
+        meta_entries.append({
+            "hash": song_hash,
+            "beatsaver_key": str(entry.beatsaver_key or "").strip(),
+            "beatsaver_page_url": str(entry.beatsaver_page_url or "").strip(),
+            "beatsaver_download_url": str(entry.beatsaver_download_url or "").strip(),
+            "beatsaver_cover_url": str(entry.beatsaver_cover_url or "").strip(),
+            "beatsaver_preview_url": str(entry.beatsaver_preview_url or "").strip(),
+            "beatsaver_description": str(entry.beatsaver_description or ""),
+            "beatsaver_uploaded_ts": int(entry.beatsaver_uploaded_ts or 0),
+            "beatsaver_rating": float(entry.beatsaver_rating or 0.0),
+            "beatsaver_votes": int(entry.beatsaver_votes or 0),
+            "beatsaver_upvotes": int(entry.beatsaver_upvotes or 0),
+            "beatsaver_downvotes": int(entry.beatsaver_downvotes or 0),
+            "song_name": str(entry.song_name or ""),
+            "song_author": str(entry.song_author or ""),
+            "mapper": str(entry.mapper or ""),
+        })
+    if meta_entries:
+        upsert_beatsaver_meta_cache(meta_entries)
+    return _enrich_entries_with_beatsaver_cache(entries)
+
+
+def _cache_missing_beatsaver_metadata(
+    entries: List[MapEntry],
+    on_progress: Optional[Callable[[int, int, str], None]] = None,
+) -> List[MapEntry]:
+    missing_hashes: List[str] = []
+    seed_map: Dict[str, str] = {}
+    seen_hashes: set[str] = set()
+    for entry in entries:
+        song_hash = (entry.song_hash or "").upper()
+        if not song_hash or song_hash in seen_hashes:
+            continue
+        seen_hashes.add(song_hash)
+        if entry.beatsaver_key:
+            seed_map[song_hash] = str(entry.beatsaver_key).strip()
+        has_link = bool(entry.beatsaver_key or entry.beatsaver_page_url or entry.beatsaver_download_url)
+        if not has_link:
+            missing_hashes.append(song_hash)
+    if not missing_hashes and not seed_map:
+        return _enrich_entries_with_beatsaver_cache(entries)
+
+    def _progress(done: int, total: int) -> None:
+        if on_progress is not None:
+            on_progress(done, total, f"Updating BeatSaver metadata... {done}/{total}")
+
+    total = len(missing_hashes)
+    if total > 0 and on_progress is not None:
+        on_progress(0, total, f"Updating BeatSaver metadata... 0/{total}")
+    if missing_hashes or seed_map:
+        update_beatsaver_meta_cache(missing_hashes, seed_map=seed_map, on_progress=_progress)
+    return _enrich_entries_with_beatsaver_cache(entries)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -712,6 +870,11 @@ def load_ss_maps(steam_id: Optional[str] = None, filter_stars: bool = True) -> L
         for e in load_bl_maps()
         if e.duration_seconds > 0
     }
+    bl_link_index = {
+        (e.song_hash.upper(), e.mode, e.difficulty): e
+        for e in load_bl_maps(steam_id)
+        if e.leaderboard_id or e.beatleader_page_url or e.beatleader_replay_url
+    }
 
     entries: List[MapEntry] = []
     for lb_id_str, m in maps_dict.items():
@@ -728,6 +891,7 @@ def load_ss_maps(steam_id: Optional[str] = None, filter_stars: bool = True) -> L
         difficulty = _diff_from_raw(diff_raw, diff_num)
         mode = _mode_from_gamemode(game_mode)
         ranked_date_ts = _parse_iso_datetime_to_ts(m.get("rankedDate") or m.get("qualifiedDate"))
+        bl_link_entry = bl_link_index.get((song_hash, mode, difficulty))
 
         player_pp, cleared, nf_clear, acc, rank, mods = _ss_player_score_info(
             ss_scores, lb_id_str, max_score
@@ -757,9 +921,11 @@ def load_ss_maps(steam_id: Optional[str] = None, filter_stars: bool = True) -> L
             duration_seconds=bl_duration_index.get((song_hash, mode, difficulty), 0),
             played_at_ts=played_at_ts,
             source_date_ts=ranked_date_ts,
+            beatleader_page_url=bl_link_entry.beatleader_page_url if bl_link_entry else "",
+            beatleader_replay_url=bl_link_entry.beatleader_replay_url if bl_link_entry else "",
         ))
 
-    return entries
+    return _enrich_entries_with_beatsaver_cache(entries)
 
 
 def load_bl_maps(steam_id: Optional[str] = None) -> List[MapEntry]:
@@ -793,12 +959,17 @@ def load_bl_maps(steam_id: Optional[str] = None) -> List[MapEntry]:
                 pass
 
     entries: List[MapEntry] = []
+    bl_replay_idx = _build_bl_replay_hash_index(bl_scores) if bl_scores else {}
     for m in all_maps:
         diff = m.get("difficulty", {})
         song = m.get("song", {})
         map_id = str(m.get("id") or "")
         stars = float(diff.get("stars") or 0)
         ranked_date_ts = int(diff.get("rankedTime") or diff.get("qualifiedTime") or diff.get("nominatedTime") or 0)
+        diff_name = diff.get("difficultyName") or "ExpertPlus"
+        mode_name = diff.get("modeName") or "Standard"
+        song_hash = (song.get("hash") or "").upper()
+        replay_url = bl_replay_idx.get((song_hash, mode_name, diff_name), "")
 
         player_pp, cleared, nf_clear, acc, rank, mods = _bl_player_score_info(bl_scores, map_id)
         played_at_ts = _bl_player_score_timeset(bl_scores, map_id)
@@ -808,9 +979,9 @@ def load_bl_maps(steam_id: Optional[str] = None) -> List[MapEntry]:
             song_name=song.get("name") or "",
             song_author=song.get("author") or "",
             mapper=song.get("mapper") or "",
-            song_hash=(song.get("hash") or "").upper(),
-            difficulty=diff.get("difficultyName") or "ExpertPlus",
-            mode=diff.get("modeName") or "Standard",
+            song_hash=song_hash,
+            difficulty=diff_name,
+            mode=mode_name,
             stars=stars,
             max_pp=0.0,
             player_pp=player_pp,
@@ -826,9 +997,13 @@ def load_bl_maps(steam_id: Optional[str] = None) -> List[MapEntry]:
             duration_seconds=_normalize_duration_seconds(song.get("duration")),
             played_at_ts=played_at_ts,
             source_date_ts=ranked_date_ts,
+            beatleader_page_url=f"https://beatleader.com/leaderboard/global/{map_id}" if map_id else "",
+            beatleader_replay_url=replay_url,
+            beatleader_attempts=int(m.get("attempts") or 0),
+            beatleader_plays=int(m.get("plays") or 0),
         ))
 
-    return entries
+    return _enrich_entries_with_beatsaver_cache(entries)
 
 
 def _build_ss_score_hash_index(
@@ -1089,7 +1264,7 @@ def load_bplist_maps(
                         duration_seconds=0,
                     ))
 
-    return entries
+    return _enrich_entries_with_beatsaver_cache(entries)
 
 
 def load_beatsaver_maps(
@@ -1099,13 +1274,29 @@ def load_beatsaver_maps(
     min_rating: float = 0.0,
     min_votes: int = 0,
     max_maps: Optional[int] = None,
+    from_dt: Optional[datetime] = None,
+    to_dt: Optional[datetime] = None,
     unranked_only: bool = True,
     exclude_ai: bool = True,
     on_progress: Optional[Callable[[int, int, str], None]] = None,
+    session: Optional[requests.Session] = None,
 ) -> List[MapEntry]:
     """BeatSaver の検索 API から譜面を取得し、未プレイ判定付きで返す。"""
     now = datetime.now(timezone.utc)
-    since = now - timedelta(days=max(1, days))
+    if to_dt is None:
+        to_dt = now
+    elif to_dt.tzinfo is None:
+        to_dt = to_dt.replace(tzinfo=timezone.utc)
+    else:
+        to_dt = to_dt.astimezone(timezone.utc)
+    if from_dt is None:
+        from_dt = to_dt - timedelta(days=max(1, days))
+    elif from_dt.tzinfo is None:
+        from_dt = from_dt.replace(tzinfo=timezone.utc)
+    else:
+        from_dt = from_dt.astimezone(timezone.utc)
+    if from_dt > to_dt:
+        from_dt, to_dt = to_dt, from_dt
 
     ss_scores_raw: Dict[str, dict] = {}
     bl_scores_raw: Dict[str, dict] = {}
@@ -1131,7 +1322,7 @@ def load_beatsaver_maps(
     bl_leaderboard_idx = _build_bl_leaderboard_hash_index(bl_scores_raw)
     bl_ranked_idx = _build_bl_hash_index(load_bl_maps())
 
-    session = requests.Session()
+    session = session or requests.Session()
     entries: List[MapEntry] = []
     pages = 1
     q = query.strip()
@@ -1147,8 +1338,8 @@ def load_beatsaver_maps(
             params={
                 "q": q,
                 "pageSize": 100 if max_maps is None else min(100, max_maps),
-                "from": since.isoformat().replace("+00:00", "Z"),
-                "to": now.isoformat().replace("+00:00", "Z"),
+                "from": from_dt.isoformat().replace("+00:00", "Z"),
+                "to": to_dt.isoformat().replace("+00:00", "Z"),
                 "minRating": min_rating,
                 "minVotes": min_votes,
                 "order": "Latest",
@@ -1261,7 +1452,7 @@ def load_beatsaver_maps(
                     nf_clear=nf_clear,
                     player_acc=nps_value,
                     player_rank=votes,
-                    leaderboard_id=str(doc.get("id") or beatsaver_key or song_hash),
+                    leaderboard_id=bl_leaderboard_id,
                     source="beatsaver",
                     score_source=score_source,
                     duration_seconds=duration_seconds,
@@ -1271,7 +1462,7 @@ def load_beatsaver_maps(
                     beatsaver_cover_url=cover_url,
                     beatsaver_preview_url=preview_url,
                     beatsaver_page_url=page_url,
-                    beatsaver_download_url=f"beatsaver://{beatsaver_key}" if beatsaver_key else download_url,
+                    beatsaver_download_url=download_url or (f"https://beatsaver.com/api/download/key/{beatsaver_key}" if beatsaver_key else ""),
                     beatsaver_rating=rating_value,
                     beatsaver_votes=votes,
                     beatsaver_upvotes=upvotes,
@@ -1282,6 +1473,8 @@ def load_beatsaver_maps(
                     beatleader_replay_url=bl_replay_url,
                     beatleader_global1_replay_url="",
                     beatleader_local1_replay_url="",
+                    beatleader_attempts=bl_entry.beatleader_attempts if bl_entry else 0,
+                    beatleader_plays=bl_entry.beatleader_plays if bl_entry else 0,
                 ))
         if page + 1 >= pages:
             break
@@ -1412,7 +1605,8 @@ def _source_date_item(ts: int, *, include_time: bool = False) -> QTableWidgetIte
 def _sort_dir_from_mode(sort_mode: str) -> str:
     """sort_mode 文字列から 'asc'/'desc' を返す。"""
     return "desc" if sort_mode in (
-        "pp_high", "ap_high", "acc_high", "rank_high", "star_desc", "fc_desc",
+        "pp_high", "ap_high", "acc_high", "rank_high", "star_desc", "fc_desc", "duration_desc",
+        "bl_plays_desc", "bl_attempts_desc",
         "status_desc", "song_desc", "date_desc", "playtime_desc", "diff_desc", "mode_desc", "cat_desc",
         "mapper_desc", "author_desc",
     ) else "asc"
@@ -2072,11 +2266,12 @@ def load_accsaber_reloaded_maps(
                 played_at_ts=rl_played_at_ts if rl_played_at_ts else played_at_ts,
                 source_date_ts=ranked_date_ts,
                 pending=pending,
+                beatsaver_key=str(song.get("beatsaverCode") or ""),
             ))
 
     if on_progress:
         on_progress(1, 1, "Done")
-    return entries
+    return _enrich_entries_with_beatsaver_cache(entries)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -2104,7 +2299,7 @@ class _ThumbnailSignals(QObject):
 # ──────────────────────────────────────────────────────────────────────────────
 
 _BATCH_SRC_PREFIX: Dict[str, str] = {
-    "ss": "SS", "bl": "BL", "acc": "AS", "rl": "RL", "pl": "PL",
+    "ss": "SS", "bl": "BL", "acc": "AS", "rl": "RL", "bs": "BS", "pl": "PL",
 }
 
 @dataclass
@@ -2126,7 +2321,7 @@ class _BatchConfig:
     """
     label: str
     filename_base: str
-    source: str            # "ss" | "bl" | "rl"
+    source: str            # "ss" | "bl" | "rl" | "acc" | "bs"
     # Status filter
     show_cleared: bool = True
     show_nf: bool = True
@@ -2145,6 +2340,16 @@ class _BatchConfig:
     sort_mode: str = "star_asc"  # "star_asc"|"star_desc"|"pp_high"|"pp_low"|"ap_high"|"ap_low"|"acc_high"|"acc_low"|"rank_low"|"rank_high"
     # Song filter
     song_filter: str = ""
+    # BeatSaver source filters
+    bs_query: str = ""
+    bs_from_date: str = ""
+    bs_to_date: str = ""
+    bs_days: int = 7
+    bs_max_maps: int = 1000
+    bs_min_rating: int = 50
+    bs_min_votes: int = 0
+    bs_unranked_only: bool = True
+    bs_exclude_ai: bool = True
     # Enabled
     enabled: bool = True
 
@@ -2164,6 +2369,8 @@ class _BatchConfig:
         elif self.source == "acc":
             cats = [n for flag, n in [(self.cat_true, "Tr"), (self.cat_standard, "Std"), (self.cat_tech, "Tch")] if flag]
             src = f"Acc[{'+'.join(cats) or 'none'}]"
+        elif self.source == "bs":
+            src = f"BS[R{self.bs_min_rating},V{self.bs_min_votes},M{self.bs_max_maps}]"
         sts = "".join([s for flag, s in [(self.show_cleared, "✓"), (self.show_nf, "⚠"), (self.show_unplayed, "✗"), (self.show_queued, "Q")] if flag])
         sort_label = {
             "star_asc": "Star↑", "star_desc": "Star↓",
@@ -2178,6 +2385,9 @@ class _BatchConfig:
             "status_desc": "Sts↓", "status_asc": "Sts↑",
             "song_desc": "Song↓", "song_asc": "Song↑",
             "date_desc": "Date↓", "date_asc": "Date↑",
+            "duration_desc": "Len↓", "duration_asc": "Len↑",
+            "bl_plays_desc": "BLPlay↓", "bl_plays_asc": "BLPlay↑",
+            "bl_attempts_desc": "BLAtt↓", "bl_attempts_asc": "BLAtt↑",
             "diff_desc": "Diff↓", "diff_asc": "Diff↑",
             "mode_desc": "Mode↓", "mode_asc": "Mode↑",
             "cat_desc": "Cat↓", "cat_asc": "Cat↑",
@@ -2285,6 +2495,18 @@ def _sort_entries(entries: List[MapEntry], sort_mode: str) -> List[MapEntry]:
                 e.song_name.lower(),
             )
         )
+    elif sort_mode == "duration_desc":
+        result.sort(key=lambda e: (-e.duration_seconds, e.song_name.lower()))
+    elif sort_mode == "duration_asc":
+        result.sort(key=lambda e: (e.duration_seconds, e.song_name.lower()))
+    elif sort_mode == "bl_plays_desc":
+        result.sort(key=lambda e: (-e.beatleader_plays, -e.beatleader_attempts, e.song_name.lower()))
+    elif sort_mode == "bl_plays_asc":
+        result.sort(key=lambda e: (e.beatleader_plays, e.beatleader_attempts, e.song_name.lower()))
+    elif sort_mode == "bl_attempts_desc":
+        result.sort(key=lambda e: (-e.beatleader_attempts, -e.beatleader_plays, e.song_name.lower()))
+    elif sort_mode == "bl_attempts_asc":
+        result.sort(key=lambda e: (e.beatleader_attempts, e.beatleader_plays, e.song_name.lower()))
     elif sort_mode == "playtime_desc":
         result.sort(
             key=lambda e: (
@@ -2390,9 +2612,21 @@ def _config_export_tag(cfg: "_BatchConfig") -> str:
         safe_q = re.sub(r'[\\/:*?"<>|]', '', cfg.song_filter).strip().replace(' ', '-')[:20]
         if safe_q:
             parts.append(safe_q)
+    if cfg.source == "bs":
+        if cfg.bs_query:
+            safe_bs_q = re.sub(r'[\\/:*?"<>|]', '', cfg.bs_query).strip().replace(' ', '-')[:20]
+            if safe_bs_q:
+                parts.append(f"q-{safe_bs_q}")
+        if cfg.bs_min_rating > 0:
+            parts.append(f"rate{cfg.bs_min_rating}")
+        if cfg.bs_min_votes > 0:
+            parts.append(f"votes{cfg.bs_min_votes}")
     _sort_tags = {
         "star_asc": "StarAsc", "star_desc": "StarDesc",
         "date_desc": "DateDesc", "date_asc": "DateAsc",
+        "duration_desc": "DurationDesc", "duration_asc": "DurationAsc",
+        "bl_plays_desc": "BLPlaysDesc", "bl_plays_asc": "BLPlaysAsc",
+        "bl_attempts_desc": "BLAttemptsDesc", "bl_attempts_asc": "BLAttemptsAsc",
         "playtime_desc": "PlayedDesc", "playtime_asc": "PlayedAsc",
         "pp_high": "PPDesc", "pp_low": "PPAsc",
         "ap_high": "APDesc", "ap_low": "APAsc",
@@ -2416,6 +2650,12 @@ _SORT_SYMBOL: Dict[str, str] = {
     "star_desc":     "★↓",
     "date_desc":     "Date↓",
     "date_asc":      "Date↑",
+    "duration_desc": "Len↓",
+    "duration_asc":  "Len↑",
+    "bl_plays_desc": "BLPlay↓",
+    "bl_plays_asc":  "BLPlay↑",
+    "bl_attempts_desc": "BLAtt↓",
+    "bl_attempts_asc":  "BLAtt↑",
     "playtime_desc": "Played↓",
     "playtime_asc":  "Played↑",
     "pp_high":       "PP↓",
@@ -2465,6 +2705,12 @@ def _sort_indicator_from_mode(sort_mode: str) -> Tuple[int, Qt.SortOrder]:
         "song_asc": (_COL_SONG, Qt.SortOrder.AscendingOrder),
         "date_desc": (_COL_SOURCE_DATE, Qt.SortOrder.DescendingOrder),
         "date_asc": (_COL_SOURCE_DATE, Qt.SortOrder.AscendingOrder),
+        "duration_desc": (_COL_DURATION, Qt.SortOrder.DescendingOrder),
+        "duration_asc": (_COL_DURATION, Qt.SortOrder.AscendingOrder),
+        "bl_plays_desc": (_COL_BL_PLAYS, Qt.SortOrder.DescendingOrder),
+        "bl_plays_asc": (_COL_BL_PLAYS, Qt.SortOrder.AscendingOrder),
+        "bl_attempts_desc": (_COL_BL_ATTEMPTS, Qt.SortOrder.DescendingOrder),
+        "bl_attempts_asc": (_COL_BL_ATTEMPTS, Qt.SortOrder.AscendingOrder),
         "playtime_desc": (_COL_PLAY_TIME, Qt.SortOrder.DescendingOrder),
         "playtime_asc": (_COL_PLAY_TIME, Qt.SortOrder.AscendingOrder),
         "diff_desc": (_COL_DIFF, Qt.SortOrder.DescendingOrder),
@@ -2651,29 +2897,34 @@ def _run_export_configs(
 
 # テーブル列インデックス
 _COL_STATUS = 0
-_COL_SONG = 1
-_COL_SOURCE_DATE = 2
-_COL_PLAY_TIME = 3
-_COL_DIFF = 4
-_COL_MODE = 5
-_COL_ACC_CAT = 6
-_COL_SERVICE = 7     # スコア元サービス表示 (BL / SS / AS)
-_COL_PLAYER_RANK = 8
-_COL_STARS = 9
-_COL_PLAYER_ACC = 10
-_COL_PLAYER_PP = 11
-_COL_BS_RATE = 12
-_COL_BS_UPVOTES = 13
-_COL_BS_DOWNVOTES = 14
-_COL_FC = 15
-_COL_MOD = 16
-_COL_MAPPER = 17
-_COL_AUTHOR = 18
-_COL_COUNT = 19
+_COL_COVER = 1
+_COL_SONG = 2
+_COL_ONECLICK = 3
+_COL_SOURCE_DATE = 4
+_COL_DURATION = 5
+_COL_PLAY_TIME = 6
+_COL_DIFF = 7
+_COL_MODE = 8
+_COL_ACC_CAT = 9
+_COL_SERVICE = 10     # スコア元サービス表示 (BL / SS / AS)
+_COL_PLAYER_RANK = 11
+_COL_STARS = 12
+_COL_PLAYER_ACC = 13
+_COL_PLAYER_PP = 14
+_COL_BS_RATE = 15
+_COL_BS_UPVOTES = 16
+_COL_BS_DOWNVOTES = 17
+_COL_FC = 18
+_COL_MOD = 19
+_COL_MAPPER = 20
+_COL_AUTHOR = 21
+_COL_BL_PLAYS = 22
+_COL_BL_ATTEMPTS = 23
+_COL_COUNT = 24
 
 _COL_LABELS = [
-    "Status", "Song", "Date", "Played At", "Diff", "Mode", "Category", "Service", "Rank", "★", "Acc %", "PP",
-    "Rate %", "⇧Votes", "⇩Votes", "FC", "Mods", "Mapper", "Author",
+    "Status", "Cover", "Song", "DL", "Date", "Length", "Played At", "Diff", "Mode", "Category", "Service", "Rank", "★", "Acc %", "PP",
+    "Rate %", "⇧", "⇩", "FC", "Mods", "Mapper", "Author", "BL Plays", "BL Attempts",
 ]
 
 
@@ -2728,11 +2979,23 @@ class PlaylistWindow(QMainWindow):
         self._thumbnail_queue: List[str] = []
         self._thumbnail_pending: set[str] = set()
         self._thumbnail_active_url = ""
+        self._installed_beatsaber_dir = ""
+        self._installed_level_keys: set[str] = set()
+        self._row_height = 34
+        self._restored_maps_state: Optional[dict] = None
+        self._highest_diff_only_snapshot = False
+        self._highest_diff_only_maps = True
+        self._bs_rating_sync = False
+        self._bs_votes_sync = False
+        self._bs_date_sync = False
         self._preview_token = 0
         self._current_preview_url = ""
         self._progress_dlg: Optional[QProgressDialog] = None
         self._bl_api_session = requests.Session()
         self._bl_top_replay_cache: Dict[Tuple[str, str], str] = {}
+        self._bl_preview_replay_index: Optional[Dict[Tuple[str, str, str], str]] = None
+        self._bl_preview_leaderboard_index: Optional[Dict[Tuple[str, str, str], str]] = None
+        self._preview_title_full_text = "No map selected"
 
         central = QWidget(self)
         self.setCentralWidget(central)
@@ -2757,6 +3020,7 @@ class PlaylistWindow(QMainWindow):
 
         self._source_tabs = QTabWidget()
         self._source_tabs.setDocumentMode(True)
+        self._source_tabs.setStyleSheet(self._source_tabs_stylesheet())
         src_vbox.addWidget(self._source_tabs)
 
         _snapshot_tab = QWidget()
@@ -2851,59 +3115,116 @@ class PlaylistWindow(QMainWindow):
             " QPushButton:disabled { background-color: #555; color: #aaa; }"
         )
         self._btn_load.clicked.connect(self._on_load_clicked)
+        self._last_load_label = QLabel("Last Load: -")
+        self._last_load_label.setStyleSheet("color: #aaa;")
 
         src_footer_row = QHBoxLayout()
         src_footer_row.setSpacing(8)
         src_footer_row.addStretch()
+        src_footer_row.addWidget(self._last_load_label)
         src_footer_row.addWidget(self._btn_load)
         src_vbox.addLayout(src_footer_row)
 
         self._bs_filter_row_widget = QWidget()
-        filter_row3 = QHBoxLayout(self._bs_filter_row_widget)
-        filter_row3.setContentsMargins(0, 0, 0, 0)
-        filter_row3.setSpacing(8)
+        _bs_filter_rows = QVBoxLayout(self._bs_filter_row_widget)
+        _bs_filter_rows.setContentsMargins(0, 0, 0, 0)
+        _bs_filter_rows.setSpacing(4)
+        _bs_filter_row_top = QHBoxLayout()
+        _bs_filter_row_top.setContentsMargins(0, 0, 0, 0)
+        _bs_filter_row_top.setSpacing(8)
+        _bs_filter_row_bottom = QHBoxLayout()
+        _bs_filter_row_bottom.setContentsMargins(0, 0, 0, 0)
+        _bs_filter_row_bottom.setSpacing(8)
         self._bs_filter_label = QLabel("BeatSaver Load:")
         self._bs_query_label = QLabel("Query:")
         self._bs_query_edit = QLineEdit()
         self._bs_query_edit.setPlaceholderText("Optional BeatSaver API query")
         self._bs_query_edit.setToolTip("Load時に BeatSaver API へ渡す検索語です。空欄なら新着を対象にします")
         self._bs_query_edit.setMinimumWidth(180)
+        self._bs_max_label = QLabel("MAX:")
+        self._bs_max_maps = QSpinBox()
+        self._bs_max_maps.setRange(1, 1000)
+        self._bs_max_maps.setValue(1000)
+        self._bs_max_maps.setToolTip("Load時に取得する最大件数")
         self._bs_window_label = QLabel("Days:")
         self._bs_days = QSpinBox()
         self._bs_days.setRange(1, 365)
         self._bs_days.setValue(7)
         self._bs_days.setSuffix(" d")
         self._bs_days.setToolTip("直近何日分を検索対象にするか")
-        self._bs_min_rating = QDoubleSpinBox()
-        self._bs_min_rating.setRange(0.0, 100.0)
-        self._bs_min_rating.setDecimals(0)
-        self._bs_min_rating.setSingleStep(1.0)
-        self._bs_min_rating.setValue(0.0)
+        self._bs_from_label = QLabel("From:")
+        self._bs_from_date = QDateEdit()
+        self._bs_from_date.setCalendarPopup(True)
+        self._bs_from_date.setDisplayFormat("yyyy/MM/dd")
+        self._bs_from_date.setMinimumWidth(120)
+        self._bs_from_date.setToolTip("検索開始日")
+        self._bs_to_label = QLabel("To:")
+        self._bs_to_date = QDateEdit()
+        self._bs_to_date.setCalendarPopup(True)
+        self._bs_to_date.setDisplayFormat("yyyy/MM/dd")
+        self._bs_to_date.setMinimumWidth(120)
+        self._bs_to_date.setToolTip("検索終了日")
+        self._bs_to_latest_btn = QPushButton("Latest")
+        self._bs_to_latest_btn.setToolTip("To を今日の日付に設定します")
+        self._bs_min_rating = QSlider(Qt.Orientation.Horizontal)
+        self._bs_min_rating.setRange(0, 100)
+        self._bs_min_rating.setValue(50)
         self._bs_min_rating.setToolTip("BeatSaver rating (%) の下限")
+        self._bs_min_rating.setFixedWidth(110)
         self._bs_rating_label = QLabel("Rating ≥")
-        self._bs_rating_unit_label = QLabel("%")
-        self._bs_min_votes = QSpinBox()
-        self._bs_min_votes.setRange(0, 10000)
+        self._bs_rating_value_label = QSpinBox()
+        self._bs_rating_value_label.setRange(0, 100)
+        self._bs_rating_value_label.setSuffix(" %")
+        self._bs_rating_value_label.setValue(50)
+        self._bs_rating_value_label.setFixedWidth(70)
+        self._bs_min_votes = QSlider(Qt.Orientation.Horizontal)
+        self._bs_min_votes.setRange(0, 1000)
         self._bs_min_votes.setValue(0)
         self._bs_min_votes.setToolTip("BeatSaver votes の下限")
+        self._bs_min_votes.setFixedWidth(110)
+        self._bs_votes_value_label = QSpinBox()
+        self._bs_votes_value_label.setRange(0, 1000)
+        self._bs_votes_value_label.setValue(0)
+        self._bs_votes_value_label.setFixedWidth(72)
         self._bs_votes_label = QLabel("Votes ≥")
         self._cb_bs_unranked = QCheckBox("Unranked only")
         self._cb_bs_unranked.setChecked(True)
         self._cb_bs_no_ai = QCheckBox("Exclude AI")
         self._cb_bs_no_ai.setChecked(True)
-        filter_row3.addWidget(self._bs_filter_label)
-        filter_row3.addWidget(self._bs_query_label)
-        filter_row3.addWidget(self._bs_query_edit)
-        filter_row3.addWidget(self._bs_window_label)
-        filter_row3.addWidget(self._bs_days)
-        filter_row3.addWidget(self._bs_rating_label)
-        filter_row3.addWidget(self._bs_min_rating)
-        filter_row3.addWidget(self._bs_rating_unit_label)
-        filter_row3.addWidget(self._bs_votes_label)
-        filter_row3.addWidget(self._bs_min_votes)
-        filter_row3.addWidget(self._cb_bs_unranked)
-        filter_row3.addWidget(self._cb_bs_no_ai)
-        filter_row3.addStretch()
+        _bs_filter_row_top.addWidget(self._bs_filter_label)
+        _bs_filter_row_top.addWidget(self._bs_query_label)
+        _bs_filter_row_top.addWidget(self._bs_query_edit)
+        _bs_filter_row_top.addWidget(self._bs_max_label)
+        _bs_filter_row_top.addWidget(self._bs_max_maps)
+        _bs_filter_row_top.addWidget(self._bs_window_label)
+        _bs_filter_row_top.addWidget(self._bs_days)
+        _bs_filter_row_top.addWidget(self._bs_from_label)
+        _bs_filter_row_top.addWidget(self._bs_from_date)
+        _bs_filter_row_top.addWidget(self._bs_to_label)
+        _bs_filter_row_top.addWidget(self._bs_to_date)
+        _bs_filter_row_top.addWidget(self._bs_to_latest_btn)
+        _bs_filter_row_top.addStretch()
+        _bs_filter_row_bottom.addSpacing(6)
+        _bs_filter_row_bottom.addWidget(self._bs_rating_label)
+        _bs_filter_row_bottom.addWidget(self._bs_min_rating)
+        _bs_filter_row_bottom.addWidget(self._bs_rating_value_label)
+        _bs_filter_row_bottom.addWidget(self._bs_votes_label)
+        _bs_filter_row_bottom.addWidget(self._bs_min_votes)
+        _bs_filter_row_bottom.addWidget(self._bs_votes_value_label)
+        _bs_filter_row_bottom.addWidget(self._cb_bs_unranked)
+        _bs_filter_row_bottom.addWidget(self._cb_bs_no_ai)
+        _bs_filter_row_bottom.addStretch()
+        _bs_filter_rows.addLayout(_bs_filter_row_top)
+        _bs_filter_rows.addLayout(_bs_filter_row_bottom)
+        self._bs_days.valueChanged.connect(self._sync_bs_dates_from_days)
+        self._bs_from_date.dateChanged.connect(self._sync_bs_days_from_dates)
+        self._bs_to_date.dateChanged.connect(self._sync_bs_days_from_dates)
+        self._bs_to_latest_btn.clicked.connect(self._set_bs_to_latest)
+        self._bs_min_rating.valueChanged.connect(self._on_bs_source_rating_changed)
+        self._bs_min_votes.valueChanged.connect(self._on_bs_source_votes_changed)
+        self._bs_rating_value_label.valueChanged.connect(self._on_bs_source_rating_changed)
+        self._bs_votes_value_label.valueChanged.connect(self._on_bs_source_votes_changed)
+        _register_secondary_buttons(self._bs_to_latest_btn)
         _maps_layout.addWidget(self._bs_filter_row_widget)
 
         self._src_group.buttonToggled.connect(self._on_source_changed)
@@ -2967,27 +3288,42 @@ class PlaylistWindow(QMainWindow):
         filter_row3.setSpacing(8)
         self._bs_post_filter_label = QLabel("BeatSaver:")
         self._bs_filter_rating_label = QLabel("Rating ≥")
-        self._bs_filter_min_rating = QDoubleSpinBox()
-        self._bs_filter_min_rating.setRange(0.0, 100.0)
-        self._bs_filter_min_rating.setDecimals(0)
-        self._bs_filter_min_rating.setSingleStep(1.0)
-        self._bs_filter_min_rating.setValue(0.0)
-        self._bs_filter_min_rating.valueChanged.connect(self._apply_filter)
-        self._bs_filter_rating_unit_label = QLabel("%")
+        self._bs_filter_min_rating = QSlider(Qt.Orientation.Horizontal)
+        self._bs_filter_min_rating.setRange(0, 100)
+        self._bs_filter_min_rating.setValue(50)
+        self._bs_filter_min_rating.setFixedWidth(110)
+        self._bs_filter_min_rating.valueChanged.connect(self._on_bs_filter_rating_changed)
+        self._bs_filter_rating_value_label = QSpinBox()
+        self._bs_filter_rating_value_label.setRange(0, 100)
+        self._bs_filter_rating_value_label.setSuffix(" %")
+        self._bs_filter_rating_value_label.setValue(50)
+        self._bs_filter_rating_value_label.setFixedWidth(70)
+        self._bs_filter_rating_value_label.valueChanged.connect(self._on_bs_filter_rating_changed)
         self._bs_filter_votes_label = QLabel("Votes ≥")
-        self._bs_filter_min_votes = QSpinBox()
-        self._bs_filter_min_votes.setRange(0, 10000)
+        self._bs_filter_min_votes = QSlider(Qt.Orientation.Horizontal)
+        self._bs_filter_min_votes.setRange(0, 1000)
         self._bs_filter_min_votes.setValue(0)
-        self._bs_filter_min_votes.valueChanged.connect(self._apply_filter)
+        self._bs_filter_min_votes.setFixedWidth(110)
+        self._bs_filter_min_votes.valueChanged.connect(self._on_bs_filter_votes_changed)
+        self._bs_filter_votes_value_label = QSpinBox()
+        self._bs_filter_votes_value_label.setRange(0, 1000)
+        self._bs_filter_votes_value_label.setValue(0)
+        self._bs_filter_votes_value_label.setFixedWidth(72)
+        self._bs_filter_votes_value_label.valueChanged.connect(self._on_bs_filter_votes_changed)
         filter_row3.addSpacing(6)
         filter_row3.addWidget(self._bs_post_filter_label)
         filter_row3.addWidget(self._bs_filter_rating_label)
         filter_row3.addWidget(self._bs_filter_min_rating)
-        filter_row3.addWidget(self._bs_filter_rating_unit_label)
+        filter_row3.addWidget(self._bs_filter_rating_value_label)
         filter_row3.addWidget(self._bs_filter_votes_label)
         filter_row3.addWidget(self._bs_filter_min_votes)
+        filter_row3.addWidget(self._bs_filter_votes_value_label)
         filter_row1.addWidget(self._bs_post_filter_widget)
         filter_row1.addStretch()
+        self._bs_to_date.setDate(QDate.currentDate())
+        self._sync_bs_dates_from_days()
+        self._set_bs_rating_value(50)
+        self._set_bs_votes_value(0)
         self._count_label = QLabel("0 maps")
         filter_row1.addWidget(self._count_label)
 
@@ -3013,13 +3349,23 @@ class PlaylistWindow(QMainWindow):
         self._cb_sts_queued = QCheckBox("Que [Q]")
         self._cb_sts_queued.setChecked(False)
         self._cb_sts_queued.toggled.connect(self._apply_filter)
+        self._cb_bs_not_downloaded = QCheckBox("Not downloaded")
+        self._cb_bs_not_downloaded.setChecked(True)
+        self._cb_bs_not_downloaded.setToolTip("Beat Saber に未ダウンロードの譜面を表示します")
+        self._cb_bs_not_downloaded.toggled.connect(self._apply_filter)
+        self._cb_bs_downloaded = QCheckBox("Downloaded")
+        self._cb_bs_downloaded.setChecked(True)
+        self._cb_bs_downloaded.setToolTip("Beat Saber にダウンロード済みの譜面を表示します")
+        self._cb_bs_downloaded.toggled.connect(self._apply_filter)
         self._cb_top_diff_only = QCheckBox("Highest diff only")
-        self._cb_top_diff_only.setChecked(False)
-        self._cb_top_diff_only.toggled.connect(self._apply_filter)
+        self._cb_top_diff_only.setChecked(self._highest_diff_only_snapshot)
+        self._cb_top_diff_only.toggled.connect(self._on_top_diff_only_toggled)
         filter_row2.addWidget(self._cb_sts_cleared)
         filter_row2.addWidget(self._cb_sts_nf)
         filter_row2.addWidget(self._cb_sts_unplayed)
         filter_row2.addWidget(self._cb_sts_queued)
+        filter_row2.addWidget(self._cb_bs_not_downloaded)
+        filter_row2.addWidget(self._cb_bs_downloaded)
         filter_row2.addWidget(self._cb_top_diff_only)
         filter_row2.addStretch()
         self._btn_filter_reset = QPushButton("Reset")
@@ -3090,10 +3436,11 @@ class PlaylistWindow(QMainWindow):
         self._table.setHorizontalHeaderLabels(_COL_LABELS)
         self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self._table.setSortingEnabled(True)
         self._table.setAlternatingRowColors(True)
-        self._table.setStyleSheet(table_stylesheet())
-        self._table.verticalHeader().setDefaultSectionSize(26)
+        self._table.setStyleSheet(self._playlist_table_stylesheet())
+        self._table.verticalHeader().setDefaultSectionSize(self._row_height)
         self._table.verticalHeader().setVisible(False)
 
         hdr = self._table.horizontalHeader()
@@ -3105,8 +3452,10 @@ class PlaylistWindow(QMainWindow):
 
         # 初期列幅調整
         self._table.setColumnWidth(_COL_STATUS, 52)
-        self._table.setColumnWidth(_COL_SONG, 210)
-        self._table.setColumnWidth(_COL_SOURCE_DATE, 92)
+        self._table.setColumnWidth(_COL_SONG, 260)
+        self._table.setColumnWidth(_COL_ONECLICK, 46)
+        self._table.setColumnWidth(_COL_SOURCE_DATE, 112)
+        self._table.setColumnWidth(_COL_DURATION, 40)
         self._table.setColumnWidth(_COL_PLAY_TIME, 110)
         self._table.setColumnWidth(_COL_DIFF, 26)
         self._table.setColumnWidth(_COL_MODE, 42)
@@ -3117,16 +3466,19 @@ class PlaylistWindow(QMainWindow):
         self._table.setColumnWidth(_COL_PLAYER_ACC, 60)
         self._table.setColumnWidth(_COL_PLAYER_PP, 45)
         self._table.setColumnWidth(_COL_BS_RATE, 60)
-        self._table.setColumnWidth(_COL_BS_UPVOTES, 60)
-        self._table.setColumnWidth(_COL_BS_DOWNVOTES, 60)
+        self._table.setColumnWidth(_COL_BS_UPVOTES, 50)
+        self._table.setColumnWidth(_COL_BS_DOWNVOTES, 50)
         self._table.setColumnWidth(_COL_FC, 32)
         self._table.setColumnWidth(_COL_MOD, 45)
         self._table.setColumnWidth(_COL_AUTHOR, 140)
         self._table.setColumnWidth(_COL_MAPPER, 120)
+        self._table.setColumnWidth(_COL_BL_PLAYS, 78)
+        self._table.setColumnWidth(_COL_BL_ATTEMPTS, 88)
         self._default_numeric_delegate = QStyledItemDelegate(self._table)
         self._maps_rate_delegate = _PercentageBarDelegate(self._table, max_value=100.0, gradient_min=0.0)
         self._table.itemSelectionChanged.connect(self._update_selection_status)
         self._table.itemSelectionChanged.connect(self._update_preview_from_selection)
+        self._apply_row_height(refresh_table=False)
 
         root.addWidget(self._table, 1)
 
@@ -3139,7 +3491,26 @@ class PlaylistWindow(QMainWindow):
         self._selection_status_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         self._selection_status_label.setMinimumHeight(18)
         _selection_status_layout.addWidget(self._selection_status_label)
+        self._btn_download_selected = QPushButton("")
+        self._btn_download_selected.setIcon(QIcon(str(RESOURCES_DIR / "onclick_download.png")))
+        self._btn_download_selected.setIconSize(QSize(18, 18))
+        self._btn_download_selected.setFixedWidth(34)
+        self._btn_download_selected.setToolTip("選択中の譜面をまとめてダウンロードします")
+        self._btn_download_selected.setEnabled(False)
+        self._btn_download_selected.clicked.connect(self._download_selected_entries)
+        _register_secondary_buttons(self._btn_download_selected)
+        _selection_status_layout.addSpacing(8)
+        _selection_status_layout.addWidget(self._btn_download_selected)
         _selection_status_layout.addStretch()
+
+        self._btn_row_height_up = QPushButton("▲")
+        self._btn_row_height_up.setToolTip("行の高さを大きくする")
+        self._btn_row_height_up.setFixedWidth(28)
+        self._btn_row_height_up.clicked.connect(self._on_row_height_up)
+        self._btn_row_height_dn = QPushButton("▼")
+        self._btn_row_height_dn.setToolTip("行の高さを小さくする")
+        self._btn_row_height_dn.setFixedWidth(28)
+        self._btn_row_height_dn.clicked.connect(self._on_row_height_dn)
 
         self._btn_scroll_top = QPushButton("↑")
         self._btn_scroll_top.setToolTip("一覧を一番上までスクロール")
@@ -3147,13 +3518,26 @@ class PlaylistWindow(QMainWindow):
         self._btn_scroll_bottom = QPushButton("↓")
         self._btn_scroll_bottom.setToolTip("一覧を一番下までスクロール")
         self._btn_scroll_bottom.clicked.connect(self._scroll_table_to_bottom)
-        _register_secondary_buttons(self._btn_scroll_top, self._btn_scroll_bottom)
+        _register_secondary_buttons(
+            self._btn_row_height_up,
+            self._btn_row_height_dn,
+            self._btn_scroll_top,
+            self._btn_scroll_bottom,
+        )
+        self._btn_row_height_up.setFixedHeight(20)
+        self._btn_row_height_dn.setFixedHeight(20)
         self._btn_scroll_top.setFixedHeight(20)
         self._btn_scroll_bottom.setFixedHeight(20)
+        self._btn_row_height_up.setStyleSheet("QPushButton { padding: 0px; }")
+        self._btn_row_height_dn.setStyleSheet("QPushButton { padding: 0px; }")
         self._btn_scroll_top.setFixedWidth(28)
         self._btn_scroll_bottom.setFixedWidth(28)
         self._btn_scroll_top.setStyleSheet("QPushButton { padding: 0px; }")
         self._btn_scroll_bottom.setStyleSheet("QPushButton { padding: 0px; }")
+        _selection_status_layout.addWidget(self._btn_row_height_up)
+        _selection_status_layout.addSpacing(4)
+        _selection_status_layout.addWidget(self._btn_row_height_dn)
+        _selection_status_layout.addSpacing(8)
         _selection_status_layout.addWidget(self._btn_scroll_top)
         _selection_status_layout.addSpacing(4)
         _selection_status_layout.addWidget(self._btn_scroll_bottom)
@@ -3175,11 +3559,31 @@ class PlaylistWindow(QMainWindow):
         _right_splitter.setChildrenCollapsible(False)
         _rl.addWidget(_right_splitter)
 
-        _preview_pane = QWidget()
-        _preview_layout = QVBoxLayout(_preview_pane)
-        _preview_layout.setSpacing(2)
-        _preview_layout.setContentsMargins(0, 0, 0, 0)
-        _right_splitter.addWidget(_preview_pane)
+        self._preview_pane = QWidget()
+        self._preview_pane.setObjectName("previewPane")
+        _preview_layout = QVBoxLayout(self._preview_pane)
+        _preview_layout.setSpacing(6)
+        _preview_layout.setContentsMargins(6, 6, 6, 6)
+        _right_splitter.addWidget(self._preview_pane)
+
+        self._preview_title_widget = QWidget()
+        _preview_title_row = QHBoxLayout(self._preview_title_widget)
+        _preview_title_row.setSpacing(6)
+        _preview_title_row.setContentsMargins(0, 0, 0, 0)
+        _preview_layout.addWidget(self._preview_title_widget, 0)
+
+        self._preview_title_label = QLabel("No map selected")
+        self._preview_title_label.setWordWrap(False)
+        self._preview_title_label.setStyleSheet("font-weight: 600;")
+        _preview_title_row.addWidget(self._preview_title_label, 1)
+
+        self._preview_bsr_button = QPushButton("")
+        self._preview_bsr_button.setVisible(False)
+        self._preview_bsr_button.setToolTip("Copy BSR")
+        self._preview_bsr_button.setProperty("copy_text", "")
+        self._preview_bsr_button.clicked.connect(self._copy_preview_bsr)
+        _register_secondary_buttons(self._preview_bsr_button)
+        _preview_title_row.addWidget(self._preview_bsr_button, 0)
 
         _preview_content = QWidget()
         _preview_content_layout = QHBoxLayout(_preview_content)
@@ -3215,23 +3619,21 @@ class PlaylistWindow(QMainWindow):
         _preview_link_row2.setContentsMargins(0, 0, 0, 0)
         _preview_link_rows.addLayout(_preview_link_row2)
 
-        _preview_text_col = QWidget()
-        _preview_text_layout = QVBoxLayout(_preview_text_col)
+        self._preview_text_col = QWidget()
+        _preview_text_layout = QVBoxLayout(self._preview_text_col)
         _preview_text_layout.setSpacing(4)
         _preview_text_layout.setContentsMargins(0, 0, 0, 0)
-        _preview_content_layout.addWidget(_preview_text_col, 1)
-
-        self._preview_title_label = QLabel("No map selected")
-        self._preview_title_label.setWordWrap(True)
-        self._preview_title_label.setStyleSheet("font-weight: 600;")
-        _preview_text_layout.addWidget(self._preview_title_label)
+        _preview_content_layout.addWidget(self._preview_text_col, 1)
 
         self._preview_meta_text = QTextBrowser()
         self._preview_meta_text.setReadOnly(True)
         self._preview_meta_text.setOpenExternalLinks(True)
         self._preview_meta_text.setOpenLinks(True)
+        self._preview_meta_text.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._preview_meta_text.customContextMenuRequested.connect(self._show_preview_meta_context_menu)
         self._preview_meta_text.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._preview_meta_text.setMinimumHeight(140)
+        self._apply_preview_meta_frame_theme()
         _preview_text_layout.addWidget(self._preview_meta_text, 1)
 
         self._btn_preview_open = QPushButton("")
@@ -3250,7 +3652,7 @@ class PlaylistWindow(QMainWindow):
         self._btn_preview_download.setIcon(QIcon(str(RESOURCES_DIR / "onclick_download.png")))
         self._btn_preview_download.setIconSize(QSize(18, 18))
         self._btn_preview_download.setFixedWidth(34)
-        self._btn_preview_download.clicked.connect(self._open_selected_preview_url)
+        self._btn_preview_download.clicked.connect(self._download_selected_preview_entry)
         _register_secondary_buttons(self._btn_preview_download)
         _preview_link_row1.addWidget(self._btn_preview_download)
 
@@ -3449,6 +3851,7 @@ class PlaylistWindow(QMainWindow):
         self._splitter.setSizes([940, 350])
         self._load_window_state()
         self.select_source_tab(initial_source_tab)
+        self._restore_saved_maps_state()
         self._update_filter_export_ui()
         self._update_table_visual_mode()
         self._clear_preview()
@@ -3464,6 +3867,15 @@ class PlaylistWindow(QMainWindow):
             payload["splitter_sizes"] = self._splitter.sizes()
             payload["window_width"] = self.width()
             payload["window_height"] = self.height()
+            payload["row_height"] = self._row_height
+            payload["last_load_text"] = self._last_load_label.text()
+            payload["highest_diff_only_snapshot"] = self._highest_diff_only_snapshot
+            payload["highest_diff_only_maps"] = self._highest_diff_only_maps
+            maps_state = self._build_maps_state_payload()
+            if maps_state is not None:
+                payload["maps_state"] = maps_state
+            else:
+                payload.pop("maps_state", None)
             _PLAYLIST_WINDOW_PATH.write_text(
                 json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
             )
@@ -3479,11 +3891,315 @@ class PlaylistWindow(QMainWindow):
             return
         w = data.get("window_width")
         h = data.get("window_height")
+        row_height = data.get("row_height")
+        last_load_text = data.get("last_load_text")
+        highest_diff_only_snapshot = data.get("highest_diff_only_snapshot")
+        highest_diff_only_maps = data.get("highest_diff_only_maps")
         if isinstance(w, int) and isinstance(h, int) and w > 200 and h > 200:
             self.resize(w, h)
         sizes = data.get("splitter_sizes")
         if isinstance(sizes, list) and len(sizes) == 2:
             self._splitter.setSizes(sizes)
+        if isinstance(row_height, int):
+            self._row_height = max(18, min(row_height, 64))
+            self._apply_row_height(refresh_table=False)
+        if isinstance(last_load_text, str) and last_load_text.strip():
+            self._last_load_label.setText(last_load_text)
+        if isinstance(highest_diff_only_snapshot, bool):
+            self._highest_diff_only_snapshot = highest_diff_only_snapshot
+        if isinstance(highest_diff_only_maps, bool):
+            self._highest_diff_only_maps = highest_diff_only_maps
+        maps_state = data.get("maps_state")
+        if isinstance(maps_state, dict):
+            self._restored_maps_state = maps_state
+
+    def _highest_diff_only_default_for_tab(self, index: Optional[int] = None) -> bool:
+        tab_index = self._source_tabs.currentIndex() if index is None else index
+        return tab_index == self._source_tab_maps_idx
+
+    def _highest_diff_only_value_for_tab(self, index: Optional[int] = None) -> bool:
+        tab_index = self._source_tabs.currentIndex() if index is None else index
+        return self._highest_diff_only_maps if tab_index == self._source_tab_maps_idx else self._highest_diff_only_snapshot
+
+    def _set_highest_diff_only_for_tab(self, checked: bool, index: Optional[int] = None) -> None:
+        tab_index = self._source_tabs.currentIndex() if index is None else index
+        if tab_index == self._source_tab_maps_idx:
+            self._highest_diff_only_maps = checked
+        else:
+            self._highest_diff_only_snapshot = checked
+
+    def _apply_highest_diff_only_for_current_tab(self) -> None:
+        checked = self._highest_diff_only_value_for_tab()
+        self._cb_top_diff_only.blockSignals(True)
+        self._cb_top_diff_only.setChecked(checked)
+        self._cb_top_diff_only.blockSignals(False)
+
+    def _on_top_diff_only_toggled(self, checked: bool) -> None:
+        self._set_highest_diff_only_for_tab(checked)
+        self._apply_filter()
+
+    def _current_source_key(self) -> str:
+        if self._rb_ss.isChecked():
+            return "ss"
+        if self._rb_bl.isChecked():
+            return "bl"
+        if self._rb_acc.isChecked():
+            return "acc"
+        if self._rb_acc_rl.isChecked():
+            return "acc_rl"
+        if self._rb_bs.isChecked():
+            return "bs"
+        if self._rb_open.isChecked():
+            return "open"
+        return "ss"
+
+    def _sync_bs_dates_from_days(self, _value: int = 0) -> None:
+        if self._bs_date_sync:
+            return
+        self._bs_date_sync = True
+        try:
+            to_date = self._bs_to_date.date() if self._bs_to_date.date().isValid() else QDate.currentDate()
+            self._bs_to_date.setDate(to_date)
+            self._bs_from_date.setDate(to_date.addDays(-(max(1, self._bs_days.value()) - 1)))
+        finally:
+            self._bs_date_sync = False
+
+    def _sync_bs_days_from_dates(self, _date: QDate) -> None:
+        if self._bs_date_sync:
+            return
+        self._bs_date_sync = True
+        try:
+            from_date = self._bs_from_date.date()
+            to_date = self._bs_to_date.date()
+            if from_date > to_date:
+                if self.sender() is self._bs_from_date:
+                    self._bs_to_date.setDate(from_date)
+                    to_date = from_date
+                else:
+                    self._bs_from_date.setDate(to_date)
+                    from_date = to_date
+            self._bs_days.setValue(max(1, from_date.daysTo(to_date) + 1))
+        finally:
+            self._bs_date_sync = False
+
+    def _set_bs_to_latest(self) -> None:
+        self._bs_to_date.setDate(QDate.currentDate())
+
+    def _playlist_table_stylesheet(self) -> str:
+        base = table_stylesheet()
+        if is_dark():
+            accent = (
+                "QTableWidget::item:selected { background-color: #4aaed1; color: #06141a; }"
+                "QTableWidget::item:selected:active { background-color: #4aaed1; color: #06141a; }"
+                "QTableWidget::item:selected:!active { background-color: #4aaed1; color: #06141a; }"
+            )
+        else:
+            accent = (
+                "QTableWidget::item:selected { background-color: #b9e3f5; color: #0f172a; }"
+                "QTableWidget::item:selected:active { background-color: #b9e3f5; color: #0f172a; }"
+                "QTableWidget::item:selected:!active { background-color: #b9e3f5; color: #0f172a; }"
+            )
+        return base + accent
+
+    def _source_tabs_stylesheet(self) -> str:
+        if is_dark():
+            return (
+                "QTabWidget::pane { border: 0; margin: 0; padding: 0; }"
+                "QTabBar::tab { background: #2b2b2b; color: #d8d8d8; border: 1px solid #4d4d4d;"
+                " border-bottom: 0; border-top-left-radius: 4px; border-top-right-radius: 4px;"
+                " padding: 6px 14px; margin-right: 2px; }"
+                "QTabBar::tab:hover { background: #365c7c; color: #ffffff; }"
+                "QTabBar::tab:selected { background: #1976d2; color: #ffffff; font-weight: 600; }"
+            )
+        return (
+            "QTabWidget::pane { border: 0; margin: 0; padding: 0; }"
+            "QTabBar::tab { background: #f1f5f9; color: #334155; border: 1px solid #cbd5e1;"
+            " border-bottom: 0; border-top-left-radius: 4px; border-top-right-radius: 4px;"
+            " padding: 6px 14px; margin-right: 2px; }"
+            "QTabBar::tab:hover { background: #dbeafe; color: #1d4ed8; }"
+            "QTabBar::tab:selected { background: #93c5fd; color: #0f172a; font-weight: 600; }"
+        )
+
+    def _set_bs_rating_value(self, value: int) -> None:
+        value = max(0, min(100, int(value)))
+        if self._bs_rating_sync:
+            return
+        self._bs_rating_sync = True
+        try:
+            self._bs_min_rating.setValue(value)
+            self._bs_rating_value_label.setValue(value)
+            self._bs_filter_min_rating.setValue(value)
+            self._bs_filter_rating_value_label.setValue(value)
+        finally:
+            self._bs_rating_sync = False
+        if hasattr(self, "_search_edit"):
+            self._apply_filter()
+
+    def _set_bs_votes_value(self, value: int) -> None:
+        value = max(0, min(1000, int(value)))
+        if self._bs_votes_sync:
+            return
+        self._bs_votes_sync = True
+        try:
+            self._bs_min_votes.setValue(value)
+            self._bs_votes_value_label.setValue(value)
+            self._bs_filter_min_votes.setValue(value)
+            self._bs_filter_votes_value_label.setValue(value)
+        finally:
+            self._bs_votes_sync = False
+        if hasattr(self, "_search_edit"):
+            self._apply_filter()
+
+    def _apply_preview_menu_theme(self, menu: QMenu) -> None:
+        if is_dark():
+            return
+        menu.setStyleSheet(
+            "QMenu { background: #ffffff; color: #111111; border: 1px solid #cfcfcf; }"
+            "QMenu::item { background: #ffffff; color: #111111; padding: 6px 24px 6px 24px; }"
+            "QMenu::item:selected { background: #dbeafe; color: #111111; }"
+            "QMenu::separator { height: 1px; background: #dddddd; margin: 4px 8px; }"
+        )
+
+    def _apply_preview_meta_frame_theme(self) -> None:
+        if is_dark():
+            self._preview_pane.setStyleSheet(
+                "#previewPane {"
+                " border: 1px solid #5f6368;"
+                " border-radius: 4px;"
+                " background-color: #262626;"
+                "}"
+            )
+            self._preview_text_col.setStyleSheet("QWidget { border: none; background: transparent; }")
+            self._preview_meta_text.setStyleSheet(
+                "QTextBrowser {"
+                " border: none;"
+                " background-color: transparent;"
+                " padding: 0px;"
+                "}"
+            )
+        else:
+            self._preview_pane.setStyleSheet(
+                "#previewPane {"
+                " border: 1px solid #9fb5c7;"
+                " border-radius: 4px;"
+                " background-color: #ffffff;"
+                "}"
+            )
+            self._preview_text_col.setStyleSheet("QWidget { border: none; background: transparent; }")
+            self._preview_meta_text.setStyleSheet(
+                "QTextBrowser {"
+                " border: none;"
+                " background-color: transparent;"
+                " padding: 0px;"
+                "}"
+            )
+
+    def _on_bs_source_rating_changed(self, value: int) -> None:
+        self._set_bs_rating_value(value)
+
+    def _on_bs_filter_rating_changed(self, value: int) -> None:
+        self._set_bs_rating_value(value)
+
+    def _on_bs_source_votes_changed(self, value: int) -> None:
+        self._set_bs_votes_value(value)
+
+    def _on_bs_filter_votes_changed(self, value: int) -> None:
+        self._set_bs_votes_value(value)
+
+    def _show_preview_meta_context_menu(self, position) -> None:
+        menu = self._preview_meta_text.createStandardContextMenu()
+        self._apply_preview_menu_theme(menu)
+        selected_text = self._preview_meta_text.textCursor().selectedText().replace("\u2029", "\n").strip()
+        if selected_text:
+            menu.addSeparator()
+            action = menu.addAction("Translate with Google")
+            action.triggered.connect(lambda _checked=False, text=selected_text: self._translate_preview_text(text))
+        menu.exec(self._preview_meta_text.mapToGlobal(position))
+
+    def _translate_preview_text(self, text: str) -> None:
+        selected_text = text.strip()
+        if not selected_text:
+            return
+        QDesktopServices.openUrl(
+            QUrl(f"https://translate.google.com/?sl=auto&tl=ja&text={quote(selected_text)}&op=translate")
+        )
+
+    def _build_maps_state_payload(self) -> Optional[dict]:
+        if not self._all_entries:
+            return None
+        return {
+            "source": self._current_source_key(),
+            "open_path": self._open_edit.text().strip(),
+            "open_service": str(self._svc_combo.currentData() or "none"),
+            "bs_query": self._bs_query_edit.text().strip(),
+            "bs_max_maps": self._bs_max_maps.value(),
+            "bs_days": self._bs_days.value(),
+            "bs_from_date": self._bs_from_date.date().toString("yyyy-MM-dd"),
+            "bs_to_date": self._bs_to_date.date().toString("yyyy-MM-dd"),
+            "bs_min_rating": self._bs_min_rating.value(),
+            "bs_min_votes": self._bs_min_votes.value(),
+            "bs_unranked_only": self._cb_bs_unranked.isChecked(),
+            "bs_exclude_ai": self._cb_bs_no_ai.isChecked(),
+            "entries": [entry.to_dict() for entry in self._all_entries],
+        }
+
+    def _restore_saved_maps_state(self) -> None:
+        state = self._restored_maps_state
+        self._restored_maps_state = None
+        if not state:
+            return
+
+        source = str(state.get("source") or "").strip().lower()
+        source_buttons = {
+            "ss": self._rb_ss,
+            "bl": self._rb_bl,
+            "acc": self._rb_acc,
+            "acc_rl": self._rb_acc_rl,
+            "bs": self._rb_bs,
+            "open": self._rb_open,
+        }
+        source_button = source_buttons.get(source)
+        if source_button is not None:
+            source_button.setChecked(True)
+
+        self._open_edit.setText(str(state.get("open_path") or ""))
+        open_service = str(state.get("open_service") or "none")
+        open_index = self._svc_combo.findData(open_service)
+        if open_index >= 0:
+            self._svc_combo.setCurrentIndex(open_index)
+
+        self._bs_query_edit.setText(str(state.get("bs_query") or ""))
+        self._bs_max_maps.setValue(int(state.get("bs_max_maps") or 1000))
+        self._bs_days.setValue(int(state.get("bs_days") or 7))
+        from_date = QDate.fromString(str(state.get("bs_from_date") or ""), "yyyy-MM-dd")
+        to_date = QDate.fromString(str(state.get("bs_to_date") or ""), "yyyy-MM-dd")
+        if to_date.isValid():
+            self._bs_to_date.setDate(to_date)
+        if from_date.isValid():
+            self._bs_from_date.setDate(from_date)
+        else:
+            self._sync_bs_dates_from_days()
+        self._set_bs_rating_value(int(state.get("bs_min_rating") or 50))
+        self._set_bs_votes_value(int(state.get("bs_min_votes") or 0))
+        self._cb_bs_unranked.setChecked(bool(state.get("bs_unranked_only", True)))
+        self._cb_bs_no_ai.setChecked(bool(state.get("bs_exclude_ai", True)))
+
+        raw_entries = state.get("entries")
+        if not isinstance(raw_entries, list):
+            return
+        restored_entries: List[MapEntry] = []
+        for item in raw_entries:
+            if not isinstance(item, dict):
+                continue
+            try:
+                restored_entries.append(MapEntry.from_dict(item))
+            except Exception:
+                continue
+        if not restored_entries:
+            return
+
+        self._all_entries = _enrich_entries_with_beatsaver_cache(restored_entries)
+        self._apply_filter()
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
         self._save_window_state()
@@ -3512,7 +4228,9 @@ class PlaylistWindow(QMainWindow):
         """テーマ切替後に呼び出してテーブルスタイルと行色を更新する。"""
         self._apply_secondary_button_theme()
         self._apply_export_button_theme()
-        self._table.setStyleSheet(table_stylesheet())
+        self._source_tabs.setStyleSheet(self._source_tabs_stylesheet())
+        self._table.setStyleSheet(self._playlist_table_stylesheet())
+        self._apply_preview_meta_frame_theme()
         if self._all_entries:
             self._refresh_table(self._filtered)
 
@@ -3602,8 +4320,7 @@ class PlaylistWindow(QMainWindow):
         self._btn_browse.setEnabled(open_mode)
         self._svc_label.setEnabled(open_mode)
         self._svc_combo.setEnabled(open_mode)
-        # Open / BeatSaver モードでは Batch Export に追加できないので非表示
-        self._btn_add_to_batch.setVisible(not open_mode and not beatsaver_mode)
+        self._btn_add_to_batch.setVisible(not open_mode)
         # open 以外のソースに切り替えたらヘッダを元に戻す
         if not open_mode:
             hdr_item = self._table.horizontalHeaderItem(_COL_ACC_CAT)
@@ -3618,9 +4335,9 @@ class PlaylistWindow(QMainWindow):
         if index == self._source_tab_maps_idx:
             if not self._rb_bs.isChecked():
                 self._rb_bs.setChecked(True)
-            return
-        if self._rb_bs.isChecked():
+        elif self._rb_bs.isChecked():
             self._last_snapshot_source_button.setChecked(True)
+        self._apply_highest_diff_only_for_current_tab()
 
     def select_source_tab(self, tab_name: str) -> None:
         target = (tab_name or "snapshot").strip().lower()
@@ -3647,8 +4364,11 @@ class PlaylistWindow(QMainWindow):
         for w in [self._star_label, self._star_min, self._star_sep_label, self._star_max]:
             w.setVisible(not is_acc and not is_bs)
         self._cb_sts_queued.setVisible(is_rl)
+        self._cb_bs_not_downloaded.setVisible(is_bs)
+        self._cb_bs_downloaded.setVisible(is_bs)
         self._bs_filter_row_widget.setVisible(is_bs)
         self._bs_post_filter_widget.setVisible(is_bs)
+        self._btn_download_selected.setVisible(is_bs)
         if is_bs:
             self._search_edit.setPlaceholderText("Filter loaded BeatSaver rows by song / author / mapper...")
             self._search_edit.setToolTip("Load後の BeatSaver 一覧を絞り込みます。Load Query は下の BeatSaver 行で指定します")
@@ -3665,6 +4385,10 @@ class PlaylistWindow(QMainWindow):
             self._table.setColumnHidden(col, is_bs)
         for col in (_COL_BS_RATE, _COL_BS_UPVOTES, _COL_BS_DOWNVOTES):
             self._table.setColumnHidden(col, not is_bs)
+        self._table.setColumnHidden(_COL_COVER, not is_bs)
+        self._table.setColumnHidden(_COL_ONECLICK, not is_bs)
+        self._table.setColumnHidden(_COL_BL_PLAYS, True)
+        self._table.setColumnHidden(_COL_BL_ATTEMPTS, True)
         self._table.setItemDelegateForColumn(
             _COL_BS_RATE,
             self._maps_rate_delegate if is_bs else self._default_numeric_delegate,
@@ -3724,6 +4448,12 @@ class PlaylistWindow(QMainWindow):
             return "song_desc" if is_desc else "song_asc"
         if col == _COL_SOURCE_DATE:
             return "date_desc" if is_desc else "date_asc"
+        if col == _COL_DURATION:
+            return "duration_desc" if is_desc else "duration_asc"
+        if col == _COL_BL_PLAYS:
+            return "bl_plays_desc" if is_desc else "bl_plays_asc"
+        if col == _COL_BL_ATTEMPTS:
+            return "bl_attempts_desc" if is_desc else "bl_attempts_asc"
         if col == _COL_PLAY_TIME:
             return "playtime_desc" if is_desc else "playtime_asc"
         if col == _COL_DIFF:
@@ -3804,6 +4534,9 @@ class PlaylistWindow(QMainWindow):
         _sort_tags = {
             "star_asc": "star_asc", "star_desc": "star_desc",
             "date_desc": "date_desc", "date_asc": "date_asc",
+            "duration_desc": "duration_desc", "duration_asc": "duration_asc",
+            "bl_plays_desc": "bl_plays_desc", "bl_plays_asc": "bl_plays_asc",
+            "bl_attempts_desc": "bl_attempts_desc", "bl_attempts_asc": "bl_attempts_asc",
             "playtime_desc": "playtime_desc", "playtime_asc": "playtime_asc",
             "pp_high": "pp_desc", "pp_low": "pp_asc",
             "ap_high": "ap_desc", "ap_low": "ap_asc",
@@ -3877,6 +4610,8 @@ class PlaylistWindow(QMainWindow):
             self._cb_sts_nf,
             self._cb_sts_unplayed,
             self._cb_sts_queued,
+            self._cb_bs_not_downloaded,
+            self._cb_bs_downloaded,
             self._cb_top_diff_only,
             self._cb_cat_true,
             self._cb_cat_standard,
@@ -3888,13 +4623,17 @@ class PlaylistWindow(QMainWindow):
             self._search_edit.clear()
             self._star_min.setValue(0.0)
             self._star_max.setValue(20.0)
-            self._bs_filter_min_rating.setValue(0.0)
-            self._bs_filter_min_votes.setValue(0)
+            self._set_bs_rating_value(50)
+            self._set_bs_votes_value(0)
             self._cb_sts_cleared.setChecked(True)
             self._cb_sts_nf.setChecked(True)
             self._cb_sts_unplayed.setChecked(True)
             self._cb_sts_queued.setChecked(False)
-            self._cb_top_diff_only.setChecked(False)
+            self._cb_bs_not_downloaded.setChecked(True)
+            self._cb_bs_downloaded.setChecked(True)
+            default_highest = self._highest_diff_only_default_for_tab()
+            self._set_highest_diff_only_for_tab(default_highest)
+            self._cb_top_diff_only.setChecked(default_highest)
             self._cb_cat_true.setChecked(True)
             self._cb_cat_standard.setChecked(True)
             self._cb_cat_tech.setChecked(True)
@@ -3907,6 +4646,7 @@ class PlaylistWindow(QMainWindow):
         self._apply_filter()
 
     def _on_load_clicked(self) -> None:
+        self._last_load_label.setText(f"Last Load: {datetime.now().strftime('%Y/%m/%d %H:%M:%S')}")
         self._load_data()
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -3916,6 +4656,7 @@ class PlaylistWindow(QMainWindow):
     def _load_data(self, reset_filters: bool = True) -> None:
         """選択されたソースに応じてマップデータを読み込む。"""
         self._btn_load.setEnabled(False)
+        self._installed_beatsaber_dir = ""
         if reset_filters and not self._rb_bs.isChecked():
             self._reset_filters()
         self._all_entries = []
@@ -3927,31 +4668,11 @@ class PlaylistWindow(QMainWindow):
 
         if self._rb_ss.isChecked():
             self._setWindowTitle_source(SOURCE_SS)
-            try:
-                self._all_entries = load_ss_maps(steam_id)
-            except Exception as exc:
-                QMessageBox.critical(self, "Load Error", str(exc))
-                self._btn_load.setEnabled(True)
-                return
-            self._btn_load.setEnabled(True)
-            if not self._all_entries:
-                self._count_label.setText("0 maps (no cache)")
-                return
-            self._apply_filter()
+            self._start_async_load(lambda sig: self._run_load_ss(sig, steam_id))
 
         elif self._rb_bl.isChecked():
             self._setWindowTitle_source(SOURCE_BL)
-            try:
-                self._all_entries = load_bl_maps(steam_id)
-            except Exception as exc:
-                QMessageBox.critical(self, "Load Error", str(exc))
-                self._btn_load.setEnabled(True)
-                return
-            self._btn_load.setEnabled(True)
-            if not self._all_entries:
-                self._count_label.setText("0 maps (no cache)")
-                return
-            self._apply_filter()
+            self._start_async_load(lambda sig: self._run_load_bl(sig, steam_id))
 
         elif self._rb_acc.isChecked():
             self._setWindowTitle_source(SOURCE_ACC)
@@ -3965,7 +4686,10 @@ class PlaylistWindow(QMainWindow):
             self._setWindowTitle_source(SOURCE_BS)
             beatsaver_opts = {
                 "query": self._bs_query_edit.text().strip(),
+                "max_maps": self._bs_max_maps.value(),
                 "days": self._bs_days.value(),
+                "from_date": self._bs_from_date.date().toString("yyyy-MM-dd"),
+                "to_date": self._bs_to_date.date().toString("yyyy-MM-dd"),
                 "min_rating": self._bs_min_rating.value(),
                 "min_votes": self._bs_min_votes.value(),
                 "unranked_only": self._cb_bs_unranked.isChecked(),
@@ -3997,23 +4721,7 @@ class PlaylistWindow(QMainWindow):
                     lambda sig: self._run_load_open_rl(sig, p, steam_id)
                 )
                 return
-            try:
-                self._all_entries = load_bplist_maps(p, svc, steam_id)
-            except Exception as exc:
-                QMessageBox.critical(self, "Load Error", str(exc))
-                self._btn_load.setEnabled(True)
-                return
-            self._btn_load.setEnabled(True)
-            if not self._all_entries:
-                self._count_label.setText("0 maps")
-                return
-            # open モード時は Acc Category 列を Service 列として使用
-            hdr_item = self._table.horizontalHeaderItem(_COL_ACC_CAT)
-            if hdr_item is not None:
-                hdr_item.setText("Service")
-            # プレイリストの曲順で表示するためソートをリセット
-            self._table.horizontalHeader().setSortIndicator(-1, Qt.SortOrder.AscendingOrder)
-            self._apply_filter()
+            self._start_async_load(lambda sig, bp=p, sv=svc: self._run_load_open(sig, bp, sv, steam_id))
 
     def _start_async_load(self, worker_fn) -> None:
         """API 取得をスレッドで実行してプログレスダイアログを表示する。"""
@@ -4050,6 +4758,43 @@ class PlaylistWindow(QMainWindow):
             sigs.progress.emit(done, total, label)
         try:
             entries = load_bplist_maps(bplist_path, "accsaber_rl", steam_id, on_progress=_progress)
+            entries = _cache_missing_beatsaver_metadata(entries, on_progress=_progress)
+            sigs.finished.emit(entries)
+        except Exception as exc:
+            sigs.error.emit(str(exc))
+
+    def _run_load_ss(self, sigs: _LoadSignals, steam_id: Optional[str]) -> None:
+        def _progress(done: int, total: int, label: str) -> None:
+            sigs.progress.emit(done, total, label)
+        try:
+            _progress(0, 1, "Loading ScoreSaber cache...")
+            entries = load_ss_maps(steam_id)
+            _progress(1, 1, "Loading ScoreSaber cache...")
+            entries = _cache_missing_beatsaver_metadata(entries, on_progress=_progress)
+            sigs.finished.emit(entries)
+        except Exception as exc:
+            sigs.error.emit(str(exc))
+
+    def _run_load_bl(self, sigs: _LoadSignals, steam_id: Optional[str]) -> None:
+        def _progress(done: int, total: int, label: str) -> None:
+            sigs.progress.emit(done, total, label)
+        try:
+            _progress(0, 1, "Loading BeatLeader cache...")
+            entries = load_bl_maps(steam_id)
+            _progress(1, 1, "Loading BeatLeader cache...")
+            entries = _cache_missing_beatsaver_metadata(entries, on_progress=_progress)
+            sigs.finished.emit(entries)
+        except Exception as exc:
+            sigs.error.emit(str(exc))
+
+    def _run_load_open(self, sigs: _LoadSignals, bplist_path: Path, service: str, steam_id: Optional[str]) -> None:
+        def _progress(done: int, total: int, label: str) -> None:
+            sigs.progress.emit(done, total, label)
+        try:
+            _progress(0, 1, f"Loading {bplist_path.name}...")
+            entries = load_bplist_maps(bplist_path, service, steam_id)
+            _progress(1, 1, f"Loading {bplist_path.name}...")
+            entries = _cache_missing_beatsaver_metadata(entries, on_progress=_progress)
             sigs.finished.emit(entries)
         except Exception as exc:
             sigs.error.emit(str(exc))
@@ -4059,6 +4804,7 @@ class PlaylistWindow(QMainWindow):
             sigs.progress.emit(done, total, label)
         try:
             entries = load_accsaber_maps(steam_id, category, on_progress=_progress)
+            entries = _cache_missing_beatsaver_metadata(entries, on_progress=_progress)
             sigs.finished.emit(entries)
         except Exception as exc:
             sigs.error.emit(str(exc))
@@ -4068,6 +4814,7 @@ class PlaylistWindow(QMainWindow):
             sigs.progress.emit(done, total, label)
         try:
             entries = load_accsaber_reloaded_maps(steam_id, category, on_progress=_progress)
+            entries = _cache_missing_beatsaver_metadata(entries, on_progress=_progress)
             sigs.finished.emit(entries)
         except Exception as exc:
             sigs.error.emit(str(exc))
@@ -4077,10 +4824,16 @@ class PlaylistWindow(QMainWindow):
             sigs.progress.emit(done, total, label)
         try:
             query = str(opts.get("query") or "")
+            max_maps_raw = opts.get("max_maps")
             days_raw = opts.get("days")
+            from_date_raw = str(opts.get("from_date") or "")
+            to_date_raw = str(opts.get("to_date") or "")
             min_rating_raw = opts.get("min_rating")
             min_votes_raw = opts.get("min_votes")
+            max_maps = int(max_maps_raw) if isinstance(max_maps_raw, (int, float, str)) else 1000
             days = int(days_raw) if isinstance(days_raw, (int, float, str)) else 7
+            from_dt = datetime.fromisoformat(from_date_raw).replace(tzinfo=timezone.utc) if from_date_raw else None
+            to_dt = datetime.fromisoformat(to_date_raw).replace(tzinfo=timezone.utc) if to_date_raw else None
             min_rating_percent = float(min_rating_raw) if isinstance(min_rating_raw, (int, float, str)) else 0.0
             min_rating = min_rating_percent / 100.0
             min_votes = int(min_votes_raw) if isinstance(min_votes_raw, (int, float, str)) else 0
@@ -4090,10 +4843,14 @@ class PlaylistWindow(QMainWindow):
                 days=days,
                 min_rating=min_rating,
                 min_votes=min_votes,
+                max_maps=max_maps,
+                from_dt=from_dt,
+                to_dt=to_dt,
                 unranked_only=bool(opts.get("unranked_only", True)),
                 exclude_ai=bool(opts.get("exclude_ai", True)),
                 on_progress=_progress,
             )
+            entries = _cache_beatsaver_meta_from_entries(entries)
             sigs.finished.emit(entries)
         except Exception as exc:
             sigs.error.emit(str(exc))
@@ -4113,14 +4870,18 @@ class PlaylistWindow(QMainWindow):
         self._all_entries = entries
         if not entries:
             self._count_label.setText("0 maps")
+            self._save_window_state()
             if self._rb_bs.isChecked():
                 QMessageBox.information(
                     self,
                     "BeatSaver",
                     "条件に一致する譜面が見つかりませんでした。\n\n"
                     f"Load Query: {self._bs_query_edit.text().strip() or '(empty)'}\n"
+                    f"Max: {self._bs_max_maps.value()}\n"
                     f"Days: {self._bs_days.value()}\n"
-                    f"Rating >= {self._bs_min_rating.value():.0f}%\n"
+                    f"From: {self._bs_from_date.date().toString('yyyy/MM/dd')}\n"
+                    f"To: {self._bs_to_date.date().toString('yyyy/MM/dd')}\n"
+                    f"Rating >= {self._bs_min_rating.value()}%\n"
                     f"Votes >= {self._bs_min_votes.value()}\n"
                     f"Unranked only: {'on' if self._cb_bs_unranked.isChecked() else 'off'}\n"
                     f"Exclude AI: {'on' if self._cb_bs_no_ai.isChecked() else 'off'}"
@@ -4150,6 +4911,7 @@ class PlaylistWindow(QMainWindow):
             self._table.horizontalHeader().setSortIndicator(_COL_SOURCE_DATE, Qt.SortOrder.DescendingOrder)
             self._update_sort_label()
         self._apply_filter()
+        self._save_window_state()
 
     def _on_load_error(self, msg: str) -> None:
         if self._progress_dlg:
@@ -4171,10 +4933,28 @@ class PlaylistWindow(QMainWindow):
         entry = item.data(Qt.ItemDataRole.UserRole)
         return entry if isinstance(entry, MapEntry) else None
 
+    def _selected_entries(self) -> List[MapEntry]:
+        selection_model = self._table.selectionModel()
+        if selection_model is None:
+            return []
+        selected_entries: List[MapEntry] = []
+        for model_index in selection_model.selectedRows():
+            item = self._table.item(model_index.row(), _COL_SONG)
+            if item is None:
+                continue
+            entry = item.data(Qt.ItemDataRole.UserRole)
+            if isinstance(entry, MapEntry):
+                selected_entries.append(entry)
+        return selected_entries
+
     def _clear_preview(self) -> None:
         self._preview_image.setPixmap(QPixmap())
         self._preview_image.setText("(no cover)")
-        self._preview_title_label.setText("No map selected")
+        self._preview_title_full_text = "No map selected"
+        self._preview_bsr_button.setText("")
+        self._preview_bsr_button.setProperty("copy_text", "")
+        self._preview_bsr_button.setVisible(False)
+        self._update_preview_title_label()
         self._preview_meta_text.clear()
         self._btn_preview_open.setEnabled(False)
         self._btn_preview_open.setProperty("url", "")
@@ -4197,33 +4977,82 @@ class PlaylistWindow(QMainWindow):
         self._bl_top_replay_cache[cache_key] = url
         return url
 
+    def _load_bl_preview_link_indices(self) -> Tuple[Dict[Tuple[str, str, str], str], Dict[Tuple[str, str, str], str]]:
+        if self._bl_preview_replay_index is None or self._bl_preview_leaderboard_index is None:
+            replay_index: Dict[Tuple[str, str, str], str] = {}
+            leaderboard_index: Dict[Tuple[str, str, str], str] = {}
+            steam_id = self._steam_id
+            if steam_id:
+                bp = _CACHE_DIR / f"beatleader_player_scores_{steam_id}.json"
+                if bp.exists():
+                    try:
+                        bd = json.loads(bp.read_text(encoding="utf-8"))
+                        bl_scores = bd.get("scores", {})
+                        replay_index = _build_bl_replay_hash_index(bl_scores)
+                        leaderboard_index = _build_bl_leaderboard_hash_index(bl_scores)
+                    except Exception:
+                        replay_index = {}
+                        leaderboard_index = {}
+            self._bl_preview_replay_index = replay_index
+            self._bl_preview_leaderboard_index = leaderboard_index
+        return self._bl_preview_replay_index, self._bl_preview_leaderboard_index
+
+    def _update_preview_title_label(self) -> None:
+        available_width = self._preview_title_widget.width()
+        if self._preview_bsr_button.isVisible():
+            available_width -= self._preview_bsr_button.sizeHint().width() + 6
+        available_width = max(available_width, 40)
+        elided = self._preview_title_label.fontMetrics().elidedText(
+            self._preview_title_full_text,
+            Qt.TextElideMode.ElideRight,
+            available_width,
+        )
+        self._preview_title_label.setText(elided)
+        self._preview_title_label.setToolTip(self._preview_title_full_text if elided != self._preview_title_full_text else "")
+
+    def _copy_preview_bsr(self) -> None:
+        copy_text = str(self._preview_bsr_button.property("copy_text") or "")
+        if copy_text:
+            QApplication.clipboard().setText(copy_text)
+
     def _update_preview_from_selection(self) -> None:
         entry = self._selected_entry()
         if entry is None:
             self._clear_preview()
             return
 
+        cached_beatsaver_meta = load_beatsaver_meta_cache().get((entry.song_hash or "").upper())
+        _apply_beatsaver_meta(entry, cached_beatsaver_meta)
+        if not entry.beatleader_page_url or not entry.beatleader_replay_url:
+            replay_index, leaderboard_index = self._load_bl_preview_link_indices()
+            bl_key = (entry.song_hash.upper(), entry.mode, entry.difficulty)
+            leaderboard_id = leaderboard_index.get(bl_key, "")
+            replay_url = replay_index.get(bl_key, "")
+            if leaderboard_id:
+                if not entry.leaderboard_id:
+                    entry.leaderboard_id = leaderboard_id
+                if not entry.beatleader_page_url:
+                    entry.beatleader_page_url = f"https://beatleader.com/leaderboard/global/{leaderboard_id}"
+            if replay_url and not entry.beatleader_replay_url:
+                entry.beatleader_replay_url = replay_url
+
         title = entry.song_name or "(untitled)"
-        if entry.duration_seconds > 0:
+        if entry.duration_seconds > 0 and entry.source != "beatsaver":
             title = f"{title} ({_format_duration(entry.duration_seconds)})"
-        self._preview_title_label.setText(title)
-        if entry.source == "beatsaver":
-            details = [f"BSR: {entry.beatsaver_key or '-'}"]
-            if entry.beatsaver_description:
-                details.extend(["", entry.beatsaver_description])
+        self._preview_title_full_text = title
+        has_bl_stats_source = bool(entry.leaderboard_id and entry.source in ("beatleader", "beatsaver"))
+        if entry.beatsaver_key:
+            bsr_text = f"BSR: {entry.beatsaver_key or '-'}"
+            self._preview_bsr_button.setText(bsr_text)
+            self._preview_bsr_button.setProperty("copy_text", entry.beatsaver_key or "")
+            self._preview_bsr_button.setVisible(True)
         else:
-            source_date_text = _format_source_date(entry.source_date_ts, include_time=False)
-            played_date_text = "-" if entry.played_at_ts <= 0 else datetime.fromtimestamp(entry.played_at_ts).strftime('%Y-%m-%d')
-            details = [
-                f"Mapper: {entry.mapper or '-'}",
-                f"Song Author: {entry.song_author or '-'}",
-                f"Diff: {entry.mode or '-'} / {entry.difficulty or '-'}",
-                f"Status: {entry.status_str}",
-                f"Played At: {played_date_text}",
-                f"Ranked: {source_date_text}",
-                f"Duration: {entry.duration_seconds}s" if entry.duration_seconds > 0 else "Duration: -",
-                f"Hash: {entry.song_hash or '-'}",
-            ]
+            self._preview_bsr_button.setText("")
+            self._preview_bsr_button.setProperty("copy_text", "")
+            self._preview_bsr_button.setVisible(False)
+
+        details = [entry.beatsaver_description] if entry.beatsaver_description else []
+        self._update_preview_title_label()
         self._preview_meta_text.setHtml(_preview_text_to_html("\n".join(details)))
         self._btn_preview_open.setEnabled(bool(entry.beatsaver_page_url))
         self._btn_preview_open.setProperty("url", entry.beatsaver_page_url)
@@ -4233,11 +5062,16 @@ class PlaylistWindow(QMainWindow):
         self._btn_preview_replay.setProperty("url", entry.beatleader_replay_url)
         self._btn_preview_download.setEnabled(bool(entry.beatsaver_download_url))
         self._btn_preview_download.setProperty("url", entry.beatsaver_download_url)
-        if entry.leaderboard_id and entry.source == "beatsaver":
+        bl_leaderboard_id = ""
+        if entry.source in ("beatsaver", "beatleader"):
+            bl_leaderboard_id = entry.leaderboard_id
+        elif entry.beatleader_page_url:
+            bl_leaderboard_id = entry.beatleader_page_url.rstrip("/").rsplit("/", 1)[-1]
+        if bl_leaderboard_id:
             if not entry.beatleader_global1_replay_url:
-                entry.beatleader_global1_replay_url = self._resolve_bl_top_replay_url(entry.leaderboard_id)
+                entry.beatleader_global1_replay_url = self._resolve_bl_top_replay_url(bl_leaderboard_id)
             if not entry.beatleader_local1_replay_url:
-                entry.beatleader_local1_replay_url = self._resolve_bl_top_replay_url(entry.leaderboard_id, "JP")
+                entry.beatleader_local1_replay_url = self._resolve_bl_top_replay_url(bl_leaderboard_id, "JP")
         self._btn_preview_global1_replay.setEnabled(bool(entry.beatleader_global1_replay_url))
         self._btn_preview_global1_replay.setProperty("url", entry.beatleader_global1_replay_url)
         self._btn_preview_local1_replay.setEnabled(bool(entry.beatleader_local1_replay_url))
@@ -4273,6 +5107,10 @@ class PlaylistWindow(QMainWindow):
                 self._preview_signals.error.emit(token, str(exc))
 
         threading.Thread(target=_task, daemon=True).start()
+
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        self._update_preview_title_label()
 
     def _set_preview_image(self, data: bytes) -> None:
         pixmap = QPixmap()
@@ -4311,22 +5149,23 @@ class PlaylistWindow(QMainWindow):
         pixmap = QPixmap()
         if not pixmap.loadFromData(data):
             return None
+        thumb_edge = self._thumbnail_edge_size()
         thumb = pixmap.scaled(
-            24,
-            24,
+            thumb_edge,
+            thumb_edge,
             Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation,
         )
         self._thumbnail_cache[url] = thumb
         return thumb
 
-    def _set_cover_item_thumbnail(self, item: QTableWidgetItem, url: str) -> None:
+    def _set_cover_cell_thumbnail(self, label: QLabel, url: str) -> None:
         if not url:
-            item.setData(Qt.ItemDataRole.DecorationRole, None)
+            label.clear()
             return
         pixmap = self._thumbnail_cache.get(url)
         if pixmap is not None:
-            item.setData(Qt.ItemDataRole.DecorationRole, QIcon(pixmap))
+            self._set_cover_label_pixmap(label, pixmap)
             return
         cached_data = self._preview_cache.get(url)
         if cached_data is None:
@@ -4336,7 +5175,7 @@ class PlaylistWindow(QMainWindow):
         if cached_data is not None:
             pixmap = self._cache_thumbnail_pixmap(url, cached_data)
             if pixmap is not None:
-                item.setData(Qt.ItemDataRole.DecorationRole, QIcon(pixmap))
+                self._set_cover_label_pixmap(label, pixmap)
                 return
         if url == self._thumbnail_active_url or url in self._thumbnail_pending:
             return
@@ -4382,12 +5221,12 @@ class PlaylistWindow(QMainWindow):
             self._pump_thumbnail_queue()
             return
         for row in range(self._table.rowCount()):
-            song_item = self._table.item(row, _COL_SONG)
-            if song_item is None:
+            cover_widget = self._table.cellWidget(row, _COL_COVER)
+            if cover_widget is None:
                 continue
-            entry = song_item.data(Qt.ItemDataRole.UserRole)
-            if isinstance(entry, MapEntry) and entry.beatsaver_cover_url == url:
-                song_item.setData(Qt.ItemDataRole.DecorationRole, QIcon(pixmap))
+            image_label = cover_widget.findChild(QLabel)
+            if image_label is not None and str(image_label.property("cover_url") or "") == url:
+                self._set_cover_label_pixmap(image_label, pixmap)
         self._pump_thumbnail_queue()
 
     def _on_thumbnail_error(self, url: str, _msg: str) -> None:
@@ -4401,6 +5240,134 @@ class PlaylistWindow(QMainWindow):
         url = str(sender.property("url") if sender is not None else self._btn_preview_open.property("url") or "")
         if url:
             QDesktopServices.openUrl(QUrl(url))
+
+    def _resolve_beatsaver_download_url(self, entry: MapEntry) -> str:
+        url = str(entry.beatsaver_download_url or "").strip()
+        if url.startswith(("http://", "https://")):
+            return url
+        if url.startswith("beatsaver://"):
+            key = url.split("://", 1)[1].strip()
+            if key:
+                return f"https://beatsaver.com/api/download/key/{key}"
+        key = str(entry.beatsaver_key or "").strip()
+        if key:
+            return f"https://beatsaver.com/api/download/key/{key}"
+        return ""
+
+    def _build_beatsaver_folder_name(self, entry: MapEntry) -> str:
+        key = str(entry.beatsaver_key or "").strip() or "custom"
+        title = re.sub(r'[\\/:*?"<>|]', '', (entry.song_name or '').strip())
+        title = re.sub(r'\s+', ' ', title).strip(' .') or 'Unknown Song'
+        return f"{key} ({title})"
+
+    def _find_beatsaver_map_root(self, extracted_dir: Path) -> Optional[Path]:
+        for info_name in ("Info.dat", "info.dat"):
+            for info_path in extracted_dir.rglob(info_name):
+                if info_path.is_file():
+                    return info_path.parent
+        return None
+
+    def _refresh_downloaded_state_after_install(self, target_entry: MapEntry) -> None:
+        custom_levels_dir = self._custom_levels_dir()
+        self._installed_beatsaber_dir = str(custom_levels_dir) if custom_levels_dir else ""
+        if target_entry.beatsaver_key:
+            self._installed_level_keys.add(target_entry.beatsaver_key.strip().lower())
+        self._apply_filter()
+        self._restore_selected_entry(target_entry)
+        self._update_preview_from_selection()
+
+    def _can_download_beatsaver_entry(self, entry: MapEntry) -> bool:
+        return (
+            entry.source == "beatsaver"
+            and bool(self._resolve_beatsaver_download_url(entry))
+            and not self._is_beatsaver_entry_installed(entry)
+        )
+
+    def _download_beatsaver_entry(self, entry: MapEntry, show_dialogs: bool = True) -> bool:
+        custom_levels_dir = self._custom_levels_dir()
+        if not custom_levels_dir:
+            if show_dialogs:
+                QMessageBox.warning(self, "OneClickDownload", "Beat Saber フォルダが設定されていません。Settings で設定してください。")
+            return False
+
+        download_url = self._resolve_beatsaver_download_url(entry)
+        if not download_url:
+            if show_dialogs:
+                QMessageBox.warning(self, "OneClickDownload", "ダウンロード URL を取得できませんでした。")
+            return False
+
+        if self._is_beatsaver_entry_installed(entry):
+            self._refresh_downloaded_state_after_install(entry)
+            if show_dialogs:
+                QMessageBox.information(self, "OneClickDownload", "この譜面はすでに Beat Saber に入っています。")
+            return True
+
+        target_dir = custom_levels_dir / self._build_beatsaver_folder_name(entry)
+        try:
+            custom_levels_dir.mkdir(parents=True, exist_ok=True)
+            response = requests.get(download_url, timeout=60)
+            response.raise_for_status()
+
+            with tempfile.TemporaryDirectory(prefix="mbss_bsdl_") as tmp_dir_str:
+                tmp_dir = Path(tmp_dir_str)
+                archive_path = tmp_dir / "map.zip"
+                archive_path.write_bytes(response.content)
+
+                extract_dir = tmp_dir / "extract"
+                extract_dir.mkdir(parents=True, exist_ok=True)
+                with zipfile.ZipFile(archive_path) as zip_file:
+                    zip_file.extractall(extract_dir)
+
+                map_root = self._find_beatsaver_map_root(extract_dir)
+                if map_root is None:
+                    raise RuntimeError("譜面 zip の中に Info.dat が見つかりませんでした。")
+                if target_dir.exists():
+                    raise RuntimeError(f"保存先フォルダがすでに存在します: {target_dir.name}")
+                shutil.copytree(map_root, target_dir)
+        except Exception as exc:
+            if show_dialogs:
+                QMessageBox.critical(self, "OneClickDownload", f"譜面のダウンロードに失敗しました。\n\n{exc}")
+            return False
+
+        self._refresh_downloaded_state_after_install(entry)
+        return True
+
+    def _download_selected_preview_entry(self) -> None:
+        entry = self._selected_entry()
+        if entry is None:
+            QMessageBox.information(self, "OneClickDownload", "譜面が選択されていません。")
+            return
+        self._download_beatsaver_entry(entry)
+
+    def _download_selected_entries(self) -> None:
+        entries = [
+            entry for entry in self._selected_entries()
+            if self._can_download_beatsaver_entry(entry)
+        ]
+        if not entries:
+            QMessageBox.information(self, "Download", "ダウンロード可能な譜面が選択されていません。")
+            return
+
+        success_count = 0
+        failed_count = 0
+        for entry in entries:
+            if self._download_beatsaver_entry(entry, show_dialogs=False):
+                success_count += 1
+            else:
+                failed_count += 1
+
+        if failed_count:
+            QMessageBox.warning(
+                self,
+                "Download",
+                f"{success_count} maps downloaded, {failed_count} failed.",
+            )
+        else:
+            QMessageBox.information(
+                self,
+                "Download",
+                f"{success_count} maps downloaded.",
+            )
 
     def _setWindowTitle_source(self, src: str) -> None:
         self.setWindowTitle(f"Playlist — {src}")
@@ -4473,6 +5440,7 @@ class PlaylistWindow(QMainWindow):
             "bl": self._rb_bl,
             "acc": self._rb_acc,
             "rl": self._rb_acc_rl,
+            "bs": self._rb_bs,
         }
         source_button = radio_map.get(cfg.source)
         if source_button is None:
@@ -4493,6 +5461,17 @@ class PlaylistWindow(QMainWindow):
             self._cb_cat_true,
             self._cb_cat_standard,
             self._cb_cat_tech,
+            self._bs_query_edit,
+            self._bs_max_maps,
+            self._bs_days,
+            self._bs_from_date,
+            self._bs_to_date,
+            self._bs_min_rating,
+            self._bs_filter_min_rating,
+            self._bs_min_votes,
+            self._bs_filter_min_votes,
+            self._cb_bs_unranked,
+            self._cb_bs_no_ai,
             self._rb_exp_single,
             self._rb_exp_split,
         ]
@@ -4509,6 +5488,17 @@ class PlaylistWindow(QMainWindow):
             self._cb_cat_true.setChecked(cfg.cat_true)
             self._cb_cat_standard.setChecked(cfg.cat_standard)
             self._cb_cat_tech.setChecked(cfg.cat_tech)
+            self._bs_query_edit.setText(cfg.bs_query)
+            self._bs_max_maps.setValue(cfg.bs_max_maps)
+            self._bs_days.setValue(cfg.bs_days)
+            if cfg.bs_to_date:
+                self._bs_to_date.setDate(QDate.fromString(cfg.bs_to_date, "yyyy-MM-dd"))
+            if cfg.bs_from_date:
+                self._bs_from_date.setDate(QDate.fromString(cfg.bs_from_date, "yyyy-MM-dd"))
+            self._set_bs_rating_value(cfg.bs_min_rating)
+            self._set_bs_votes_value(cfg.bs_min_votes)
+            self._cb_bs_unranked.setChecked(cfg.bs_unranked_only)
+            self._cb_bs_no_ai.setChecked(cfg.bs_exclude_ai)
             self._rb_exp_single.setChecked(cfg.split_mode == "single")
             self._rb_exp_split.setChecked(cfg.split_mode != "single")
             sort_col, sort_order = _sort_indicator_from_mode(cfg.sort_mode)
@@ -4571,6 +5561,8 @@ class PlaylistWindow(QMainWindow):
             src_tag = "bl"
         elif self._rb_acc.isChecked():
             src_tag = "acc"
+        elif self._rb_bs.isChecked():
+            src_tag = "bs"
         elif self._rb_open.isChecked():
             svc = self._svc_combo.currentData()
             src_tag = {"scoresaber": "ss", "beatleader": "bl", "accsaber_rl": "rl"}.get(svc, "pl")
@@ -4600,6 +5592,15 @@ class PlaylistWindow(QMainWindow):
             split_mode=split_mode,
             sort_mode=sort_mode,
             song_filter=search_text,
+            bs_query=self._bs_query_edit.text().strip() if src_tag == "bs" else "",
+            bs_from_date=self._bs_from_date.date().toString("yyyy-MM-dd") if src_tag == "bs" else "",
+            bs_to_date=self._bs_to_date.date().toString("yyyy-MM-dd") if src_tag == "bs" else "",
+            bs_days=self._bs_days.value() if src_tag == "bs" else 7,
+            bs_max_maps=self._bs_max_maps.value() if src_tag == "bs" else 1000,
+            bs_min_rating=self._bs_min_rating.value() if src_tag == "bs" else 50,
+            bs_min_votes=self._bs_min_votes.value() if src_tag == "bs" else 0,
+            bs_unranked_only=self._cb_bs_unranked.isChecked() if src_tag == "bs" else True,
+            bs_exclude_ai=self._cb_bs_no_ai.isChecked() if src_tag == "bs" else True,
         )
         self._batch_configs.append(cfg)
         self._batch_save_configs()
@@ -4660,7 +5661,16 @@ class PlaylistWindow(QMainWindow):
                     existing.show_queued == new.show_queued and
                     existing.cat_true == new.cat_true and
                     existing.cat_standard == new.cat_standard and
-                    existing.cat_tech == new.cat_tech
+                    existing.cat_tech == new.cat_tech and
+                    existing.bs_query == new.bs_query and
+                    existing.bs_from_date == new.bs_from_date and
+                    existing.bs_to_date == new.bs_to_date and
+                    existing.bs_days == new.bs_days and
+                    existing.bs_max_maps == new.bs_max_maps and
+                    existing.bs_min_rating == new.bs_min_rating and
+                    existing.bs_min_votes == new.bs_min_votes and
+                    existing.bs_unranked_only == new.bs_unranked_only and
+                    existing.bs_exclude_ai == new.bs_exclude_ai
                 )
             if any(_is_duplicate(e, cfg) for e in self._batch_configs):
                 continue
@@ -4844,6 +5854,141 @@ class PlaylistWindow(QMainWindow):
     def _scroll_table_to_bottom(self) -> None:
         self._table.scrollToBottom()
 
+    def _custom_levels_dir(self) -> Path:
+        beatsaber_dir = load_beatsaber_dir().strip()
+        if not beatsaber_dir:
+            return Path()
+        return Path(beatsaber_dir) / "Beat Saber_Data" / "CustomLevels"
+
+    def _refresh_installed_levels_cache(self) -> None:
+        custom_levels_dir = self._custom_levels_dir()
+        cache_key = str(custom_levels_dir)
+        if cache_key == self._installed_beatsaber_dir:
+            return
+
+        installed_keys: set[str] = set()
+        if custom_levels_dir.is_dir():
+            try:
+                for child in custom_levels_dir.iterdir():
+                    if not child.is_dir():
+                        continue
+                    match = re.match(r"^([0-9A-Za-z]+)(?:\s*[\(\[]|$)", child.name.strip())
+                    if match:
+                        installed_keys.add(match.group(1).lower())
+            except Exception:
+                installed_keys = set()
+
+        self._installed_beatsaber_dir = cache_key
+        self._installed_level_keys = installed_keys
+
+    def _is_beatsaver_entry_installed(self, entry: MapEntry) -> bool:
+        beatsaver_key = str(entry.beatsaver_key or "").strip().lower()
+        if not beatsaver_key:
+            return False
+        self._refresh_installed_levels_cache()
+        if not self._installed_beatsaber_dir:
+            return False
+        return beatsaver_key in self._installed_level_keys
+
+    def _make_oneclick_button(self, entry: MapEntry) -> QWidget:
+        button = QPushButton("")
+        button.setIcon(QIcon(str(RESOURCES_DIR / "onclick_download.png")))
+        icon_edge = max(18, min(self._row_height - 6, 30))
+        button.setIconSize(QSize(icon_edge, icon_edge))
+        button.setFixedWidth(34)
+        button.setFixedHeight(max(22, self._row_height))
+        button.setFlat(True)
+        button.setStyleSheet(
+            "QPushButton { padding: 0px; border: none; background: transparent; }"
+            "QPushButton:disabled { border: none; background: transparent; }"
+        )
+        button.clicked.connect(lambda _checked=False, current_entry=entry: self._download_beatsaver_entry(current_entry))
+
+        has_download = bool(entry.beatsaver_download_url)
+        has_beatsaber_dir = bool(load_beatsaber_dir().strip())
+        installed = has_download and self._is_beatsaver_entry_installed(entry)
+        button.setEnabled(has_download and not installed)
+        if not has_download:
+            button.setToolTip("OneClickDownload unavailable")
+        elif installed:
+            button.setToolTip("Already installed in Beat Saber")
+        elif not has_beatsaber_dir:
+            button.setToolTip("OneClickDownload (Beat Saber folder not set; install state not checked)")
+        else:
+            button.setToolTip("OneClickDownload")
+        container = QWidget()
+        container.setStyleSheet("background: transparent;")
+        container.setFixedHeight(self._row_height)
+        layout = QHBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(button, 0, Qt.AlignmentFlag.AlignCenter)
+        return container
+
+    def _thumbnail_edge_size(self) -> int:
+        return max(28, min(self._row_height, 128))
+
+    def _set_cover_label_pixmap(self, label: QLabel, pixmap: QPixmap) -> None:
+        edge = self._thumbnail_edge_size()
+        label.setFixedSize(edge, edge)
+        label.setPixmap(pixmap)
+        label.setText("")
+
+    def _make_cover_cell_widget(self, entry: MapEntry) -> QWidget:
+        container = QWidget()
+        container.setStyleSheet("background: transparent;")
+        container.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        layout = QHBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        image_label = QLabel()
+        image_label.setProperty("cover_url", entry.beatsaver_cover_url)
+        image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        image_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        edge = self._thumbnail_edge_size()
+        image_label.setFixedSize(edge, edge)
+        image_label.setStyleSheet("background: transparent;")
+        layout.addWidget(image_label, 0, Qt.AlignmentFlag.AlignCenter)
+
+        self._set_cover_cell_thumbnail(image_label, entry.beatsaver_cover_url)
+        return container
+
+    def _apply_row_height(self, refresh_table: bool = True) -> None:
+        header = self._table.verticalHeader()
+        header.setMinimumSectionSize(0)
+        header.setDefaultSectionSize(self._row_height)
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
+        self._table.setColumnWidth(_COL_COVER, self._thumbnail_edge_size())
+        if not refresh_table or not self._filtered:
+            return
+        selected_entry = self._selected_entry()
+        self._thumbnail_cache.clear()
+        self._refresh_table(self._filtered)
+        self._restore_selected_entry(selected_entry)
+
+    def _restore_selected_entry(self, target: Optional[MapEntry]) -> None:
+        if target is None:
+            return
+        for row in range(self._table.rowCount()):
+            item = self._table.item(row, _COL_SONG)
+            if item is None:
+                continue
+            if item.data(Qt.ItemDataRole.UserRole) is target:
+                self._table.selectRow(row)
+                self._table.scrollToItem(item, QAbstractItemView.ScrollHint.PositionAtCenter)
+                return
+
+    def _on_row_height_up(self) -> None:
+        self._row_height = min(self._row_height + 4, 64)
+        self._apply_row_height(refresh_table=True)
+        self._save_window_state()
+
+    def _on_row_height_dn(self) -> None:
+        self._row_height = max(self._row_height - 4, 18)
+        self._apply_row_height(refresh_table=True)
+        self._save_window_state()
+
     # ──────────────────────────────────────────────────────────────────────────
     # フィルタ
     # ──────────────────────────────────────────────────────────────────────────
@@ -4857,6 +6002,8 @@ class PlaylistWindow(QMainWindow):
         show_cleared = self._cb_sts_cleared.isChecked()
         show_nf = self._cb_sts_nf.isChecked()
         show_unplayed = self._cb_sts_unplayed.isChecked()
+        show_bs_not_downloaded = self._cb_bs_not_downloaded.isChecked()
+        show_bs_downloaded = self._cb_bs_downloaded.isChecked()
         min_bs_rating = self._bs_filter_min_rating.value()
         min_bs_votes = self._bs_filter_min_votes.value()
         highest_diff_only = self._cb_top_diff_only.isChecked()
@@ -4891,6 +6038,11 @@ class PlaylistWindow(QMainWindow):
                 if e.player_pp < min_bs_rating:
                     continue
                 if e.beatsaver_votes < min_bs_votes:
+                    continue
+                is_downloaded = self._is_beatsaver_entry_installed(e)
+                if is_downloaded and not show_bs_downloaded:
+                    continue
+                if not is_downloaded and not show_bs_not_downloaded:
                     continue
             # ステータスフィルタ
             if e.pending:
@@ -4939,14 +6091,12 @@ class PlaylistWindow(QMainWindow):
     # ──────────────────────────────────────────────────────────────────────────
 
     def _update_selection_status(self) -> None:
-        selection_model = self._table.selectionModel()
-        if selection_model is None:
-            selected_rows = 0
-        else:
-            selected_rows = len(selection_model.selectedRows())
+        selected_entries = self._selected_entries()
+        selected_rows = len(selected_entries)
         self._selection_status_label.setText(
             f"{selected_rows} row{'s' if selected_rows != 1 else ''} selected"
         )
+        self._btn_download_selected.setEnabled(any(self._can_download_beatsaver_entry(entry) for entry in selected_entries))
 
     def _refresh_table(self, entries: List[MapEntry]) -> None:
         table = self._table
@@ -4981,14 +6131,21 @@ class PlaylistWindow(QMainWindow):
             # 曲名
             song_item = QTableWidgetItem(e.song_name)
             song_item.setData(Qt.ItemDataRole.UserRole, e)
-            if _is_bs_mode:
-                self._set_cover_item_thumbnail(song_item, e.beatsaver_cover_url)
             table.setItem(row, _COL_SONG, song_item)
+            if _is_bs_mode:
+                table.setCellWidget(row, _COL_COVER, self._make_cover_cell_widget(e))
+            oneclick_sort_val = 1.0 if self._is_beatsaver_entry_installed(e) else 0.0
+            oneclick_item = _NumItem("", oneclick_sort_val)
+            oneclick_item.setToolTip("Downloaded" if oneclick_sort_val > 0 else "Not downloaded")
+            table.setItem(row, _COL_ONECLICK, oneclick_item)
+            table.setCellWidget(row, _COL_ONECLICK, self._make_oneclick_button(e))
+            has_bl_stats_source = bool(e.leaderboard_id and e.source in ("beatleader", "beatsaver"))
             table.setItem(
                 row,
                 _COL_SOURCE_DATE,
                 _source_date_item(e.source_date_ts, include_time=(e.source == "beatsaver")),
             )
+            table.setItem(row, _COL_DURATION, _duration_item(e.duration_seconds))
             # プレイ日時
             #プレイ日時は左寄せ
             played_at_item = _played_at_item(e.played_at_ts)
@@ -5073,6 +6230,18 @@ class PlaylistWindow(QMainWindow):
             table.setItem(row, _COL_AUTHOR, QTableWidgetItem(e.song_author))
             # マッパー
             table.setItem(row, _COL_MAPPER, QTableWidgetItem(e.mapper))
+            bl_plays_item = _NumItem(
+                str(e.beatleader_plays) if has_bl_stats_source else "-",
+                float(e.beatleader_plays if has_bl_stats_source else -1.0),
+            )
+            bl_plays_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            table.setItem(row, _COL_BL_PLAYS, bl_plays_item)
+            bl_attempts_item = _NumItem(
+                str(e.beatleader_attempts) if has_bl_stats_source else "-",
+                float(e.beatleader_attempts if has_bl_stats_source else -1.0),
+            )
+            bl_attempts_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            table.setItem(row, _COL_BL_ATTEMPTS, bl_attempts_item)
             # FC
             fc_item = _NumItem("FC" if e.full_combo else "", 1.0 if e.full_combo else 0.0)
             fc_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
