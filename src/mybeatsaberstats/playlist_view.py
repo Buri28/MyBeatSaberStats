@@ -17,14 +17,14 @@ import tempfile
 import threading
 from urllib.parse import quote
 import zipfile
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, asdict, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
 import requests
 
-from PySide6.QtCore import Qt, QObject, Signal, QUrl, QSize, QDate
+from PySide6.QtCore import Qt, QObject, Signal, QUrl, QSize, QDate, QTimer
 from PySide6.QtGui import QColor, QImage, QPainter, QFont, QPixmap, QDesktopServices, QIcon, QPalette
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
@@ -911,6 +911,24 @@ def _bl_player_score_timeset(scores: Dict, map_id: str) -> int:
     return _parse_unix_datetime_to_ts(entry.get("timeset"))
 
 
+_MAP_ENTRIES_CACHE: Dict[Tuple[str, str, bool, Tuple[Tuple[str, bool, int, int], ...]], List[MapEntry]] = {}
+
+
+def _file_signature(*paths: Path) -> Tuple[Tuple[str, bool, int, int], ...]:
+    signature: List[Tuple[str, bool, int, int]] = []
+    for path in paths:
+        try:
+            stat = path.stat()
+            signature.append((str(path), True, stat.st_mtime_ns, stat.st_size))
+        except OSError:
+            signature.append((str(path), False, 0, 0))
+    return tuple(signature)
+
+
+def _clone_entries(entries: List[MapEntry]) -> List[MapEntry]:
+    return [replace(entry) for entry in entries]
+
+
 def load_ss_maps(steam_id: Optional[str] = None, filter_stars: bool = True) -> List[MapEntry]:
     """ScoreSaber ランクマップをキャッシュから読み込む。
 
@@ -919,6 +937,18 @@ def load_ss_maps(steam_id: Optional[str] = None, filter_stars: bool = True) -> L
     path = _CACHE_DIR / "scoresaber_ranked_maps.json"
     if not path.exists():
         return []
+    ss_player_path = _CACHE_DIR / f"scoresaber_player_scores_{steam_id}.json" if steam_id else Path()
+    bl_ranked_path = _CACHE_DIR / "beatleader_ranked_maps.json"
+    bl_player_path = _CACHE_DIR / f"beatleader_player_scores_{steam_id}.json" if steam_id else Path()
+    cache_key = (
+        "ss",
+        steam_id or "",
+        bool(filter_stars),
+        _file_signature(path, ss_player_path, bl_ranked_path, bl_player_path),
+    )
+    cached_entries = _MAP_ENTRIES_CACHE.get(cache_key)
+    if cached_entries is not None:
+        return _enrich_entries_with_beatsaver_cache(_clone_entries(cached_entries))
 
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
@@ -938,23 +968,23 @@ def load_ss_maps(steam_id: Optional[str] = None, filter_stars: bool = True) -> L
     # プレイヤースコアを読み込む
     ss_scores: Dict[str, dict] = {}
     if steam_id:
-        sp = _CACHE_DIR / f"scoresaber_player_scores_{steam_id}.json"
-        if sp.exists():
+        if ss_player_path.exists():
             try:
-                sd = json.loads(sp.read_text(encoding="utf-8"))
+                sd = json.loads(ss_player_path.read_text(encoding="utf-8"))
                 ss_scores = sd.get("scores", {})
             except Exception:
                 pass
 
     # ScoreSaber キャッシュには譜面時間がないため BL キャッシュから補完する
+    bl_maps = load_bl_maps(steam_id)
     bl_duration_index = {
         (e.song_hash.upper(), e.mode, e.difficulty): e.duration_seconds
-        for e in load_bl_maps()
+        for e in bl_maps
         if e.duration_seconds > 0
     }
     bl_link_index = {
         (e.song_hash.upper(), e.mode, e.difficulty): e
-        for e in load_bl_maps(steam_id)
+        for e in bl_maps
         if e.leaderboard_id or e.beatleader_page_url or e.beatleader_replay_url
     }
 
@@ -1007,6 +1037,7 @@ def load_ss_maps(steam_id: Optional[str] = None, filter_stars: bool = True) -> L
             beatleader_replay_url=bl_link_entry.beatleader_replay_url if bl_link_entry else "",
         ))
 
+    _MAP_ENTRIES_CACHE[cache_key] = _clone_entries(entries)
     return _enrich_entries_with_beatsaver_cache(entries)
 
 
@@ -1015,6 +1046,16 @@ def load_bl_maps(steam_id: Optional[str] = None) -> List[MapEntry]:
     path = _CACHE_DIR / "beatleader_ranked_maps.json"
     if not path.exists():
         return []
+    bl_player_path = _CACHE_DIR / f"beatleader_player_scores_{steam_id}.json" if steam_id else Path()
+    cache_key = (
+        "bl",
+        steam_id or "",
+        True,
+        _file_signature(path, bl_player_path),
+    )
+    cached_entries = _MAP_ENTRIES_CACHE.get(cache_key)
+    if cached_entries is not None:
+        return _enrich_entries_with_beatsaver_cache(_clone_entries(cached_entries))
 
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
@@ -1032,10 +1073,9 @@ def load_bl_maps(steam_id: Optional[str] = None) -> List[MapEntry]:
     # プレイヤースコアを読み込む
     bl_scores: Dict[str, dict] = {}
     if steam_id:
-        bp = _CACHE_DIR / f"beatleader_player_scores_{steam_id}.json"
-        if bp.exists():
+        if bl_player_path.exists():
             try:
-                bd = json.loads(bp.read_text(encoding="utf-8"))
+                bd = json.loads(bl_player_path.read_text(encoding="utf-8"))
                 bl_scores = bd.get("scores", {})
             except Exception:
                 pass
@@ -1085,6 +1125,7 @@ def load_bl_maps(steam_id: Optional[str] = None) -> List[MapEntry]:
             beatleader_plays=int(m.get("plays") or 0),
         ))
 
+    _MAP_ENTRIES_CACHE[cache_key] = _clone_entries(entries)
     return _enrich_entries_with_beatsaver_cache(entries)
 
 
@@ -3938,11 +3979,25 @@ class PlaylistWindow(QMainWindow):
         self._batch_queue_list.itemChanged.connect(self._on_batch_item_changed)
         self._batch_queue_list.itemSelectionChanged.connect(self._update_batch_queue_actions)
         self._batch_refresh_queue()
+        self._initial_source_tab = initial_source_tab
+        self._initial_restore_started = False
 
         # スプリッタ初期サイズ: 左を広く、右パネルを 252px
         self._splitter.setSizes([940, 350])
         self._load_window_state()
-        self.select_source_tab(initial_source_tab)
+        self._update_filter_export_ui()
+        self._update_table_visual_mode()
+        self._clear_preview()
+
+    def showEvent(self, event) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        if self._initial_restore_started:
+            return
+        self._initial_restore_started = True
+        QTimer.singleShot(0, self._finish_initial_restore)
+
+    def _finish_initial_restore(self) -> None:
+        self.select_source_tab(self._initial_source_tab)
         self._restore_saved_snapshot_state()
         self._restore_saved_maps_state()
         self._update_filter_export_ui()
@@ -5153,34 +5208,32 @@ class PlaylistWindow(QMainWindow):
         self._reset_beatsaver_cache_status()
         self._pending_load_source_key = self._current_source_key()
         self._pending_load_maps_tab = self._is_maps_tab()
-        if reset_filters and not self._rb_bs.isChecked():
-            self._reset_filters()
-        self._all_entries = []
-        self._filtered = []
-        self._table.setRowCount(0)
-        self._sync_active_table_state()
-        self._clear_preview()
+        worker_fn = None
+        pending_title = ""
+        pending_open_path: Optional[Path] = None
+        pending_open_service = ""
+        beatsaver_opts = None
 
         steam_id = self._steam_id
 
         if self._rb_ss.isChecked():
-            self._setWindowTitle_source(SOURCE_SS)
-            self._start_async_load(lambda sig: self._run_load_ss(sig, steam_id))
+            pending_title = SOURCE_SS
+            worker_fn = lambda sig: self._run_load_ss(sig, steam_id)
 
         elif self._rb_bl.isChecked():
-            self._setWindowTitle_source(SOURCE_BL)
-            self._start_async_load(lambda sig: self._run_load_bl(sig, steam_id))
+            pending_title = SOURCE_BL
+            worker_fn = lambda sig: self._run_load_bl(sig, steam_id)
 
         elif self._rb_acc.isChecked():
-            self._setWindowTitle_source(SOURCE_ACC)
-            self._start_async_load(lambda sig: self._run_load_acc(sig, steam_id, "all"))
+            pending_title = SOURCE_ACC
+            worker_fn = lambda sig: self._run_load_acc(sig, steam_id, "all")
 
         elif self._rb_acc_rl.isChecked():
-            self._setWindowTitle_source(SOURCE_ACC_RL)
-            self._start_async_load(lambda sig: self._run_load_acc_rl(sig, steam_id, "all"))
+            pending_title = SOURCE_ACC_RL
+            worker_fn = lambda sig: self._run_load_acc_rl(sig, steam_id, "all")
 
         elif self._rb_bs.isChecked():
-            self._setWindowTitle_source(SOURCE_BS)
+            pending_title = SOURCE_BS
             beatsaver_opts = {
                 "query": self._bs_query_edit.text().strip(),
                 "max_maps": self._bs_max_maps.value(),
@@ -5192,7 +5245,7 @@ class PlaylistWindow(QMainWindow):
                 "unranked_only": self._cb_bs_unranked.isChecked(),
                 "exclude_ai": self._cb_bs_no_ai.isChecked(),
             }
-            self._start_async_load(lambda sig, opts=beatsaver_opts: self._run_load_beatsaver(sig, steam_id, opts))
+            worker_fn = lambda sig, opts=beatsaver_opts: self._run_load_beatsaver(sig, steam_id, opts)
 
         elif self._rb_open.isChecked():
             file_path_str = self._open_edit.text().strip()
@@ -5200,29 +5253,46 @@ class PlaylistWindow(QMainWindow):
                 QMessageBox.warning(self, "Open File", "Please specify a .bplist or .json file.")
                 self._btn_load.setEnabled(True)
                 return
-            p = Path(file_path_str)
-            if not p.exists():
-                QMessageBox.warning(self, "Open File", f"File not found:\n{p}")
+            pending_open_path = Path(file_path_str)
+            if not pending_open_path.exists():
+                QMessageBox.warning(self, "Open File", f"File not found:\n{pending_open_path}")
                 self._btn_load.setEnabled(True)
                 return
-            if p.suffix.lower() not in (".bplist", ".json"):
+            if pending_open_path.suffix.lower() not in (".bplist", ".json"):
                 QMessageBox.warning(self, "Open File", "Unsupported file type. Please open a .bplist or .json file.")
                 self._btn_load.setEnabled(True)
                 return
-            svc = self._svc_combo.currentData() or "none"
-            self._setWindowTitle_source(f"Open: {p.name}")
-            if svc == "accsaber_rl":
-                # RL は非同期ロード（プログレスバー付き）
-                self._open_bplist_path = p
-                self._start_async_load(
-                    lambda sig: self._run_load_open_rl(sig, p, steam_id)
-                )
-                return
-            self._start_async_load(lambda sig, bp=p, sv=svc: self._run_load_open(sig, bp, sv, steam_id))
+            pending_open_service = str(self._svc_combo.currentData() or "none")
+            pending_title = f"Open: {pending_open_path.name}"
+            if pending_open_service == "accsaber_rl":
+                worker_fn = lambda sig, bp=pending_open_path: self._run_load_open_rl(sig, bp, steam_id)
+            else:
+                worker_fn = lambda sig, bp=pending_open_path, sv=pending_open_service: self._run_load_open(sig, bp, sv, steam_id)
 
-    def _start_async_load(self, worker_fn) -> None:
-        """API 取得をスレッドで実行してプログレスダイアログを表示する。"""
-        dlg = QProgressDialog("Loading...", "Cancel", 0, 0, self)
+        if worker_fn is None:
+            self._btn_load.setEnabled(True)
+            return
+
+        self._show_load_progress_dialog("Preparing load...")
+        if reset_filters and not self._rb_bs.isChecked():
+            self._reset_filters()
+        self._all_entries = []
+        self._filtered = []
+        self._table.setRowCount(0)
+        self._sync_active_table_state()
+        self._clear_preview()
+        self._setWindowTitle_source(pending_title)
+        if pending_open_path is not None and pending_open_service == "accsaber_rl":
+            self._open_bplist_path = pending_open_path
+        self._start_async_load(worker_fn)
+
+    def _show_load_progress_dialog(self, label: str = "Loading...") -> None:
+        if self._progress_dlg is not None:
+            self._progress_dlg.setLabelText(label)
+            self._progress_dlg.show()
+            QApplication.processEvents()
+            return
+        dlg = QProgressDialog(label, "Cancel", 0, 0, self)
         dlg.setWindowTitle("Loading")
         dlg.setMinimumWidth(340)
         dlg.setWindowModality(Qt.WindowModality.ApplicationModal)
@@ -5230,6 +5300,15 @@ class PlaylistWindow(QMainWindow):
         dlg.setAutoReset(False)
         dlg.show()
         self._progress_dlg = dlg
+        QApplication.processEvents()
+
+    def _start_async_load(self, worker_fn) -> None:
+        """API 取得をスレッドで実行してプログレスダイアログを表示する。"""
+        self._show_load_progress_dialog("Loading...")
+        dlg = self._progress_dlg
+        if dlg is None:
+            self._btn_load.setEnabled(True)
+            return
 
         sigs = self._load_signals
 
