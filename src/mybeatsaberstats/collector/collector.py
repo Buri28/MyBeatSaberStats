@@ -1270,9 +1270,9 @@ def create_snapshot_for_steam_id(
                     print("ScoreSaber Ranked Maps: 初回取得のため全件取得")
             fetch_label = ss_ranked_until.strftime('%Y-%m-%d %H:%M') if ss_ranked_until else "full"
             _step(0.02, f"Updating ScoreSaber Ranked Maps (last fetch: {fetch_label})...")
-            leaderboards = _get_scoresaber_leaderboards_ranked(session, progress=_ss_leaderboard_progress, fetch_until=ss_ranked_until)
+            ss_ranked_leaderboards = _get_scoresaber_leaderboards_ranked(session, progress=_ss_leaderboard_progress, fetch_until=ss_ranked_until)
             map_store = MapStore()
-            map_store.ss_ranked_maps = leaderboards
+            map_store.ss_ranked_maps = ss_ranked_leaderboards
             ss_new_ranked_ids = _load_scoresaber_ranked_ids(_ss_ranked_cache_path) - _ss_ranked_before_ids
             if ss_new_ranked_ids:
                 print(f"ScoreSaber Ranked Maps: 新規 ranked 譜面 {len(ss_new_ranked_ids)} 件")
