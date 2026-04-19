@@ -3755,11 +3755,24 @@ class PlayerWindow(QMainWindow):
     def _show_playlist_window(self, initial_source_tab: str = "snapshot", *, show_window: bool = True) -> None:
         steam_id = self._current_player_id()
         if not hasattr(self, "_playlist_window") or self._playlist_window is None:
-            self._playlist_window = PlaylistWindow(
-                steam_id=steam_id,
-                initial_source_tab=initial_source_tab,
-                parent=None,
-            )
+            progress = QProgressDialog("Opening Playlist / Maps...", "", 0, 0, self)
+            progress.setWindowTitle("Opening Playlist / Maps")
+            progress.setWindowModality(Qt.WindowModality.ApplicationModal)
+            progress.setAutoClose(False)
+            progress.setAutoReset(False)
+            progress.setCancelButton(None)
+            progress.setMinimumWidth(360)
+            progress.setMinimumDuration(0)
+            progress.show()
+            QApplication.processEvents()
+            try:
+                self._playlist_window = PlaylistWindow(
+                    steam_id=steam_id,
+                    initial_source_tab=initial_source_tab,
+                    parent=None,
+                )
+            finally:
+                progress.close()
         else:
             # プレイヤーが変わっていたら steam_id を更新
             self._playlist_window._steam_id = steam_id
