@@ -354,7 +354,7 @@ class SnapshotCompareDialog(QDialog):
         # サービス別アイコン
         resources_dir = RESOURCES_DIR
         self._icon_scoresaber = QIcon(str(resources_dir / "scoresaber_logo.svg"))
-        self._icon_beatleader = QIcon(str(resources_dir / "beatleader_logo.jpg"))
+        self._icon_beatleader = QIcon(str(resources_dir / "beatleader_logo.webp"))
         self._icon_accsaber = QIcon(str(resources_dir / "asssaber_logo.webp"))
         _rl_logo_path = resources_dir / "accsaberreloaded_logo.png"
         self._icon_accsaber_rl = QIcon(str(_rl_logo_path)) if _rl_logo_path.exists() else self._icon_accsaber
