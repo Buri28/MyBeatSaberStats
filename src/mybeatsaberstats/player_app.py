@@ -3752,7 +3752,7 @@ class PlayerWindow(QMainWindow):
         except Exception as exc:  # noqa: BLE001
             QMessageBox.warning(self, "Snapshot Graph", f"Failed to open snapshot graph:\n{exc}")
 
-    def _show_playlist_window(self, initial_source_tab: str = "snapshot") -> None:
+    def _show_playlist_window(self, initial_source_tab: str = "snapshot", *, show_window: bool = True) -> None:
         steam_id = self._current_player_id()
         if not hasattr(self, "_playlist_window") or self._playlist_window is None:
             self._playlist_window = PlaylistWindow(
@@ -3765,9 +3765,10 @@ class PlayerWindow(QMainWindow):
             self._playlist_window._steam_id = steam_id
             self._playlist_window._export_dir = _load_playlist_export_dir()
             self._playlist_window.select_source_tab(initial_source_tab)
-        self._playlist_window.show()
-        self._playlist_window.raise_()
-        self._playlist_window.activateWindow()
+        if show_window:
+            self._playlist_window.show()
+            self._playlist_window.raise_()
+            self._playlist_window.activateWindow()
 
     def open_playlist(self) -> None:
         """Playlist 画面を開く（現在プレイヤーのクリア情報を渡す）。"""
@@ -3796,7 +3797,7 @@ class PlayerWindow(QMainWindow):
         sort_mode: str = "status_desc",
     ) -> None:
         """Stats 画面からの連携用。Playlist 画面を開いてフィルタプリセットを適用する。"""
-        self.open_playlist()
+        self._show_playlist_window("snapshot")
         if self._playlist_window is not None:
             self._playlist_window.apply_filter_preset(
                 source=source,
