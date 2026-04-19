@@ -6821,8 +6821,9 @@ class PlaylistWindow(QMainWindow):
 
         self._update_table_visual_mode()
         table.setSortingEnabled(True)
-        if entries:
-            table.selectRow(0)
+        table.clearSelection()
+        if not entries:
+            self._clear_preview()
         else:
             self._clear_preview()
         self._update_selection_status()
