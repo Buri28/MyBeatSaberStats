@@ -3152,6 +3152,9 @@ class PlaylistWindow(QMainWindow):
         self._beatsaver_meta_active_hash = ""
         self._preview_description_text = ""
         self._preview_title_full_text = "No map selected"
+        self._table_render_token = 0
+        self._table_render_active = False
+        self._pending_restore_entry: Optional[MapEntry] = None
 
         central = QWidget(self)
         self.setCentralWidget(central)
@@ -6600,6 +6603,9 @@ class PlaylistWindow(QMainWindow):
     def _restore_selected_entry(self, target: Optional[MapEntry]) -> None:
         if target is None:
             return
+        if self._table_render_active:
+            self._pending_restore_entry = target
+            return
         for row in range(self._table.rowCount()):
             item = self._table.item(row, _COL_SONG)
             if item is None:
@@ -6781,8 +6787,227 @@ class PlaylistWindow(QMainWindow):
         )
         self._btn_download_selected.setEnabled(any(self._can_download_beatsaver_entry(entry) for entry in selected_entries))
 
+    def _populate_table_row(
+        self,
+        table: QTableWidget,
+        row: int,
+        e: MapEntry,
+        cleared_bg: QColor,
+        nf_bg: QColor,
+        unplayed_bg: QColor,
+        is_acc_mode: bool,
+        is_bs_mode: bool,
+    ) -> None:
+        status_val = 30 if e.cleared else 20 if e.nf_clear else 10
+        status_item = _NumItem(e.status_str, float(status_val))
+        status_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        if e.cleared:
+            status_item.setBackground(cleared_bg)
+        elif e.nf_clear:
+            status_item.setBackground(nf_bg)
+        else:
+            status_item.setBackground(unplayed_bg)
+        table.setItem(row, _COL_STATUS, status_item)
+
+        song_item = QTableWidgetItem(e.song_name)
+        song_item.setData(Qt.ItemDataRole.UserRole, e)
+        table.setItem(row, _COL_SONG, song_item)
+
+        oneclick_sort_val = 1.0 if self._is_beatsaver_entry_installed(e) else 0.0
+        oneclick_item = _NumItem("", oneclick_sort_val)
+        oneclick_item.setToolTip("Downloaded" if oneclick_sort_val > 0 else "Not downloaded")
+        table.setItem(row, _COL_ONECLICK, oneclick_item)
+        has_bl_stats_source = bool(e.leaderboard_id and e.source in ("beatleader", "beatsaver"))
+        table.setItem(
+            row,
+            _COL_SOURCE_DATE,
+            _source_date_item(e.source_date_ts, include_time=(e.source == "beatsaver")),
+        )
+        table.setItem(row, _COL_DURATION, _duration_item(e.duration_seconds))
+
+        played_at_item = _played_at_item(e.played_at_ts)
+        played_at_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        table.setItem(row, _COL_PLAY_TIME, played_at_item)
+        table.setItem(row, _COL_DIFF, _diff_item(e.difficulty))
+        table.setItem(row, _COL_MODE, _mode_item(e.mode))
+
+        if is_acc_mode:
+            star_item = _NumItem(f"{e.acc_complexity:.1f}" if e.acc_complexity > 0 else "-", e.acc_complexity)
+            star_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            table.setItem(row, _COL_STARS, star_item)
+        else:
+            star_text = f"{e.stars:.2f}" if e.stars > 0 else "-"
+            star_item = _NumItem(star_text, e.stars)
+            star_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            table.setItem(row, _COL_STARS, star_item)
+
+        if is_acc_mode:
+            pp_item = _NumItem(
+                f"{e.acc_rl_ap:.2f}" if e.acc_rl_ap > 0 else "-",
+                e.acc_rl_ap,
+            )
+        elif is_bs_mode:
+            pp_item = _NumItem("-", 0.0)
+        else:
+            pp_item = _NumItem(
+                f"{e.player_pp:.1f}" if e.player_pp > 0 else "-",
+                e.player_pp,
+            )
+        pp_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        table.setItem(row, _COL_PLAYER_PP, pp_item)
+
+        if is_bs_mode:
+            bs_rate_item = _NumItem(
+                f"{e.player_pp:.1f}" if e.player_pp > 0 else "-",
+                e.player_pp,
+            )
+            bs_rate_item.setData(Qt.ItemDataRole.UserRole, e.player_pp)
+        else:
+            bs_rate_item = _NumItem("-", 0.0)
+        bs_rate_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        table.setItem(row, _COL_BS_RATE, bs_rate_item)
+
+        svc_item = QTableWidgetItem(e.score_source if e.score_source else "-")
+        svc_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        table.setItem(row, _COL_SERVICE, svc_item)
+
+        if is_bs_mode:
+            acc_item = _NumItem("-", 0.0)
+        else:
+            acc_item = _NumItem(
+                f"{e.player_acc:.2f}%" if e.player_acc > 0 else "-",
+                e.player_acc,
+            )
+        acc_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        table.setItem(row, _COL_PLAYER_ACC, acc_item)
+
+        bs_upvotes_item = _NumItem(
+            str(e.beatsaver_upvotes) if is_bs_mode else "-",
+            float(e.beatsaver_upvotes if is_bs_mode else 0.0),
+        )
+        bs_upvotes_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        table.setItem(row, _COL_BS_UPVOTES, bs_upvotes_item)
+
+        if is_bs_mode:
+            rank_item = _NumItem("-", 999_999_999)
+        else:
+            rank_item = _NumItem(
+                str(e.player_rank) if e.player_rank > 0 else "-",
+                e.player_rank if e.player_rank > 0 else 999_999_999,
+            )
+        rank_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        table.setItem(row, _COL_PLAYER_RANK, rank_item)
+
+        bs_downvotes_item = _NumItem(
+            str(e.beatsaver_downvotes) if is_bs_mode else "-",
+            float(e.beatsaver_downvotes if is_bs_mode else 0.0),
+        )
+        bs_downvotes_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        table.setItem(row, _COL_BS_DOWNVOTES, bs_downvotes_item)
+        table.setItem(row, _COL_AUTHOR, QTableWidgetItem(e.song_author))
+        table.setItem(row, _COL_MAPPER, QTableWidgetItem(e.mapper))
+
+        bl_plays_item = _NumItem(
+            str(e.beatleader_plays) if has_bl_stats_source else "-",
+            float(e.beatleader_plays if has_bl_stats_source else -1.0),
+        )
+        bl_plays_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        table.setItem(row, _COL_BL_PLAYS, bl_plays_item)
+        bl_attempts_item = _NumItem(
+            str(e.beatleader_attempts) if has_bl_stats_source else "-",
+            float(e.beatleader_attempts if has_bl_stats_source else -1.0),
+        )
+        bl_attempts_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        table.setItem(row, _COL_BL_ATTEMPTS, bl_attempts_item)
+
+        fc_item = _NumItem("FC" if e.full_combo else "", 1.0 if e.full_combo else 0.0)
+        fc_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        table.setItem(row, _COL_FC, fc_item)
+        mod_item = QTableWidgetItem(e.player_mods)
+        mod_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        table.setItem(row, _COL_MOD, mod_item)
+
+        cat_display = {"true": "True", "standard": "Standard", "tech": "Tech"}
+        if self._rb_open.isChecked():
+            svc_disp = {"scoresaber": "SS", "beatleader": "BL", "accsaber_reloaded": "RL"}.get(e.source, e.source)
+            cat_text = svc_disp
+        elif e.source == "beatsaver":
+            cat_text = "-"
+        elif e.source in ("scoresaber", "beatleader"):
+            cat_text = "-"
+        else:
+            raw_cat = e.acc_category or ""
+            cats = raw_cat.split("/")
+            cat_text = "/".join(cat_display.get(c, c.capitalize()) for c in cats) if raw_cat else ""
+        table.setItem(row, _COL_ACC_CAT, QTableWidgetItem(cat_text))
+
+    def _finish_table_render(self, table: QTableWidget, render_token: int) -> None:
+        if render_token != self._table_render_token:
+            return
+        self._table_render_active = False
+        table.setSortingEnabled(True)
+        self._hydrate_visible_row_widgets(table)
+        pending_target = self._pending_restore_entry
+        self._pending_restore_entry = None
+        if table is self._table and pending_target is not None:
+            self._restore_selected_entry(pending_target)
+
+    def _populate_table_rows_chunk(
+        self,
+        table: QTableWidget,
+        entries: List[MapEntry],
+        start_row: int,
+        render_token: int,
+        cleared_bg: QColor,
+        nf_bg: QColor,
+        unplayed_bg: QColor,
+        is_acc_mode: bool,
+        is_bs_mode: bool,
+    ) -> None:
+        if render_token != self._table_render_token:
+            return
+        chunk_size = 120
+        end_row = min(len(entries), start_row + chunk_size)
+        table.setUpdatesEnabled(False)
+        for row in range(start_row, end_row):
+            self._populate_table_row(
+                table,
+                row,
+                entries[row],
+                cleared_bg,
+                nf_bg,
+                unplayed_bg,
+                is_acc_mode,
+                is_bs_mode,
+            )
+        table.setUpdatesEnabled(True)
+        self._hydrate_visible_row_widgets(table)
+        if end_row < len(entries):
+            QTimer.singleShot(
+                0,
+                lambda current_table=table, current_entries=entries, next_row=end_row, current_token=render_token,
+                current_cleared_bg=cleared_bg, current_nf_bg=nf_bg, current_unplayed_bg=unplayed_bg,
+                current_is_acc_mode=is_acc_mode, current_is_bs_mode=is_bs_mode:
+                    self._populate_table_rows_chunk(
+                        current_table,
+                        current_entries,
+                        next_row,
+                        current_token,
+                        current_cleared_bg,
+                        current_nf_bg,
+                        current_unplayed_bg,
+                        current_is_acc_mode,
+                        current_is_bs_mode,
+                    )
+            )
+            return
+        self._finish_table_render(table, render_token)
+
     def _refresh_table(self, entries: List[MapEntry]) -> None:
         table = self._table
+        self._table_render_token += 1
+        render_token = self._table_render_token
+        self._table_render_active = True
         table.setSortingEnabled(False)
         table.setUpdatesEnabled(False)
         table.setRowCount(0)
@@ -6798,165 +7023,28 @@ class PlaylistWindow(QMainWindow):
             self._rb_open.isChecked() and self._svc_combo.currentData() in ("accsaber_rl", "accsaber")
         )
         _is_bs_mode = self._rb_bs.isChecked()
-        _show_cover = _is_bs_mode or not self._is_maps_tab()
-
-        for row, e in enumerate(entries):
-            # ステータス (sort_val: Cleared=30, NF=20, Unplayed=10)
-            _status_val = 30 if e.cleared else 20 if e.nf_clear else 10
-            status_item = _NumItem(e.status_str, float(_status_val))
-            status_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            if e.cleared:
-                status_item.setBackground(_cleared_bg)
-            elif e.nf_clear:
-                status_item.setBackground(_nf_bg)
-            else:
-                status_item.setBackground(_unplayed_bg)
-            table.setItem(row, _COL_STATUS, status_item)
-
-            # 曲名
-            song_item = QTableWidgetItem(e.song_name)
-            song_item.setData(Qt.ItemDataRole.UserRole, e)
-            table.setItem(row, _COL_SONG, song_item)
-            oneclick_sort_val = 1.0 if self._is_beatsaver_entry_installed(e) else 0.0
-            oneclick_item = _NumItem("", oneclick_sort_val)
-            oneclick_item.setToolTip("Downloaded" if oneclick_sort_val > 0 else "Not downloaded")
-            table.setItem(row, _COL_ONECLICK, oneclick_item)
-            has_bl_stats_source = bool(e.leaderboard_id and e.source in ("beatleader", "beatsaver"))
-            table.setItem(
-                row,
-                _COL_SOURCE_DATE,
-                _source_date_item(e.source_date_ts, include_time=(e.source == "beatsaver")),
-            )
-            table.setItem(row, _COL_DURATION, _duration_item(e.duration_seconds))
-            # プレイ日時
-            #プレイ日時は左寄せ
-            played_at_item = _played_at_item(e.played_at_ts)
-            played_at_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-            table.setItem(row, _COL_PLAY_TIME, played_at_item)
-            # 難易度
-            table.setItem(row, _COL_DIFF, _diff_item(e.difficulty))
-            # モード
-            table.setItem(row, _COL_MODE, _mode_item(e.mode))
-            # ★ / Complexity
-            if _is_acc_mode:
-                star_item = _NumItem(f"{e.acc_complexity:.1f}" if e.acc_complexity > 0 else "-", e.acc_complexity)
-                star_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-                table.setItem(row, _COL_STARS, star_item)
-            else:
-                star_text = f"{e.stars:.2f}" if e.stars > 0 else "-"
-                star_item = _NumItem(star_text, e.stars)
-                star_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-                table.setItem(row, _COL_STARS, star_item)
-            # Player PP / AP (AccSaber・AccSaberRL モードは acc_rl_ap を表示)
-            if _is_acc_mode:
-                pp_item = _NumItem(
-                    f"{e.acc_rl_ap:.2f}" if e.acc_rl_ap > 0 else "-",
-                    e.acc_rl_ap,
-                )
-            elif _is_bs_mode:
-                pp_item = _NumItem("-", 0.0)
-            else:
-                pp_item = _NumItem(
-                    f"{e.player_pp:.1f}" if e.player_pp > 0 else "-",
-                    e.player_pp,
-                )
-            pp_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            table.setItem(row, _COL_PLAYER_PP, pp_item)
-            if _is_bs_mode:
-                bs_rate_item = _NumItem(
-                    f"{e.player_pp:.1f}" if e.player_pp > 0 else "-",
-                    e.player_pp,
-                )
-                bs_rate_item.setData(Qt.ItemDataRole.UserRole, e.player_pp)
-            else:
-                bs_rate_item = _NumItem("-", 0.0)
-            bs_rate_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            table.setItem(row, _COL_BS_RATE, bs_rate_item)
-            # Service
-            svc_item = QTableWidgetItem(e.score_source if e.score_source else "-")
-            svc_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            table.setItem(row, _COL_SERVICE, svc_item)
-            # Acc
-            if _is_bs_mode:
-                acc_item = _NumItem("-", 0.0)
-            else:
-                acc_item = _NumItem(
-                    f"{e.player_acc:.2f}%" if e.player_acc > 0 else "-",
-                    e.player_acc,
-                )
-            acc_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            table.setItem(row, _COL_PLAYER_ACC, acc_item)
-            bs_upvotes_item = _NumItem(
-                str(e.beatsaver_upvotes) if _is_bs_mode else "-",
-                float(e.beatsaver_upvotes if _is_bs_mode else 0.0),
-            )
-            bs_upvotes_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            table.setItem(row, _COL_BS_UPVOTES, bs_upvotes_item)
-            # Rank
-            if _is_bs_mode:
-                rank_item = _NumItem("-", 999_999_999)
-            else:
-                rank_item = _NumItem(
-                    str(e.player_rank) if e.player_rank > 0 else "-",
-                    e.player_rank if e.player_rank > 0 else 999_999_999,
-                )
-            rank_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            table.setItem(row, _COL_PLAYER_RANK, rank_item)
-            bs_downvotes_item = _NumItem(
-                str(e.beatsaver_downvotes) if _is_bs_mode else "-",
-                float(e.beatsaver_downvotes if _is_bs_mode else 0.0),
-            )
-            bs_downvotes_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            table.setItem(row, _COL_BS_DOWNVOTES, bs_downvotes_item)
-            # 作曲者
-            table.setItem(row, _COL_AUTHOR, QTableWidgetItem(e.song_author))
-            # マッパー
-            table.setItem(row, _COL_MAPPER, QTableWidgetItem(e.mapper))
-            bl_plays_item = _NumItem(
-                str(e.beatleader_plays) if has_bl_stats_source else "-",
-                float(e.beatleader_plays if has_bl_stats_source else -1.0),
-            )
-            bl_plays_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            table.setItem(row, _COL_BL_PLAYS, bl_plays_item)
-            bl_attempts_item = _NumItem(
-                str(e.beatleader_attempts) if has_bl_stats_source else "-",
-                float(e.beatleader_attempts if has_bl_stats_source else -1.0),
-            )
-            bl_attempts_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            table.setItem(row, _COL_BL_ATTEMPTS, bl_attempts_item)
-            # FC
-            fc_item = _NumItem("FC" if e.full_combo else "", 1.0 if e.full_combo else 0.0)
-            fc_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            table.setItem(row, _COL_FC, fc_item)
-            # Mod (SC, NF, etc.)
-            mod_item = QTableWidgetItem(e.player_mods)
-            mod_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            table.setItem(row, _COL_MOD, mod_item)
-            # Acc区分 / Service
-            _CAT_DISPLAY = {"true": "True", "standard": "Standard", "tech": "Tech"}
-            if self._rb_open.isChecked():
-                svc_disp = {"scoresaber": "SS", "beatleader": "BL", "accsaber_reloaded": "RL"}.get(e.source, e.source)
-                cat_text = svc_disp
-            elif e.source == "beatsaver":
-                cat_text = "-"
-            elif e.source in ("scoresaber", "beatleader"):
-                cat_text = "-"
-            else:
-                raw_cat = e.acc_category or ""
-                cats = raw_cat.split("/")
-                cat_text = "/".join(_CAT_DISPLAY.get(c, c.capitalize()) for c in cats) if raw_cat else ""
-            table.setItem(row, _COL_ACC_CAT, QTableWidgetItem(cat_text))
-
         self._update_table_visual_mode()
-        table.setSortingEnabled(True)
         table.setUpdatesEnabled(True)
         table.clearSelection()
         if not entries:
+            self._table_render_active = False
+            table.setSortingEnabled(True)
             self._clear_preview()
-        else:
-            self._clear_preview()
+            self._update_selection_status()
+            return
+        self._clear_preview()
         self._update_selection_status()
-        self._hydrate_visible_row_widgets(table)
+        self._populate_table_rows_chunk(
+            table,
+            entries,
+            0,
+            render_token,
+            _cleared_bg,
+            _nf_bg,
+            _unplayed_bg,
+            _is_acc_mode,
+            _is_bs_mode,
+        )
 
     # ──────────────────────────────────────────────────────────────────────────
     # 一括出力
