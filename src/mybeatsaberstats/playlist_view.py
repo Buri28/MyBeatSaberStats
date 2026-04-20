@@ -108,8 +108,26 @@ class _SwapSortArrowStyle(QProxyStyle):
 
 class _PlaylistTableWidget(QTableWidget):
     def paintEvent(self, event) -> None:  # type: ignore[override]
-        super().paintEvent(event)
         selection_model = self.selectionModel()
+        if selection_model is not None:
+            rows = selection_model.selectedRows()
+            if rows:
+                active = self.window().isActiveWindow() if self.window() is not None else False
+                fill_color, _text_color = _NoFocusItemDelegate._selection_colors(active)
+                painter = QPainter(self.viewport())
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(fill_color)
+                max_x = max(0, self.viewport().width() - 1)
+                for model_index in rows:
+                    row = model_index.row()
+                    if row < 0:
+                        continue
+                    top = self.rowViewportPosition(row)
+                    if top < 0:
+                        continue
+                    painter.drawRect(0, top, max_x, self.rowHeight(row))
+                painter.end()
+        super().paintEvent(event)
         if selection_model is None:
             return
         rows = selection_model.selectedRows()
@@ -143,22 +161,50 @@ class _NoFocusItemDelegate(QStyledItemDelegate):
             return QColor(103, 183, 238, 31), QColor("#0f172a")
         return QColor(123, 196, 246, 41), QColor("#0f172a")
 
+    @staticmethod
+    def _paint_cell_text(
+        painter: QPainter,
+        option: QStyleOptionViewItem,
+        index,
+        text_color: QColor,
+    ) -> None:
+        font_data = index.data(Qt.ItemDataRole.FontRole)
+        if isinstance(font_data, QFont):
+            painter.setFont(font_data)
+        else:
+            painter.setFont(painter.font())
+
+        painter.setPen(text_color)
+        display_text = str(index.data(Qt.ItemDataRole.DisplayRole) or "")
+        alignment_data = index.data(Qt.ItemDataRole.TextAlignmentRole)
+        if alignment_data is None:
+            alignment = int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        else:
+            alignment = int(alignment_data)
+        text_rect = option.rect.adjusted(4, 0, -4, 0)  # type: ignore[attr-defined]
+        painter.drawText(text_rect, alignment, display_text)
+
     def paint(self, painter, option, index):  # type: ignore[override]
         opt = QStyleOptionViewItem(option)
         selected = bool(opt.state & QStyle.StateFlag.State_Selected)  # type: ignore[attr-defined]
         active = bool(opt.state & QStyle.StateFlag.State_Active)  # type: ignore[attr-defined]
-        fill: Optional[QColor] = None
+        background_brush = index.data(Qt.ItemDataRole.BackgroundRole)
+        foreground_brush = index.data(Qt.ItemDataRole.ForegroundRole)
+        text_color = opt.palette.color(QPalette.ColorRole.Text)  # type: ignore[attr-defined]
         if selected:
             fill, text_color = self._selection_colors(active)
-            opt.palette.setColor(QPalette.ColorRole.Text, text_color)  # type: ignore[attr-defined]
-            opt.palette.setColor(QPalette.ColorRole.HighlightedText, text_color)  # type: ignore[attr-defined]
-        opt.state &= ~QStyle.StateFlag.State_HasFocus  # type: ignore[attr-defined]
-        opt.state &= ~QStyle.StateFlag.State_Selected  # type: ignore[attr-defined]
-        if selected and fill is not None:
-            painter.save()
+        else:
+            fill = None
+            if hasattr(foreground_brush, "color"):
+                text_color = foreground_brush.color()
+
+        painter.save()
+        if hasattr(background_brush, "style") and background_brush.style() != Qt.BrushStyle.NoBrush:
+            painter.fillRect(opt.rect, background_brush)  # type: ignore[arg-type]
+        if fill is not None:
             painter.fillRect(opt.rect, fill)  # type: ignore[attr-defined]
-            painter.restore()
-        super().paint(painter, opt, index)
+        self._paint_cell_text(painter, opt, index, text_color)
+        painter.restore()
 
 
 class _PercentageBarDelegate(QStyledItemDelegate):
@@ -206,26 +252,27 @@ class _PercentageBarDelegate(QStyledItemDelegate):
         opt = QStyleOptionViewItem(option)
         selected = bool(opt.state & QStyle.StateFlag.State_Selected)  # type: ignore[attr-defined]
         active = bool(opt.state & QStyle.StateFlag.State_Active)  # type: ignore[attr-defined]
-        fill: Optional[QColor] = None
+        background_brush = index.data(Qt.ItemDataRole.BackgroundRole)
         if selected:
             fill, text_color = _NoFocusItemDelegate._selection_colors(active)
-            opt.palette.setColor(QPalette.ColorRole.Text, text_color)  # type: ignore[attr-defined]
-            opt.palette.setColor(QPalette.ColorRole.HighlightedText, text_color)  # type: ignore[attr-defined]
-        opt.state &= ~QStyle.StateFlag.State_HasFocus  # type: ignore[attr-defined]
-        opt.state &= ~QStyle.StateFlag.State_Selected  # type: ignore[attr-defined]
-        value = self._bar_value(index)
-        if value is None or not (self._max_value > 0):
-            if selected and fill is not None:
-                painter.save()
-                painter.fillRect(opt.rect, fill)  # type: ignore[attr-defined]
-                painter.restore()
-            super().paint(painter, opt, index)
-            return
+        else:
+            fill = None
+            foreground_brush = index.data(Qt.ItemDataRole.ForegroundRole)
+            if hasattr(foreground_brush, "color"):
+                text_color = foreground_brush.color()
+            else:
+                text_color = opt.palette.color(QPalette.ColorRole.Text)  # type: ignore[attr-defined]
 
-        if selected and fill is not None:
-            painter.save()
+        value = self._bar_value(index)
+        painter.save()
+        if hasattr(background_brush, "style") and background_brush.style() != Qt.BrushStyle.NoBrush:
+            painter.fillRect(opt.rect, background_brush)  # type: ignore[arg-type]
+        if fill is not None:
             painter.fillRect(opt.rect, fill)  # type: ignore[attr-defined]
+        if value is None or not (self._max_value > 0):
+            _NoFocusItemDelegate._paint_cell_text(painter, opt, index, text_color)
             painter.restore()
+            return
 
         if value <= self._min_value:
             ratio = 0.0
@@ -267,10 +314,16 @@ class _PercentageBarDelegate(QStyledItemDelegate):
         )
         if text_color_str is not None:
             text_color = QColor(text_color_str)
-            opt.palette.setColor(QPalette.ColorRole.Text, text_color)  # type: ignore[attr-defined]
-            opt.palette.setColor(QPalette.ColorRole.HighlightedText, text_color)  # type: ignore[attr-defined]
-
-        super().paint(painter, opt, index)
+        font_data = index.data(Qt.ItemDataRole.FontRole)
+        if isinstance(font_data, QFont):
+            font = QFont(font_data)
+        else:
+            font = QFont(painter.font())
+        if value >= self._max_value - 1e-3:
+            font.setBold(True)
+        painter.setFont(font)
+        _NoFocusItemDelegate._paint_cell_text(painter, opt, index, text_color)
+        painter.restore()
 
 # ──────────────────────────────────────────────────────────────────────────────
 # ソース定数
@@ -4432,20 +4485,7 @@ class PlaylistWindow(QMainWindow):
         self._bs_to_date.setDate(QDate.currentDate())
 
     def _playlist_table_stylesheet(self) -> str:
-        base = table_stylesheet()
-        if is_dark():
-            accent = (
-                "QTableWidget::item:selected { background-color: transparent; color: #e6f4ff; border: none; outline: 0; }"
-                "QTableWidget::item:selected:active { background-color: transparent; color: #e6f4ff; border: none; outline: 0; }"
-                "QTableWidget::item:selected:!active { background-color: transparent; color: #f2f8ff; border: none; outline: 0; }"
-            )
-        else:
-            accent = (
-                "QTableWidget::item:selected { background-color: transparent; color: #0f172a; border: none; outline: 0; }"
-                "QTableWidget::item:selected:active { background-color: transparent; color: #0f172a; border: none; outline: 0; }"
-                "QTableWidget::item:selected:!active { background-color: transparent; color: #0f172a; border: none; outline: 0; }"
-            )
-        return base + accent
+        return table_stylesheet()
 
     def _source_tabs_stylesheet(self) -> str:
         if is_dark():
@@ -6603,10 +6643,10 @@ class PlaylistWindow(QMainWindow):
     def _make_oneclick_button(self, entry: MapEntry) -> QWidget:
         button = QPushButton("")
         button.setIcon(QIcon(str(RESOURCES_DIR / "onclick_download.png")))
-        icon_edge = max(18, min(self._row_height - 6, 30))
+        icon_edge = max(26, min(self._row_height - 6, 30))
         button.setIconSize(QSize(icon_edge, icon_edge))
         button.setFixedWidth(34)
-        button.setFixedHeight(max(22, self._row_height))
+        button.setFixedHeight(max(28, self._row_height))
         button.setFlat(True)
         button.setStyleSheet(
             "QPushButton { padding: 0px; border: none; background: transparent; }"
@@ -6627,6 +6667,7 @@ class PlaylistWindow(QMainWindow):
         else:
             button.setToolTip("OneClickDownload")
         container = QWidget()
+        container.setProperty("mbss_cell_widget", True)
         container.setStyleSheet("background: transparent;")
         container.setFixedHeight(self._row_height)
         layout = QHBoxLayout(container)
@@ -6653,6 +6694,7 @@ class PlaylistWindow(QMainWindow):
         button.setEnabled(installed)
         button.setToolTip("Delete from Beat Saber" if installed else "Delete unavailable")
         container = QWidget()
+        container.setProperty("mbss_cell_widget", True)
         container.setStyleSheet("background: transparent;")
         container.setFixedHeight(self._row_height)
         layout = QHBoxLayout(container)
@@ -6672,6 +6714,7 @@ class PlaylistWindow(QMainWindow):
 
     def _make_cover_cell_widget(self, entry: MapEntry) -> QWidget:
         container = QWidget()
+        container.setProperty("mbss_cell_widget", True)
         container.setStyleSheet("background: transparent;")
         container.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         layout = QHBoxLayout(container)
