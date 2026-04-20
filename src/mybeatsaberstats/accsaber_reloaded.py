@@ -43,6 +43,28 @@ def is_pending_difficulty(diff: dict) -> bool:
     return False
 
 
+def is_active_difficulty(diff: dict) -> bool:
+    """AccSaber Reloaded difficulty が有効譜面かを返す。
+
+    新 API では difficulty.active が省略されることがあるため、
+    active が無い場合は status から判定する。
+    """
+    if not isinstance(diff, dict):
+        return False
+
+    active = diff.get("active")
+    if isinstance(active, bool):
+        return active
+
+    status = str(diff.get("status") or "").upper()
+    if status in {"RANKED", "APPROVED", "PASSED"}:
+        return True
+    if status in {"QUEUE", "PENDING"}:
+        return False
+
+    return active is not None and bool(active)
+
+
 def _count_non_pending_map_counts(all_maps: List[Dict]) -> Dict[str, int]:
     """全マップ一覧から pending を除いたカテゴリ別譜面数を返す。"""
     uuid_to_cat: Dict[str, str] = {v: k for k, v in _MAP_COUNT_CATEGORY_IDS.items()}
@@ -54,7 +76,7 @@ def _count_non_pending_map_counts(all_maps: List[Dict]) -> Dict[str, int]:
         for diff in song.get("difficulties", []):
             if not isinstance(diff, dict):
                 continue
-            if not diff.get("active", False):
+            if not is_active_difficulty(diff):
                 continue
             if is_pending_difficulty(diff):
                 continue
@@ -617,7 +639,7 @@ def compute_effective_played_counts_from_cache(player_id: str) -> Dict[str, int]
         for diff in song.get("difficulties") or []:
             if not isinstance(diff, dict):
                 continue
-            if not diff.get("active", False):
+            if not is_active_difficulty(diff):
                 continue
             if is_pending_difficulty(diff):
                 continue
@@ -677,7 +699,7 @@ def build_unplayed_bplist(
             continue
 
         for diff in song.get("difficulties", []):
-            if not diff.get("active", False):
+            if not is_active_difficulty(diff):
                 continue
             if diff.get("categoryId") != cat_uuid:
                 continue
