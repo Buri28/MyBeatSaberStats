@@ -2326,7 +2326,7 @@ def load_accsaber_reloaded_maps(
     category: "all" | "true" | "standard" | "tech"
     on_progress(done: int, total: int, label: str) — 進捗コールバック（省略可）
     """
-    from .accsaber_reloaded import CATEGORY_IDS
+    from .accsaber_reloaded import CATEGORY_IDS, is_active_difficulty
 
     _RL_DIFF_TO_BS: Dict[str, str] = {
         "EASY":        "Easy",
@@ -2406,7 +2406,7 @@ def load_accsaber_reloaded_maps(
         s_author = song.get("songAuthorName") or ""
 
         for diff in song.get("difficulties") or []:
-            if not diff.get("active", False):
+            if not is_active_difficulty(diff):
                 continue
             cat_uuid = diff.get("categoryId", "")
             if cat_uuid not in target_cat_uuids:
