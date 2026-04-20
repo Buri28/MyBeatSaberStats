@@ -107,6 +107,27 @@ class _SwapSortArrowStyle(QProxyStyle):
 
 
 class _PlaylistTableWidget(QTableWidget):
+    @staticmethod
+    def _blend_colors(base: QColor, overlay: QColor, alpha_override: Optional[float] = None) -> QColor:
+        alpha = overlay.alphaF() if alpha_override is None else max(0.0, min(1.0, alpha_override))
+        inv = 1.0 - alpha
+        return QColor(
+            round(base.red() * inv + overlay.red() * alpha),
+            round(base.green() * inv + overlay.green() * alpha),
+            round(base.blue() * inv + overlay.blue() * alpha),
+        )
+
+    def _selected_row_mask_color(self, row: int, active: bool) -> QColor:
+        fill_color, _text_color = _NoFocusItemDelegate._selection_colors(active)
+        if self.alternatingRowColors() and row % 2 == 1:
+            base_color = self.palette().color(QPalette.ColorRole.AlternateBase)
+        else:
+            base_color = self.palette().color(QPalette.ColorRole.Base)
+        effective_alpha = max(fill_color.alphaF() * 1.35, 0.18 if is_dark() else 0.14)
+        blended = self._blend_colors(base_color, fill_color, effective_alpha)
+        blended.setAlpha(255)
+        return blended
+
     def paintEvent(self, event) -> None:  # type: ignore[override]
         selection_model = self.selectionModel()
         if selection_model is not None:
@@ -137,6 +158,7 @@ class _PlaylistTableWidget(QTableWidget):
         max_x = max(0, self.viewport().width() - 1)
         painter = QPainter(self.viewport())
         painter.setPen(line_color)
+        active = self.window().isActiveWindow() if self.window() is not None else False
         for model_index in rows:
             row = model_index.row()
             if row < 0:
@@ -145,6 +167,25 @@ class _PlaylistTableWidget(QTableWidget):
             if top < 0:
                 continue
             bottom = top + self.rowHeight(row) - 1
+            mask_default = self._selected_row_mask_color(row, active)
+            mask_height = max(0, self.rowHeight(row) - 2)
+            if mask_height > 0:
+                for column in range(self.columnCount()):
+                    if self.isColumnHidden(column):
+                        continue
+                    cell_left = self.columnViewportPosition(column)
+                    cell_width = self.columnWidth(column)
+                    mask_left = cell_left + 1
+                    mask_width = min(4, max(0, cell_width - 2))
+                    if mask_width <= 0 or mask_left >= max_x:
+                        continue
+                    mask_color = mask_default
+                    item = self.item(row, column)
+                    if item is not None:
+                        background_brush = item.data(Qt.ItemDataRole.BackgroundRole)
+                        if hasattr(background_brush, "style") and background_brush.style() != Qt.BrushStyle.NoBrush:
+                            mask_color = background_brush.color()
+                    painter.fillRect(mask_left, top + 1, mask_width, mask_height, mask_color)
             painter.drawLine(0, top, max_x, top)
             painter.drawLine(0, bottom, max_x, bottom)
         painter.end()
