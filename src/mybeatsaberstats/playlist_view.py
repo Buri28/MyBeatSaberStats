@@ -3028,30 +3028,31 @@ _COL_STATUS = 0
 _COL_COVER = 1
 _COL_SONG = 2
 _COL_ONECLICK = 3
-_COL_SOURCE_DATE = 4
-_COL_DURATION = 5
-_COL_PLAY_TIME = 6
-_COL_DIFF = 7
-_COL_MODE = 8
-_COL_ACC_CAT = 9
-_COL_SERVICE = 10     # スコア元サービス表示 (BL / SS / AS)
-_COL_PLAYER_RANK = 11
-_COL_STARS = 12
-_COL_PLAYER_ACC = 13
-_COL_PLAYER_PP = 14
-_COL_BS_RATE = 15
-_COL_BS_UPVOTES = 16
-_COL_BS_DOWNVOTES = 17
-_COL_FC = 18
-_COL_MOD = 19
-_COL_MAPPER = 20
-_COL_AUTHOR = 21
-_COL_BL_PLAYS = 22
-_COL_BL_ATTEMPTS = 23
-_COL_COUNT = 24
+_COL_DELETE = 4
+_COL_SOURCE_DATE = 5
+_COL_DURATION = 6
+_COL_PLAY_TIME = 7
+_COL_DIFF = 8
+_COL_MODE = 9
+_COL_ACC_CAT = 10
+_COL_SERVICE = 11     # スコア元サービス表示 (BL / SS / AS)
+_COL_PLAYER_RANK = 12
+_COL_STARS = 13
+_COL_PLAYER_ACC = 14
+_COL_PLAYER_PP = 15
+_COL_BS_RATE = 16
+_COL_BS_UPVOTES = 17
+_COL_BS_DOWNVOTES = 18
+_COL_FC = 19
+_COL_MOD = 20
+_COL_MAPPER = 21
+_COL_AUTHOR = 22
+_COL_BL_PLAYS = 23
+_COL_BL_ATTEMPTS = 24
+_COL_COUNT = 25
 
 _COL_LABELS = [
-    "Status", "Cover", "Song", "DL", "Date", "Length", "Played At", "Diff", "Mode", "Category", "Service", "Rank", "★", "Acc %", "PP",
+    "Status", "Cover", "Song", "DL", "Del", "Date", "Length", "Played At", "Diff", "Mode", "Category", "Service", "Rank", "★", "Acc %", "PP",
     "Rate %", "⇧", "⇩", "FC", "Mods", "Mapper", "Author", "BL Plays", "BL Attempts",
 ]
 
@@ -3128,6 +3129,7 @@ class PlaylistWindow(QMainWindow):
         self._thumbnail_active_url = ""
         self._installed_beatsaber_dir = ""
         self._installed_level_keys: set[str] = set()
+        self._installed_level_dirs: Dict[str, Path] = {}
         self._row_height = 34
         self._restored_snapshot_state: Optional[dict] = None
         self._restored_maps_state: Optional[dict] = None
@@ -3139,6 +3141,7 @@ class PlaylistWindow(QMainWindow):
         self._preview_token = 0
         self._current_preview_url = ""
         self._progress_dlg: Optional[QProgressDialog] = None
+        self._deferred_maps_restore_scheduled = False
         self._bl_api_session = requests.Session()
         self._bl_top_replay_cache: Dict[Tuple[str, str], str] = {}
         self._bl_preview_replay_index: Optional[Dict[Tuple[str, str, str], str]] = None
@@ -4002,10 +4005,21 @@ class PlaylistWindow(QMainWindow):
     def _finish_initial_restore(self) -> None:
         self.select_source_tab(self._initial_source_tab)
         self._restore_saved_snapshot_state()
-        self._restore_saved_maps_state()
+        if self._is_maps_tab():
+            self._schedule_deferred_maps_restore()
         self._update_filter_export_ui()
         self._update_table_visual_mode()
         self._clear_preview()
+
+    def _schedule_deferred_maps_restore(self) -> None:
+        if self._deferred_maps_restore_scheduled or not self._restored_maps_state:
+            return
+        self._deferred_maps_restore_scheduled = True
+        QTimer.singleShot(1, self._restore_saved_maps_state_deferred)
+
+    def _restore_saved_maps_state_deferred(self) -> None:
+        self._deferred_maps_restore_scheduled = False
+        self._restore_saved_maps_state()
 
     def _create_playlist_table(self) -> QTableWidget:
         table = _PlaylistTableWidget(0, _COL_COUNT, self)
@@ -4033,6 +4047,7 @@ class PlaylistWindow(QMainWindow):
         table.setColumnWidth(_COL_COVER, self._thumbnail_edge_size())
         table.setColumnWidth(_COL_SONG, 260)
         table.setColumnWidth(_COL_ONECLICK, 46)
+        table.setColumnWidth(_COL_DELETE, 46)
         table.setColumnWidth(_COL_SOURCE_DATE, 112)
         table.setColumnWidth(_COL_DURATION, 40)
         table.setColumnWidth(_COL_PLAY_TIME, 110)
@@ -4698,7 +4713,10 @@ class PlaylistWindow(QMainWindow):
         if not restored_entries:
             return
 
-        self._maps_all_entries = _enrich_entries_with_beatsaver_cache(restored_entries)
+        for entry in restored_entries:
+            _apply_beatsaver_meta(entry, None)
+
+        self._maps_all_entries = restored_entries
         self._maps_filtered = list(self._maps_all_entries)
         self._maps_loaded_source_key = self._maps_source_key
         self._maps_loaded_steam_id = self._steam_id
@@ -4872,6 +4890,8 @@ class PlaylistWindow(QMainWindow):
         if index == self._source_tab_maps_idx:
             if not self._rb_bs.isChecked():
                 self._rb_bs.setChecked(True)
+            if self._restored_maps_state:
+                self._schedule_deferred_maps_restore()
         elif self._rb_bs.isChecked():
             self._last_snapshot_source_button.setChecked(True)
         self._apply_highest_diff_only_for_current_tab()
@@ -4929,6 +4949,7 @@ class PlaylistWindow(QMainWindow):
             self._table.setColumnHidden(col, not is_bs)
         self._table.setColumnHidden(_COL_COVER, not show_cover)
         self._table.setColumnHidden(_COL_ONECLICK, not is_bs)
+        self._table.setColumnHidden(_COL_DELETE, not is_bs)
         self._table.setColumnHidden(_COL_BL_PLAYS, True)
         self._table.setColumnHidden(_COL_BL_ATTEMPTS, True)
         self._table.setItemDelegateForColumn(
@@ -5680,7 +5701,7 @@ class PlaylistWindow(QMainWindow):
         self._btn_preview_bl.setProperty("url", entry.beatleader_page_url)
         self._btn_preview_replay.setEnabled(bool(entry.beatleader_replay_url))
         self._btn_preview_replay.setProperty("url", entry.beatleader_replay_url)
-        self._btn_preview_download.setEnabled(bool(entry.beatsaver_download_url))
+        self._btn_preview_download.setEnabled(self._can_download_beatsaver_entry(entry))
         self._btn_preview_download.setProperty("url", entry.beatsaver_download_url)
         bl_leaderboard_id = ""
         if entry.source in ("beatsaver", "beatleader"):
@@ -5899,14 +5920,33 @@ class PlaylistWindow(QMainWindow):
                     return info_path.parent
         return None
 
-    def _refresh_downloaded_state_after_install(self, target_entry: MapEntry) -> None:
-        custom_levels_dir = self._custom_levels_dir()
-        self._installed_beatsaber_dir = str(custom_levels_dir) if custom_levels_dir else ""
-        if target_entry.beatsaver_key:
-            self._installed_level_keys.add(target_entry.beatsaver_key.strip().lower())
-        self._apply_filter()
+    def _should_refilter_for_install_state_change(self) -> bool:
+        return self._rb_bs.isChecked() and (
+            not self._cb_bs_not_downloaded.isChecked()
+            or not self._cb_bs_downloaded.isChecked()
+        )
+
+    def _refresh_beatsaver_entry_install_state(self, target_entry: MapEntry) -> None:
+        if self._should_refilter_for_install_state_change() or not (target_entry.song_hash or "").strip():
+            self._apply_filter()
+            self._restore_selected_entry(target_entry)
+            self._update_preview_from_selection()
+            return
+
+        self._refresh_rows_for_hashes({target_entry.song_hash.upper()})
+        self._update_selection_status()
         self._restore_selected_entry(target_entry)
         self._update_preview_from_selection()
+
+    def _refresh_downloaded_state_after_install(self, target_entry: MapEntry, installed_dir: Optional[Path] = None) -> None:
+        custom_levels_dir = self._custom_levels_dir()
+        self._installed_beatsaber_dir = str(custom_levels_dir) if custom_levels_dir else ""
+        beatsaver_key = str(target_entry.beatsaver_key or "").strip().lower()
+        if beatsaver_key:
+            self._installed_level_keys.add(beatsaver_key)
+            if installed_dir is not None:
+                self._installed_level_dirs[beatsaver_key] = installed_dir
+        self._refresh_beatsaver_entry_install_state(target_entry)
 
     def _can_download_beatsaver_entry(self, entry: MapEntry) -> bool:
         return (
@@ -5914,6 +5954,18 @@ class PlaylistWindow(QMainWindow):
             and bool(self._resolve_beatsaver_download_url(entry))
             and not self._is_beatsaver_entry_installed(entry)
         )
+
+    def _installed_beatsaver_map_dir(self, entry: MapEntry) -> Optional[Path]:
+        beatsaver_key = str(entry.beatsaver_key or "").strip().lower()
+        if not beatsaver_key:
+            return None
+        self._refresh_installed_levels_cache()
+        if not self._installed_beatsaber_dir:
+            return None
+        return self._installed_level_dirs.get(beatsaver_key)
+
+    def _can_delete_beatsaver_entry(self, entry: MapEntry) -> bool:
+        return entry.source == "beatsaver" and self._installed_beatsaver_map_dir(entry) is not None
 
     def _download_beatsaver_entry(self, entry: MapEntry, show_dialogs: bool = True) -> bool:
         custom_levels_dir = self._custom_levels_dir()
@@ -5961,7 +6013,28 @@ class PlaylistWindow(QMainWindow):
                 QMessageBox.critical(self, "OneClickDownload", f"譜面のダウンロードに失敗しました。\n\n{exc}")
             return False
 
-        self._refresh_downloaded_state_after_install(entry)
+        self._refresh_downloaded_state_after_install(entry, installed_dir=target_dir)
+        return True
+
+    def _delete_beatsaver_entry(self, entry: MapEntry, show_dialogs: bool = False) -> bool:
+        target_dir = self._installed_beatsaver_map_dir(entry)
+        if target_dir is None:
+            self._refresh_installed_levels_cache(force=True)
+            self._refresh_beatsaver_entry_install_state(entry)
+            return False
+
+        try:
+            shutil.rmtree(target_dir)
+        except Exception as exc:
+            if show_dialogs:
+                QMessageBox.critical(self, "Delete Map", f"譜面の削除に失敗しました。\n\n{exc}")
+            return False
+
+        beatsaver_key = str(entry.beatsaver_key or "").strip().lower()
+        if beatsaver_key:
+            self._installed_level_keys.discard(beatsaver_key)
+            self._installed_level_dirs.pop(beatsaver_key, None)
+        self._refresh_beatsaver_entry_install_state(entry)
         return True
 
     def _download_selected_preview_entry(self) -> None:
@@ -6492,13 +6565,14 @@ class PlaylistWindow(QMainWindow):
             return Path()
         return Path(beatsaber_dir) / "Beat Saber_Data" / "CustomLevels"
 
-    def _refresh_installed_levels_cache(self) -> None:
+    def _refresh_installed_levels_cache(self, force: bool = False) -> None:
         custom_levels_dir = self._custom_levels_dir()
         cache_key = str(custom_levels_dir)
-        if cache_key == self._installed_beatsaber_dir:
+        if not force and cache_key == self._installed_beatsaber_dir:
             return
 
         installed_keys: set[str] = set()
+        installed_dirs: Dict[str, Path] = {}
         if custom_levels_dir.is_dir():
             try:
                 for child in custom_levels_dir.iterdir():
@@ -6506,12 +6580,16 @@ class PlaylistWindow(QMainWindow):
                         continue
                     match = re.match(r"^([0-9A-Za-z]+)(?:\s*[\(\[]|$)", child.name.strip())
                     if match:
-                        installed_keys.add(match.group(1).lower())
+                        beatsaver_key = match.group(1).lower()
+                        installed_keys.add(beatsaver_key)
+                        installed_dirs[beatsaver_key] = child
             except Exception:
                 installed_keys = set()
+                installed_dirs = {}
 
         self._installed_beatsaber_dir = cache_key
         self._installed_level_keys = installed_keys
+        self._installed_level_dirs = installed_dirs
 
     def _is_beatsaver_entry_installed(self, entry: MapEntry) -> bool:
         beatsaver_key = str(entry.beatsaver_key or "").strip().lower()
@@ -6548,6 +6626,32 @@ class PlaylistWindow(QMainWindow):
             button.setToolTip("OneClickDownload (Beat Saber folder not set; install state not checked)")
         else:
             button.setToolTip("OneClickDownload")
+        container = QWidget()
+        container.setStyleSheet("background: transparent;")
+        container.setFixedHeight(self._row_height)
+        layout = QHBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(button, 0, Qt.AlignmentFlag.AlignCenter)
+        return container
+
+    def _make_delete_button(self, entry: MapEntry) -> QWidget:
+        button = QPushButton("")
+        button.setIcon(QIcon(str(RESOURCES_DIR / "trash.png")))
+        icon_edge = max(18, min(self._row_height - 6, 30))
+        button.setIconSize(QSize(icon_edge, icon_edge))
+        button.setFixedWidth(34)
+        button.setFixedHeight(max(22, self._row_height))
+        button.setFlat(True)
+        button.setStyleSheet(
+            "QPushButton { padding: 0px; border: none; background: transparent; }"
+            "QPushButton:disabled { border: none; background: transparent; }"
+        )
+        button.clicked.connect(lambda _checked=False, current_entry=entry: self._delete_beatsaver_entry(current_entry))
+
+        installed = self._can_delete_beatsaver_entry(entry)
+        button.setEnabled(installed)
+        button.setToolTip("Delete from Beat Saber" if installed else "Delete unavailable")
         container = QWidget()
         container.setStyleSheet("background: transparent;")
         container.setFixedHeight(self._row_height)
@@ -6636,6 +6740,12 @@ class PlaylistWindow(QMainWindow):
                     oneclick_item.setToolTip("Downloaded" if oneclick_sort_val > 0 else "Not downloaded")
                     table.setItem(row, _COL_ONECLICK, oneclick_item)
                     table.setCellWidget(row, _COL_ONECLICK, self._make_oneclick_button(entry))
+                if not table.isColumnHidden(_COL_DELETE):
+                    delete_sort_val = 1.0 if self._can_delete_beatsaver_entry(entry) else 0.0
+                    delete_item = _NumItem("", delete_sort_val)
+                    delete_item.setToolTip("Installed" if delete_sort_val > 0 else "Not installed")
+                    table.setItem(row, _COL_DELETE, delete_item)
+                    table.setCellWidget(row, _COL_DELETE, self._make_delete_button(entry))
 
     def _hydrate_visible_row_widgets(self, table: Optional[QTableWidget] = None) -> None:
         target_table = self._table if table is None else table
@@ -6654,6 +6764,7 @@ class PlaylistWindow(QMainWindow):
         end_row = min(row_count - 1, bottom_row + 4)
         show_cover = not target_table.isColumnHidden(_COL_COVER)
         show_oneclick = not target_table.isColumnHidden(_COL_ONECLICK)
+        show_delete = not target_table.isColumnHidden(_COL_DELETE)
 
         for row in range(start_row, end_row + 1):
             item = target_table.item(row, _COL_SONG)
@@ -6666,6 +6777,8 @@ class PlaylistWindow(QMainWindow):
                 target_table.setCellWidget(row, _COL_COVER, self._make_cover_cell_widget(entry))
             if show_oneclick and target_table.cellWidget(row, _COL_ONECLICK) is None:
                 target_table.setCellWidget(row, _COL_ONECLICK, self._make_oneclick_button(entry))
+            if show_delete and target_table.cellWidget(row, _COL_DELETE) is None:
+                target_table.setCellWidget(row, _COL_DELETE, self._make_delete_button(entry))
 
     def _on_row_height_up(self) -> None:
         self._row_height = min(self._row_height + 4, 64)
@@ -6817,6 +6930,10 @@ class PlaylistWindow(QMainWindow):
         oneclick_item = _NumItem("", oneclick_sort_val)
         oneclick_item.setToolTip("Downloaded" if oneclick_sort_val > 0 else "Not downloaded")
         table.setItem(row, _COL_ONECLICK, oneclick_item)
+        delete_sort_val = 1.0 if self._can_delete_beatsaver_entry(e) else 0.0
+        delete_item = _NumItem("", delete_sort_val)
+        delete_item.setToolTip("Installed" if delete_sort_val > 0 else "Not installed")
+        table.setItem(row, _COL_DELETE, delete_item)
         has_bl_stats_source = bool(e.leaderboard_id and e.source in ("beatleader", "beatsaver"))
         table.setItem(
             row,
