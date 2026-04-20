@@ -542,8 +542,8 @@ def export_playlist_configs(
         try:
             if config.source == "bs":
                 _emit(f"Loading BeatSaver: {config.label}...")
-                bs_from_dt = datetime.fromisoformat(config.bs_from_date).replace(tzinfo=timezone.utc) if config.bs_from_date else None
-                bs_to_dt = datetime.fromisoformat(config.bs_to_date).replace(tzinfo=timezone.utc) if config.bs_to_date else None
+                bs_from_dt = _parse_local_date_filter(config.bs_from_date)
+                bs_to_dt = _parse_local_date_filter(config.bs_to_date, end_of_day=True)
                 base_maps = load_beatsaver_maps(
                     steam_id=steam_id,
                     query=config.bs_query,
@@ -826,6 +826,25 @@ def _parse_unix_datetime_to_ts(value: object) -> int:
         return int(float(raw_value))
     except (TypeError, ValueError):
         return 0
+
+
+def _parse_local_date_filter(value: object, *, end_of_day: bool = False) -> Optional[datetime]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is not None:
+        return dt.astimezone(timezone.utc)
+    if end_of_day:
+        dt = dt.replace(hour=23, minute=59, second=59, microsecond=999999)
+    else:
+        dt = dt.replace(hour=0, minute=0, second=0, microsecond=0)
+    return dt.astimezone().astimezone(timezone.utc)
 
 
 def _apply_beatsaver_meta(entry: MapEntry, meta: Optional[dict]) -> None:
@@ -4511,6 +4530,9 @@ class PlaylistWindow(QMainWindow):
         try:
             from_date = self._bs_from_date.date()
             to_date = self._bs_to_date.date()
+            if self.sender() is self._bs_to_date and to_date == QDate.currentDate():
+                from_date = to_date.addDays(-(max(1, self._bs_days.value()) - 1))
+                self._bs_from_date.setDate(from_date)
             if from_date > to_date:
                 if self.sender() is self._bs_from_date:
                     self._bs_to_date.setDate(from_date)
@@ -4524,6 +4546,7 @@ class PlaylistWindow(QMainWindow):
 
     def _set_bs_to_latest(self) -> None:
         self._bs_to_date.setDate(QDate.currentDate())
+        self._sync_bs_dates_from_days()
 
     def _playlist_table_stylesheet(self) -> str:
         return table_stylesheet()
@@ -5531,8 +5554,8 @@ class PlaylistWindow(QMainWindow):
             min_votes_raw = opts.get("min_votes")
             max_maps = int(max_maps_raw) if isinstance(max_maps_raw, (int, float, str)) else 1000
             days = int(days_raw) if isinstance(days_raw, (int, float, str)) else 7
-            from_dt = datetime.fromisoformat(from_date_raw).replace(tzinfo=timezone.utc) if from_date_raw else None
-            to_dt = datetime.fromisoformat(to_date_raw).replace(tzinfo=timezone.utc) if to_date_raw else None
+            from_dt = _parse_local_date_filter(from_date_raw)
+            to_dt = _parse_local_date_filter(to_date_raw, end_of_day=True)
             min_rating_percent = float(min_rating_raw) if isinstance(min_rating_raw, (int, float, str)) else 0.0
             min_rating = min_rating_percent / 100.0
             min_votes = int(min_votes_raw) if isinstance(min_votes_raw, (int, float, str)) else 0
@@ -7065,7 +7088,7 @@ class PlaylistWindow(QMainWindow):
             bs_rate_item.setData(Qt.ItemDataRole.UserRole, e.player_pp)
         else:
             bs_rate_item = _NumItem("-", 0.0)
-        bs_rate_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        bs_rate_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         table.setItem(row, _COL_BS_RATE, bs_rate_item)
 
         svc_item = QTableWidgetItem(e.score_source if e.score_source else "-")
