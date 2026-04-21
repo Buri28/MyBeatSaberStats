@@ -123,7 +123,7 @@ class _PlaylistTableWidget(QTableWidget):
             base_color = self.palette().color(QPalette.ColorRole.AlternateBase)
         else:
             base_color = self.palette().color(QPalette.ColorRole.Base)
-        effective_alpha = max(fill_color.alphaF() * 1.35, 0.18 if is_dark() else 0.14)
+        effective_alpha = max(fill_color.alphaF() * 1.35, 0.18 if is_dark() else 0.50)
         blended = self._blend_colors(base_color, fill_color, effective_alpha)
         blended.setAlpha(255)
         return blended
@@ -185,7 +185,7 @@ class _PlaylistTableWidget(QTableWidget):
                         background_brush = item.data(Qt.ItemDataRole.BackgroundRole)
                         if hasattr(background_brush, "style") and background_brush.style() != Qt.BrushStyle.NoBrush:
                             mask_color = background_brush.color()
-                    painter.fillRect(mask_left, top + 1, mask_width, mask_height, mask_color)
+                    painter.fillRect(mask_left+2, top + 1, mask_width, mask_height, mask_color)
             painter.drawLine(0, top, max_x, top)
             painter.drawLine(0, bottom, max_x, bottom)
         painter.end()
@@ -2576,7 +2576,7 @@ class _BatchConfig:
     star_min: float = 0.0
     star_max: float = 20.0
     # Export style
-    split_mode: str = "star"   # "single" | "star" | "category"
+    split_mode: str = "star"   # "single" | "star" | "category" | "week" | "month"
     # Sort
     sort_mode: str = "star_asc"  # "star_asc"|"star_desc"|"pp_high"|"pp_low"|"ap_high"|"ap_low"|"acc_high"|"acc_low"|"rank_low"|"rank_high"
     # Song filter
@@ -2638,6 +2638,8 @@ class _BatchConfig:
         }.get(self.sort_mode, self.sort_mode)
         q_tag = f" \U0001f50d\"{self.song_filter}\"" if self.song_filter else ""
         if self.source in ("rl", "acc"):
+            return f"{self.label}  [{src} / {sts} / {self.split_mode} / {sort_label}]{q_tag}"
+        if self.split_mode in ("week", "month"):
             return f"{self.label}  [{src} / {sts} / {self.split_mode} / {sort_label}]{q_tag}"
         star = f"★{self.star_min:g}-{self.star_max:g}"
         return f"{self.label}  [{src} / {sts} / {star} / {self.split_mode} / {sort_label}]{q_tag}"
@@ -2886,6 +2888,47 @@ def _config_export_tag(cfg: "_BatchConfig") -> str:
     return "_".join(parts)
 
 
+def _split_start_of_week(ts: int) -> Optional[datetime]:
+    if ts <= 0:
+        return None
+    dt = datetime.fromtimestamp(ts)
+    start = dt - timedelta(days=dt.weekday())
+    return start.replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+def _split_start_of_month(ts: int) -> Optional[datetime]:
+    if ts <= 0:
+        return None
+    dt = datetime.fromtimestamp(ts)
+    return dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+
+def _split_end_of_month(start: datetime) -> datetime:
+    if start.month == 12:
+        next_month = start.replace(year=start.year + 1, month=1, day=1)
+    else:
+        next_month = start.replace(month=start.month + 1, day=1)
+    return next_month - timedelta(days=1)
+
+
+def _group_entries_by_week(entries: List[MapEntry]) -> Dict[Optional[datetime], List[MapEntry]]:
+    groups: Dict[Optional[datetime], List[MapEntry]] = {}
+    for entry in entries:
+        groups.setdefault(_split_start_of_week(entry.source_date_ts), []).append(entry)
+    return groups
+
+
+def _group_entries_by_month(entries: List[MapEntry]) -> Dict[Optional[datetime], List[MapEntry]]:
+    groups: Dict[Optional[datetime], List[MapEntry]] = {}
+    for entry in entries:
+        groups.setdefault(_split_start_of_month(entry.source_date_ts), []).append(entry)
+    return groups
+
+
+def _sort_period_group_keys(keys: List[Optional[datetime]]) -> List[Optional[datetime]]:
+    return sorted(keys, key=lambda key: (key is None, key or datetime.min))
+
+
 _SORT_SYMBOL: Dict[str, str] = {
     "star_asc":      "★↑",
     "star_desc":     "★↓",
@@ -3089,6 +3132,40 @@ def _write_config_files(
             fname = f"{fbase}_{cat.capitalize()}.bplist"
             _img = covers.get(f"cat:{cat}:{_sort_dir}:{cfg.source}", "")
             bplist = _make_bplist(_playlist_title(cfg, category=cat), cat_groups[cat], _img)
+            (folder_path / fname).write_text(
+                json.dumps(bplist, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            saved.append(fname)
+    elif cfg.split_mode == "week":
+        week_groups: Dict[Optional[datetime], List[MapEntry]] = _group_entries_by_week(maps)
+        _sort_dir = _sort_dir_from_mode(cfg.sort_mode)
+        _img = covers.get(f"default:{_sort_dir}:{cfg.source}", "")
+        for start in _sort_period_group_keys(list(week_groups.keys())):
+            if start is None:
+                fname = f"{fbase}_unknown-date.bplist"
+                title = f"{_playlist_title(cfg)} Unknown Date"
+            else:
+                end = start + timedelta(days=6)
+                fname = f"{fbase}_{start.strftime('%Y-%m-%d')}_to_{end.strftime('%Y-%m-%d')}.bplist"
+                title = f"{_playlist_title(cfg)} {start.strftime('%Y-%m-%d')} to {end.strftime('%Y-%m-%d')}"
+            bplist = _make_bplist(title, week_groups[start], _img)
+            (folder_path / fname).write_text(
+                json.dumps(bplist, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            saved.append(fname)
+    elif cfg.split_mode == "month":
+        month_groups: Dict[Optional[datetime], List[MapEntry]] = _group_entries_by_month(maps)
+        _sort_dir = _sort_dir_from_mode(cfg.sort_mode)
+        _img = covers.get(f"default:{_sort_dir}:{cfg.source}", "")
+        for start in _sort_period_group_keys(list(month_groups.keys())):
+            if start is None:
+                fname = f"{fbase}_unknown-date.bplist"
+                title = f"{_playlist_title(cfg)} Unknown Date"
+            else:
+                end = _split_end_of_month(start)
+                fname = f"{fbase}_{start.strftime('%Y-%m')}.bplist"
+                title = f"{_playlist_title(cfg)} {start.strftime('%Y-%m-%d')} to {end.strftime('%Y-%m-%d')}"
+            bplist = _make_bplist(title, month_groups[start], _img)
             (folder_path / fname).write_text(
                 json.dumps(bplist, ensure_ascii=False, indent=2), encoding="utf-8"
             )
@@ -3667,12 +3744,17 @@ class PlaylistWindow(QMainWindow):
 
         self._rb_exp_split = QRadioButton("Split by ★")
         self._rb_exp_split.setToolTip("★ごとにファイルを分割して出力します")
+        self._rb_exp_split_alt = QRadioButton("Split by Month")
+        self._rb_exp_split_alt.setToolTip("月ごとにファイルを分割して出力します")
+        self._rb_exp_split_alt.setVisible(False)
 
         self._rb_exp_single.setChecked(True)
         self._export_style_grp.addButton(self._rb_exp_single, 0)
         self._export_style_grp.addButton(self._rb_exp_split, 1)
+        self._export_style_grp.addButton(self._rb_exp_split_alt, 2)
         export_row.addWidget(self._rb_exp_single)
         export_row.addWidget(self._rb_exp_split)
+        export_row.addWidget(self._rb_exp_split_alt)
 
         export_row.addSpacing(16)
         export_row.addWidget(QLabel("Sort:"))
@@ -3690,7 +3772,7 @@ class PlaylistWindow(QMainWindow):
         self._btn_export.setToolTip(
             "Content と Style の条件に従って bplist を出力します。\n"
             "フィルタ中の範囲が対象です。\n"
-            "Split by ★ の場合は保存フォルダを選択してください。"
+            "分割出力の場合は保存フォルダを選択してください。"
         )
         self._btn_export.clicked.connect(self._on_export)
         self._apply_export_button_theme()
@@ -5020,8 +5102,25 @@ class PlaylistWindow(QMainWindow):
             self._rb_open.isChecked() and self._svc_combo.currentData() == "accsaber_rl"
         )
         is_bs = self._rb_bs.isChecked()
-        # AccSaber / AccSaber RL ではカテゴリ別分割なので Split ラベルを切り替え
-        self._rb_exp_split.setText("Split by Category (True / Standard / Tech)" if is_acc else "Split by ★")
+        is_maps = self._is_maps_tab()
+        if is_acc:
+            self._rb_exp_split.setText("Split by Category (True / Standard / Tech)")
+            self._rb_exp_split.setToolTip("カテゴリごとにファイルを分割して出力します")
+            self._rb_exp_split_alt.setVisible(False)
+            if self._rb_exp_split_alt.isChecked():
+                self._rb_exp_split.setChecked(True)
+        elif is_maps:
+            self._rb_exp_split.setText("Split by Week")
+            self._rb_exp_split.setToolTip("月曜から日曜ごとにファイルを分割して出力します")
+            self._rb_exp_split_alt.setText("Split by Month")
+            self._rb_exp_split_alt.setToolTip("月初から月末ごとにファイルを分割して出力します")
+            self._rb_exp_split_alt.setVisible(True)
+        else:
+            self._rb_exp_split.setText("Split by ★")
+            self._rb_exp_split.setToolTip("★ごとにファイルを分割して出力します")
+            self._rb_exp_split_alt.setVisible(False)
+            if self._rb_exp_split_alt.isChecked():
+                self._rb_exp_split.setChecked(True)
         # Category filter チェックボックスは AccSaber / AccSaber RL のときのみ表示
         for w in [self._cat_filter_label, self._cb_cat_true, self._cb_cat_standard, self._cb_cat_tech]:
             w.setVisible(is_acc)
@@ -6309,7 +6408,8 @@ class PlaylistWindow(QMainWindow):
             self._cb_bs_unranked.setChecked(cfg.bs_unranked_only)
             self._cb_bs_no_ai.setChecked(cfg.bs_exclude_ai)
             self._rb_exp_single.setChecked(cfg.split_mode == "single")
-            self._rb_exp_split.setChecked(cfg.split_mode != "single")
+            self._rb_exp_split.setChecked(cfg.split_mode in ("star", "category", "week"))
+            self._rb_exp_split_alt.setChecked(cfg.split_mode == "month")
             sort_col, sort_order = _sort_indicator_from_mode(cfg.sort_mode)
             self._table.horizontalHeader().setSortIndicator(sort_col, sort_order)
         finally:
@@ -6361,7 +6461,6 @@ class PlaylistWindow(QMainWindow):
 
         search_text = self._search_edit.text().strip()
 
-        split = self._rb_exp_split.isChecked()
         is_acc_any = self._rb_acc.isChecked() or self._rb_acc_rl.isChecked()
 
         if self._rb_ss.isChecked():
@@ -6378,11 +6477,15 @@ class PlaylistWindow(QMainWindow):
         else:
             src_tag = "rl"
         src_label = _BATCH_SRC_PREFIX.get(src_tag, src_tag.upper())
-        display_style = ("cat" if is_acc_any else "split") if split else ""
+        split_mode = self._current_export_split_mode()
+        display_style = {
+            "category": "cat",
+            "star": "split",
+            "week": "week",
+            "month": "month",
+        }.get(split_mode, "")
         filename_base = ""
         name = "_".join(p for p in [src_label, display_style] if p)
-
-        split_mode = ("category" if is_acc_any else "star") if split else "single"
         sort_mode = self._current_sort_mode()
 
         cfg = _BatchConfig(
@@ -6414,6 +6517,19 @@ class PlaylistWindow(QMainWindow):
         self._batch_configs.append(cfg)
         self._batch_save_configs()
         self._batch_refresh_queue()
+
+    def _current_export_split_mode(self) -> str:
+        if self._rb_exp_single.isChecked():
+            return "single"
+        if self._rb_exp_split_alt.isVisible() and self._rb_exp_split_alt.isChecked():
+            return "month"
+        if self._rb_acc.isChecked() or self._rb_acc_rl.isChecked() or (
+            self._rb_open.isChecked() and self._svc_combo.currentData() == "accsaber_rl"
+        ):
+            return "category"
+        if self._is_maps_tab():
+            return "week"
+        return "star"
 
     def _batch_add_presets(self) -> None:
         """チェックされたプリセットをバッチキューに追加する（即時・データロード不要）。同一設定は追加しない。"""
@@ -7276,8 +7392,7 @@ class PlaylistWindow(QMainWindow):
 
     def _on_export(self) -> None:
         """Style ラジオに応じて出力メソッドを呼ぶ。"""
-        split = self._rb_exp_split.isChecked()
-        acc_source = self._rb_acc_rl.isChecked()
+        split_mode = self._current_export_split_mode()
         tag = self._make_export_tag()
 
         # Open モード時は元ファイル名をベースにする
@@ -7286,10 +7401,14 @@ class PlaylistWindow(QMainWindow):
             stem = Path(src_path).stem if src_path else "export"
             tag = f"{stem}_{tag}"
 
-        if split and acc_source:
+        if split_mode == "category":
             self._export_by_category(list(self._filtered), tag)
-        elif split:
+        elif split_mode == "star":
             self._export_per_star_all(tag)
+        elif split_mode == "week":
+            self._export_per_period_all(tag, period="week")
+        elif split_mode == "month":
+            self._export_per_period_all(tag, period="month")
         else:
             self._export_all_by_pp(tag)
 
@@ -7378,6 +7497,56 @@ class PlaylistWindow(QMainWindow):
             list(self._filtered),
             filename_suffix=tag,
             title_template="{star}★ " + tag,
+        )
+
+    def _export_per_period_all(self, tag: str = "all", *, period: str) -> None:
+        if not self._filtered:
+            QMessageBox.information(self, "Export", "No maps found.")
+            return
+
+        folder = QFileDialog.getExistingDirectory(self, "Select output folder", self._export_dir)
+        if not folder:
+            return
+        self._save_export_dir(folder)
+
+        folder_path = Path(folder)
+        saved_fnames: List[str] = []
+        errors: List[str] = []
+        _sort_dir = _sort_dir_from_mode(self._current_sort_mode())
+        src = "ss" if self._rb_ss.isChecked() else "bl" if self._rb_bl.isChecked() else "bs" if self._rb_bs.isChecked() else "rl"
+        image = _make_playlist_cover("default", "", _sort_dir, src)
+        groups = _group_entries_by_week(list(self._filtered)) if period == "week" else _group_entries_by_month(list(self._filtered))
+
+        for start in _sort_period_group_keys(list(groups.keys())):
+            try:
+                grouped_entries = _sort_entries(groups[start], self._current_sort_mode())
+                if start is None:
+                    filename = f"unknown-date_{tag}.bplist"
+                    title = f"Unknown Date ({tag})"
+                elif period == "week":
+                    end = start + timedelta(days=6)
+                    filename = f"{start.strftime('%Y-%m-%d')}_to_{end.strftime('%Y-%m-%d')}_{tag}.bplist"
+                    title = f"{start.strftime('%Y-%m-%d')} to {end.strftime('%Y-%m-%d')} ({tag})"
+                else:
+                    end = _split_end_of_month(start)
+                    filename = f"{start.strftime('%Y-%m')}_{tag}.bplist"
+                    title = f"{start.strftime('%Y-%m-%d')} to {end.strftime('%Y-%m-%d')} ({tag})"
+                out_path = folder_path / filename
+                bplist = _make_bplist(title, grouped_entries, image)
+                out_path.write_text(
+                    json.dumps(bplist, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+                saved_fnames.append(filename)
+            except Exception as exc:
+                label = "Unknown Date" if start is None else start.strftime("%Y-%m-%d")
+                errors.append(f"{label}: {exc}")
+
+        self._show_bplist_covers_dialog(
+            f"Export Complete — {len(saved_fnames)} file(s)",
+            folder,
+            saved_fnames,
+            errors,
         )
 
     def _export_by_category(self, entries: List[MapEntry], tag: str = "all") -> None:
