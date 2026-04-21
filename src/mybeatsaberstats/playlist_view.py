@@ -117,7 +117,7 @@ class _PlaylistTableWidget(QTableWidget):
             round(base.blue() * inv + overlay.blue() * alpha),
         )
 
-    def _selected_row_mask_color(self, row: int, active: bool) -> QColor:
+    def _selected_row_fill_color(self, row: int, active: bool) -> QColor:
         fill_color, _text_color = _NoFocusItemDelegate._selection_colors(active)
         if self.alternatingRowColors() and row % 2 == 1:
             base_color = self.palette().color(QPalette.ColorRole.AlternateBase)
@@ -134,10 +134,8 @@ class _PlaylistTableWidget(QTableWidget):
             rows = selection_model.selectedRows()
             if rows:
                 active = self.window().isActiveWindow() if self.window() is not None else False
-                fill_color, _text_color = _NoFocusItemDelegate._selection_colors(active)
                 painter = QPainter(self.viewport())
                 painter.setPen(Qt.PenStyle.NoPen)
-                painter.setBrush(fill_color)
                 max_x = max(0, self.viewport().width() - 1)
                 for model_index in rows:
                     row = model_index.row()
@@ -146,6 +144,7 @@ class _PlaylistTableWidget(QTableWidget):
                     top = self.rowViewportPosition(row)
                     if top < 0:
                         continue
+                    painter.setBrush(self._selected_row_fill_color(row, active))
                     painter.drawRect(0, top, max_x, self.rowHeight(row))
                 painter.end()
         super().paintEvent(event)
@@ -167,25 +166,6 @@ class _PlaylistTableWidget(QTableWidget):
             if top < 0:
                 continue
             bottom = top + self.rowHeight(row) - 1
-            mask_default = self._selected_row_mask_color(row, active)
-            mask_height = max(0, self.rowHeight(row) - 2)
-            if mask_height > 0:
-                for column in range(self.columnCount()):
-                    if self.isColumnHidden(column):
-                        continue
-                    cell_left = self.columnViewportPosition(column)
-                    cell_width = self.columnWidth(column)
-                    mask_left = cell_left + 1
-                    mask_width = min(4, max(0, cell_width - 2))
-                    if mask_width <= 0 or mask_left >= max_x:
-                        continue
-                    mask_color = mask_default
-                    item = self.item(row, column)
-                    if item is not None:
-                        background_brush = item.data(Qt.ItemDataRole.BackgroundRole)
-                        if hasattr(background_brush, "style") and background_brush.style() != Qt.BrushStyle.NoBrush:
-                            mask_color = background_brush.color()
-                    painter.fillRect(mask_left+2, top + 1, mask_width, mask_height, mask_color)
             painter.drawLine(0, top, max_x, top)
             painter.drawLine(0, bottom, max_x, bottom)
         painter.end()
@@ -225,6 +205,17 @@ class _NoFocusItemDelegate(QStyledItemDelegate):
         text_rect = option.rect.adjusted(4, 0, -4, 0)  # type: ignore[attr-defined]
         painter.drawText(text_rect, alignment, display_text)
 
+    @staticmethod
+    def _resolved_selection_fill(option: QStyleOptionViewItem, index, active: bool) -> QColor:
+        widget = getattr(option, "widget", None)
+        resolver = getattr(widget, "_selected_row_fill_color", None)
+        if callable(resolver):
+            resolved = resolver(index.row(), active)
+            if isinstance(resolved, QColor):
+                return resolved
+        fill, _text_color = _NoFocusItemDelegate._selection_colors(active)
+        return fill
+
     def paint(self, painter, option, index):  # type: ignore[override]
         opt = QStyleOptionViewItem(option)
         selected = bool(opt.state & QStyle.StateFlag.State_Selected)  # type: ignore[attr-defined]
@@ -233,7 +224,8 @@ class _NoFocusItemDelegate(QStyledItemDelegate):
         foreground_brush = index.data(Qt.ItemDataRole.ForegroundRole)
         text_color = opt.palette.color(QPalette.ColorRole.Text)  # type: ignore[attr-defined]
         if selected:
-            fill, text_color = self._selection_colors(active)
+            fill = self._resolved_selection_fill(opt, index, active)
+            _unused_fill, text_color = self._selection_colors(active)
         else:
             fill = None
             if hasattr(foreground_brush, "color"):
@@ -245,6 +237,30 @@ class _NoFocusItemDelegate(QStyledItemDelegate):
         if fill is not None:
             painter.fillRect(opt.rect, fill)  # type: ignore[attr-defined]
         self._paint_cell_text(painter, opt, index, text_color)
+        painter.restore()
+
+
+class _TransparentSelectionItemDelegate(QStyledItemDelegate):
+    def paint(self, painter, option, index):  # type: ignore[override]
+        opt = QStyleOptionViewItem(option)
+        selected = bool(opt.state & QStyle.StateFlag.State_Selected)  # type: ignore[attr-defined]
+        active = bool(opt.state & QStyle.StateFlag.State_Active)  # type: ignore[attr-defined]
+        background_brush = index.data(Qt.ItemDataRole.BackgroundRole)
+        foreground_brush = index.data(Qt.ItemDataRole.ForegroundRole)
+        text_color = opt.palette.color(QPalette.ColorRole.Text)  # type: ignore[attr-defined]
+        if selected:
+            fill, text_color = _NoFocusItemDelegate._selection_colors(active)
+        else:
+            fill = None
+            if hasattr(foreground_brush, "color"):
+                text_color = foreground_brush.color()
+
+        painter.save()
+        if hasattr(background_brush, "style") and background_brush.style() != Qt.BrushStyle.NoBrush:
+            painter.fillRect(opt.rect, background_brush)  # type: ignore[arg-type]
+        if fill is not None:
+            painter.fillRect(opt.rect, fill)  # type: ignore[attr-defined]
+        _NoFocusItemDelegate._paint_cell_text(painter, opt, index, text_color)
         painter.restore()
 
 
@@ -342,7 +358,7 @@ class _PercentageBarDelegate(QStyledItemDelegate):
             r = 0
             g = 255
             b = int(255 * t / 2)
-        painter.fillRect(bar_rect, QColor(r, g, b if ratio > 0.8 else 0, 180))
+        painter.fillRect(bar_rect, QColor(r, g, b if ratio > 0.8 else 0, 220))
         painter.restore()
 
         bar_lum = 0.299 * r + 0.587 * g + 0.114 * b
@@ -542,8 +558,12 @@ def export_playlist_configs(
         try:
             if config.source == "bs":
                 _emit(f"Loading BeatSaver: {config.label}...")
-                bs_from_dt = _parse_local_date_filter(config.bs_from_date)
-                bs_to_dt = _parse_local_date_filter(config.bs_to_date, end_of_day=True)
+                if config.bs_date_mode == "dates":
+                    bs_from_dt = _parse_local_date_filter(config.bs_from_date)
+                    bs_to_dt = _parse_local_date_filter(config.bs_to_date, end_of_day=True)
+                else:
+                    bs_from_dt = None
+                    bs_to_dt = None
                 base_maps = load_beatsaver_maps(
                     steam_id=steam_id,
                     query=config.bs_query,
@@ -1526,7 +1546,7 @@ def load_beatsaver_maps(
     else:
         to_dt = to_dt.astimezone(timezone.utc)
     if from_dt is None:
-        from_dt = to_dt - timedelta(days=max(1, days))
+        from_dt = to_dt - timedelta(days=max(1, days) - 1)
     elif from_dt.tzinfo is None:
         from_dt = from_dt.replace(tzinfo=timezone.utc)
     else:
@@ -2583,6 +2603,7 @@ class _BatchConfig:
     song_filter: str = ""
     # BeatSaver source filters
     bs_query: str = ""
+    bs_date_mode: str = "days"
     bs_from_date: str = ""
     bs_to_date: str = ""
     bs_days: int = 7
@@ -2639,6 +2660,12 @@ class _BatchConfig:
         q_tag = f" \U0001f50d\"{self.song_filter}\"" if self.song_filter else ""
         if self.source in ("rl", "acc"):
             return f"{self.label}  [{src} / {sts} / {self.split_mode} / {sort_label}]{q_tag}"
+        if self.source == "bs":
+            if self.bs_date_mode == "dates" and self.bs_from_date and self.bs_to_date:
+                date_tag = f"{self.bs_from_date}..{self.bs_to_date}"
+            else:
+                date_tag = f"Last {max(1, self.bs_days)} days"
+            return f"{self.label}  [{src} / {sts} / {date_tag} / {self.split_mode} / {sort_label}]{q_tag}"
         if self.split_mode in ("week", "month"):
             return f"{self.label}  [{src} / {sts} / {self.split_mode} / {sort_label}]{q_tag}"
         star = f"★{self.star_min:g}-{self.star_max:g}"
@@ -3498,26 +3525,30 @@ class PlaylistWindow(QMainWindow):
         self._bs_max_maps.setRange(1, 1000)
         self._bs_max_maps.setValue(1000)
         self._bs_max_maps.setToolTip("Load時に取得する最大件数")
-        self._bs_window_label = QLabel("Days:")
+        self._bs_date_mode_group = QButtonGroup(self)
+        self._bs_window_label = QRadioButton("Last")
         self._bs_days = QSpinBox()
         self._bs_days.setRange(1, 365)
         self._bs_days.setValue(7)
-        self._bs_days.setSuffix(" d")
-        self._bs_days.setToolTip("直近何日分を検索対象にするか")
-        self._bs_from_label = QLabel("From:")
+        self._bs_days.setSuffix(" days")
+        self._bs_days.setToolTip("今日から何日前までを検索対象にするか")
+        self._bs_from_label = QRadioButton("From / To")
         self._bs_from_date = QDateEdit()
         self._bs_from_date.setCalendarPopup(True)
         self._bs_from_date.setDisplayFormat("yyyy/MM/dd")
         self._bs_from_date.setMinimumWidth(120)
-        self._bs_from_date.setToolTip("検索開始日")
+        self._bs_from_date.setToolTip("固定の検索開始日")
         self._bs_to_label = QLabel("To:")
         self._bs_to_date = QDateEdit()
         self._bs_to_date.setCalendarPopup(True)
         self._bs_to_date.setDisplayFormat("yyyy/MM/dd")
         self._bs_to_date.setMinimumWidth(120)
-        self._bs_to_date.setToolTip("検索終了日")
+        self._bs_to_date.setToolTip("固定の検索終了日")
         self._bs_to_latest_btn = QPushButton("Latest")
         self._bs_to_latest_btn.setToolTip("To を今日の日付に設定します")
+        self._bs_date_mode_group.addButton(self._bs_window_label)
+        self._bs_date_mode_group.addButton(self._bs_from_label)
+        self._bs_window_label.setChecked(True)
         self._bs_min_rating = QSlider(Qt.Orientation.Horizontal)
         self._bs_min_rating.setRange(0, 100)
         self._bs_min_rating.setValue(50)
@@ -3571,6 +3602,8 @@ class PlaylistWindow(QMainWindow):
         self._bs_days.valueChanged.connect(self._sync_bs_dates_from_days)
         self._bs_from_date.dateChanged.connect(self._sync_bs_days_from_dates)
         self._bs_to_date.dateChanged.connect(self._sync_bs_days_from_dates)
+        self._bs_window_label.toggled.connect(self._on_bs_date_mode_toggled)
+        self._bs_from_label.toggled.connect(self._on_bs_date_mode_toggled)
         self._bs_to_latest_btn.clicked.connect(self._set_bs_to_latest)
         self._bs_min_rating.valueChanged.connect(self._on_bs_source_rating_changed)
         self._bs_min_votes.valueChanged.connect(self._on_bs_source_votes_changed)
@@ -3674,6 +3707,7 @@ class PlaylistWindow(QMainWindow):
         filter_row1.addStretch()
         self._bs_to_date.setDate(QDate.currentDate())
         self._sync_bs_dates_from_days()
+        self._apply_bs_date_mode_ui()
         self._set_bs_rating_value(50)
         self._set_bs_votes_value(0)
         self._count_label = QLabel("0 maps")
@@ -3791,13 +3825,14 @@ class PlaylistWindow(QMainWindow):
 
         # ─ テーブル ─────────────────────────────────────────────────
         self._table_stack = QStackedWidget(self)
+        self._default_numeric_delegate = QStyledItemDelegate(self)
+        self._transparent_selection_delegate = _TransparentSelectionItemDelegate(self)
+        self._maps_rate_delegate = _PercentageBarDelegate(self, max_value=100.0, gradient_min=0.0)
         self._snapshot_table = self._create_playlist_table()
         self._maps_table = self._create_playlist_table()
         self._table_stack.addWidget(self._snapshot_table)
         self._table_stack.addWidget(self._maps_table)
         self._table = self._snapshot_table
-        self._default_numeric_delegate = QStyledItemDelegate(self)
-        self._maps_rate_delegate = _PercentageBarDelegate(self, max_value=100.0, gradient_min=0.0)
         self._apply_row_height(refresh_table=False)
 
         root.addWidget(self._table_stack, 1)
@@ -4263,6 +4298,7 @@ class PlaylistWindow(QMainWindow):
         table.setColumnWidth(_COL_MAPPER, 120)
         table.setColumnWidth(_COL_BL_PLAYS, 78)
         table.setColumnWidth(_COL_BL_ATTEMPTS, 88)
+        table.setItemDelegateForColumn(_COL_DIFF, self._transparent_selection_delegate)
         table.itemSelectionChanged.connect(self._update_selection_status)
         table.itemSelectionChanged.connect(self._update_preview_from_selection)
         table.itemSelectionChanged.connect(table.viewport().update)
@@ -4594,27 +4630,40 @@ class PlaylistWindow(QMainWindow):
             return "open"
         return "ss"
 
+    def _current_bs_date_mode(self) -> str:
+        return "dates" if self._bs_from_label.isChecked() else "days"
+
+    def _apply_bs_date_mode_ui(self) -> None:
+        use_days = self._current_bs_date_mode() == "days"
+        self._bs_days.setEnabled(use_days)
+        self._bs_from_date.setEnabled(not use_days)
+        self._bs_to_label.setEnabled(not use_days)
+        self._bs_to_date.setEnabled(not use_days)
+        self._bs_to_latest_btn.setEnabled(not use_days)
+        if use_days:
+            self._sync_bs_dates_from_days()
+
+    def _on_bs_date_mode_toggled(self, _checked: bool) -> None:
+        self._apply_bs_date_mode_ui()
+
     def _sync_bs_dates_from_days(self, _value: int = 0) -> None:
-        if self._bs_date_sync:
+        if self._bs_date_sync or self._current_bs_date_mode() != "days":
             return
         self._bs_date_sync = True
         try:
-            to_date = self._bs_to_date.date() if self._bs_to_date.date().isValid() else QDate.currentDate()
+            to_date = QDate.currentDate()
             self._bs_to_date.setDate(to_date)
             self._bs_from_date.setDate(to_date.addDays(-(max(1, self._bs_days.value()) - 1)))
         finally:
             self._bs_date_sync = False
 
     def _sync_bs_days_from_dates(self, _date: QDate) -> None:
-        if self._bs_date_sync:
+        if self._bs_date_sync or self._current_bs_date_mode() != "dates":
             return
         self._bs_date_sync = True
         try:
             from_date = self._bs_from_date.date()
             to_date = self._bs_to_date.date()
-            if self.sender() is self._bs_to_date and to_date == QDate.currentDate():
-                from_date = to_date.addDays(-(max(1, self._bs_days.value()) - 1))
-                self._bs_from_date.setDate(from_date)
             if from_date > to_date:
                 if self.sender() is self._bs_from_date:
                     self._bs_to_date.setDate(from_date)
@@ -4627,8 +4676,10 @@ class PlaylistWindow(QMainWindow):
             self._bs_date_sync = False
 
     def _set_bs_to_latest(self) -> None:
+        if self._current_bs_date_mode() != "dates":
+            return
         self._bs_to_date.setDate(QDate.currentDate())
-        self._sync_bs_dates_from_days()
+        self._sync_bs_days_from_dates(self._bs_to_date.date())
 
     def _playlist_table_stylesheet(self) -> str:
         return table_stylesheet()
@@ -4772,6 +4823,7 @@ class PlaylistWindow(QMainWindow):
             "open_path": self._open_edit.text().strip(),
             "open_service": str(self._svc_combo.currentData() or "none"),
             "bs_query": self._bs_query_edit.text().strip(),
+            "bs_date_mode": self._current_bs_date_mode(),
             "bs_max_maps": self._bs_max_maps.value(),
             "bs_days": self._bs_days.value(),
             "bs_from_date": self._bs_from_date.date().toString("yyyy-MM-dd"),
@@ -4872,14 +4924,18 @@ class PlaylistWindow(QMainWindow):
         self._bs_query_edit.setText(str(state.get("bs_query") or ""))
         self._bs_max_maps.setValue(int(state.get("bs_max_maps") or 1000))
         self._bs_days.setValue(int(state.get("bs_days") or 7))
+        bs_date_mode = str(state.get("bs_date_mode") or "days")
         from_date = QDate.fromString(str(state.get("bs_from_date") or ""), "yyyy-MM-dd")
         to_date = QDate.fromString(str(state.get("bs_to_date") or ""), "yyyy-MM-dd")
         if to_date.isValid():
             self._bs_to_date.setDate(to_date)
         if from_date.isValid():
             self._bs_from_date.setDate(from_date)
-        else:
+        elif bs_date_mode == "days":
             self._sync_bs_dates_from_days()
+        self._bs_window_label.setChecked(bs_date_mode != "dates")
+        self._bs_from_label.setChecked(bs_date_mode == "dates")
+        self._apply_bs_date_mode_ui()
         self._set_bs_rating_value(int(state.get("bs_min_rating") or 50))
         self._set_bs_votes_value(int(state.get("bs_min_votes") or 0))
         self._cb_bs_unranked.setChecked(bool(state.get("bs_unranked_only", True)))
@@ -5464,6 +5520,7 @@ class PlaylistWindow(QMainWindow):
             pending_title = SOURCE_BS
             beatsaver_opts = {
                 "query": self._bs_query_edit.text().strip(),
+                "date_mode": self._current_bs_date_mode(),
                 "max_maps": self._bs_max_maps.value(),
                 "days": self._bs_days.value(),
                 "from_date": self._bs_from_date.date().toString("yyyy-MM-dd"),
@@ -5645,6 +5702,7 @@ class PlaylistWindow(QMainWindow):
             sigs.progress.emit(done, total, label)
         try:
             query = str(opts.get("query") or "")
+            date_mode = str(opts.get("date_mode") or "days")
             max_maps_raw = opts.get("max_maps")
             days_raw = opts.get("days")
             from_date_raw = str(opts.get("from_date") or "")
@@ -5653,8 +5711,12 @@ class PlaylistWindow(QMainWindow):
             min_votes_raw = opts.get("min_votes")
             max_maps = int(max_maps_raw) if isinstance(max_maps_raw, (int, float, str)) else 1000
             days = int(days_raw) if isinstance(days_raw, (int, float, str)) else 7
-            from_dt = _parse_local_date_filter(from_date_raw)
-            to_dt = _parse_local_date_filter(to_date_raw, end_of_day=True)
+            if date_mode == "dates":
+                from_dt = _parse_local_date_filter(from_date_raw)
+                to_dt = _parse_local_date_filter(to_date_raw, end_of_day=True)
+            else:
+                from_dt = None
+                to_dt = None
             min_rating_percent = float(min_rating_raw) if isinstance(min_rating_raw, (int, float, str)) else 0.0
             min_rating = min_rating_percent / 100.0
             min_votes = int(min_votes_raw) if isinstance(min_votes_raw, (int, float, str)) else 0
@@ -5699,15 +5761,20 @@ class PlaylistWindow(QMainWindow):
             self._count_label.setText("0 maps")
             self._save_window_state()
             if self._rb_bs.isChecked():
+                if self._current_bs_date_mode() == "dates":
+                    date_summary = (
+                        f"From: {self._bs_from_date.date().toString('yyyy/MM/dd')}\n"
+                        f"To: {self._bs_to_date.date().toString('yyyy/MM/dd')}\n"
+                    )
+                else:
+                    date_summary = f"Days: {self._bs_days.value()}\n"
                 QMessageBox.information(
                     self,
                     "BeatSaver",
                     "条件に一致する譜面が見つかりませんでした。\n\n"
                     f"Load Query: {self._bs_query_edit.text().strip() or '(empty)'}\n"
                     f"Max: {self._bs_max_maps.value()}\n"
-                    f"Days: {self._bs_days.value()}\n"
-                    f"From: {self._bs_from_date.date().toString('yyyy/MM/dd')}\n"
-                    f"To: {self._bs_to_date.date().toString('yyyy/MM/dd')}\n"
+                    f"{date_summary}"
                     f"Rating >= {self._bs_min_rating.value()}%\n"
                     f"Votes >= {self._bs_min_votes.value()}\n"
                     f"Unranked only: {'on' if self._cb_bs_unranked.isChecked() else 'off'}\n"
@@ -6370,6 +6437,8 @@ class PlaylistWindow(QMainWindow):
             self._cb_cat_standard,
             self._cb_cat_tech,
             self._bs_query_edit,
+            self._bs_window_label,
+            self._bs_from_label,
             self._bs_max_maps,
             self._bs_days,
             self._bs_from_date,
@@ -6397,12 +6466,15 @@ class PlaylistWindow(QMainWindow):
             self._cb_cat_standard.setChecked(cfg.cat_standard)
             self._cb_cat_tech.setChecked(cfg.cat_tech)
             self._bs_query_edit.setText(cfg.bs_query)
+            self._bs_window_label.setChecked(cfg.bs_date_mode != "dates")
+            self._bs_from_label.setChecked(cfg.bs_date_mode == "dates")
             self._bs_max_maps.setValue(cfg.bs_max_maps)
             self._bs_days.setValue(cfg.bs_days)
             if cfg.bs_to_date:
                 self._bs_to_date.setDate(QDate.fromString(cfg.bs_to_date, "yyyy-MM-dd"))
             if cfg.bs_from_date:
                 self._bs_from_date.setDate(QDate.fromString(cfg.bs_from_date, "yyyy-MM-dd"))
+            self._apply_bs_date_mode_ui()
             self._set_bs_rating_value(cfg.bs_min_rating)
             self._set_bs_votes_value(cfg.bs_min_votes)
             self._cb_bs_unranked.setChecked(cfg.bs_unranked_only)
@@ -6505,6 +6577,7 @@ class PlaylistWindow(QMainWindow):
             sort_mode=sort_mode,
             song_filter=search_text,
             bs_query=self._bs_query_edit.text().strip() if src_tag == "bs" else "",
+            bs_date_mode=self._current_bs_date_mode() if src_tag == "bs" else "days",
             bs_from_date=self._bs_from_date.date().toString("yyyy-MM-dd") if src_tag == "bs" else "",
             bs_to_date=self._bs_to_date.date().toString("yyyy-MM-dd") if src_tag == "bs" else "",
             bs_days=self._bs_days.value() if src_tag == "bs" else 7,
@@ -6588,6 +6661,7 @@ class PlaylistWindow(QMainWindow):
                     existing.cat_standard == new.cat_standard and
                     existing.cat_tech == new.cat_tech and
                     existing.bs_query == new.bs_query and
+                    existing.bs_date_mode == new.bs_date_mode and
                     existing.bs_from_date == new.bs_from_date and
                     existing.bs_to_date == new.bs_to_date and
                     existing.bs_days == new.bs_days and
