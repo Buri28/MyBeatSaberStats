@@ -2595,6 +2595,7 @@ class _BatchConfig:
     # Star range
     star_min: float = 0.0
     star_max: float = 20.0
+    highest_diff_only: bool = False
     # Export style
     split_mode: str = "star"   # "single" | "star" | "category" | "week" | "month"
     # Sort
@@ -2634,6 +2635,10 @@ class _BatchConfig:
         elif self.source == "bs":
             src = f"BS[R{self.bs_min_rating},V{self.bs_min_votes},M{self.bs_max_maps}]"
         sts = "".join([s for flag, s in [(self.show_cleared, "✓"), (self.show_nf, "⚠"), (self.show_unplayed, "✗"), (self.show_queued, "Q")] if flag])
+        filter_parts = [sts] if sts else []
+        if self.highest_diff_only:
+            filter_parts.append("TopDiff")
+        filter_label = "+".join(filter_parts) if filter_parts else "none"
         sort_label = {
             "star_asc": "Star↑", "star_desc": "Star↓",
             "pp_high": "PP↓", "pp_low": "PP↑",
@@ -2659,17 +2664,17 @@ class _BatchConfig:
         }.get(self.sort_mode, self.sort_mode)
         q_tag = f" \U0001f50d\"{self.song_filter}\"" if self.song_filter else ""
         if self.source in ("rl", "acc"):
-            return f"{self.label}  [{src} / {sts} / {self.split_mode} / {sort_label}]{q_tag}"
+            return f"{self.label}  [{src} / {filter_label} / {self.split_mode} / {sort_label}]{q_tag}"
         if self.source == "bs":
             if self.bs_date_mode == "dates" and self.bs_from_date and self.bs_to_date:
                 date_tag = f"{self.bs_from_date}..{self.bs_to_date}"
             else:
                 date_tag = f"Last {max(1, self.bs_days)} days"
-            return f"{self.label}  [{src} / {sts} / {date_tag} / {self.split_mode} / {sort_label}]{q_tag}"
+            return f"{self.label}  [{src} / {filter_label} / {date_tag} / {self.split_mode} / {sort_label}]{q_tag}"
         if self.split_mode in ("week", "month"):
-            return f"{self.label}  [{src} / {sts} / {self.split_mode} / {sort_label}]{q_tag}"
+            return f"{self.label}  [{src} / {filter_label} / {self.split_mode} / {sort_label}]{q_tag}"
         star = f"★{self.star_min:g}-{self.star_max:g}"
-        return f"{self.label}  [{src} / {sts} / {star} / {self.split_mode} / {sort_label}]{q_tag}"
+        return f"{self.label}  [{src} / {filter_label} / {star} / {self.split_mode} / {sort_label}]{q_tag}"
 
 
 _BATCH_PRESETS: List[_BatchPreset] = [
@@ -2798,6 +2803,28 @@ def _sort_entries(entries: List[MapEntry], sort_mode: str) -> List[MapEntry]:
     return result
 
 
+def _filter_highest_difficulty_only(entries: List[MapEntry]) -> List[MapEntry]:
+    best_by_key: Dict[Tuple[str, str], Tuple[int, float, MapEntry]] = {}
+    for entry in entries:
+        song_key = entry.song_hash.upper() or "\t".join([
+            entry.song_name,
+            entry.song_author,
+            entry.mapper,
+        ]).lower()
+        key = (song_key, entry.mode or "")
+        candidate = (_DIFF_ORDER.get(entry.difficulty, 0), entry.stars, entry)
+        current = best_by_key.get(key)
+        if current is None or candidate[:2] > current[:2]:
+            best_by_key[key] = candidate
+    return [
+        entry for entry in entries
+        if best_by_key[(entry.song_hash.upper() or "\t".join([
+            entry.song_name,
+            entry.song_author,
+            entry.mapper,
+        ]).lower(), entry.mode or "")][2] is entry
+    ]
+
 def _apply_config_filter(maps: List[MapEntry], cfg: "_BatchConfig") -> List[MapEntry]:
     """_BatchConfig のフィルタ条件をマップリストに適用してソート済みリストを返す。"""
     q = cfg.song_filter.lower() if cfg.song_filter else ""
@@ -2828,6 +2855,8 @@ def _apply_config_filter(maps: List[MapEntry], cfg: "_BatchConfig") -> List[MapE
             if e.acc_category == "tech" and not cfg.cat_tech:
                 continue
         result.append(e)
+    if cfg.highest_diff_only:
+        result = _filter_highest_difficulty_only(result)
     return _sort_entries(result, cfg.sort_mode)
 
 
@@ -6573,6 +6602,7 @@ class PlaylistWindow(QMainWindow):
             cat_tech=self._cb_cat_tech.isChecked() if is_acc_any else True,
             star_min=self._star_min.value(),
             star_max=self._star_max.value(),
+            highest_diff_only=self._cb_top_diff_only.isChecked(),
             split_mode=split_mode,
             sort_mode=sort_mode,
             song_filter=search_text,
@@ -7159,26 +7189,7 @@ class PlaylistWindow(QMainWindow):
             result.append(e)
 
         if highest_diff_only:
-            best_by_key: Dict[Tuple[str, str], Tuple[int, float, MapEntry]] = {}
-            for entry in result:
-                song_key = entry.song_hash.upper() or "\t".join([
-                    entry.song_name,
-                    entry.song_author,
-                    entry.mapper,
-                ]).lower()
-                key = (song_key, entry.mode or "")
-                candidate = (_DIFF_ORDER.get(entry.difficulty, 0), entry.stars, entry)
-                current = best_by_key.get(key)
-                if current is None or candidate[:2] > current[:2]:
-                    best_by_key[key] = candidate
-            result = [
-                entry for entry in result
-                if best_by_key[(entry.song_hash.upper() or "\t".join([
-                    entry.song_name,
-                    entry.song_author,
-                    entry.mapper,
-                ]).lower(), entry.mode or "")][2] is entry
-            ]
+            result = _filter_highest_difficulty_only(result)
 
         self._filtered = result
         self._sync_active_table_state()
