@@ -64,6 +64,9 @@ def test_group_entries_by_month_uses_calendar_month_range() -> None:
 
 
 def test_apply_config_filter_keeps_only_highest_difficulty_per_song_and_mode() -> None:
+    """同一曲に複数モード/難易度がある場合、全モードを通じて最高難易度の1エントリのみ残す。
+    難易度が同じ場合はモード優先順 (Standard > OneSaber > ...) で選ぶ。
+    """
     expert = _entry(1714521600)
     expert.song_hash = "ABC123"
     expert.song_name = "Song"
@@ -95,7 +98,36 @@ def test_apply_config_filter_keeps_only_highest_difficulty_per_song_and_mode() -
 
     result = _apply_config_filter([expert, expert_plus, one_saber], cfg)
 
-    assert result == [one_saber, expert_plus]
+    # Standard/ExpertPlus (diff=5, mode=6) がすべてに勝つ → 1エントリのみ
+    assert result == [expert_plus]
+
+
+def test_apply_config_filter_highest_diff_mode_tiebreak() -> None:
+    """難易度が同じ場合、モード優先順 (Standard > OneSaber) で選ぶ。"""
+    standard_expert = _entry(1714521600)
+    standard_expert.song_hash = "TIE001"
+    standard_expert.mode = "Standard"
+    standard_expert.difficulty = "Expert"
+    standard_expert.stars = 7.0
+
+    onesaber_expert = _entry(1714608000)
+    onesaber_expert.song_hash = "TIE001"
+    onesaber_expert.mode = "OneSaber"
+    onesaber_expert.difficulty = "Expert"
+    onesaber_expert.stars = 7.0
+
+    cfg = _BatchConfig(
+        label="test",
+        filename_base="",
+        source="bs",
+        highest_diff_only=True,
+        sort_mode="date_desc",
+    )
+
+    result = _apply_config_filter([onesaber_expert, standard_expert], cfg)
+
+    # Standard が OneSaber より優先される
+    assert result == [standard_expert]
 
 
 def test_apply_config_filter_sorts_by_published_date_after_highest_difficulty_filter() -> None:
