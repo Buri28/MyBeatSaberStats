@@ -578,16 +578,22 @@ def export_playlist_configs(
         try:
             if config.source == "bs":
                 _emit(f"Loading BeatSaver: {config.label}...")
-                if config.bs_date_mode == "dates":
+                if config.bs_date_mode == "none":
+                    bs_from_dt = None
+                    bs_to_dt = None
+                    _bs_days = 0
+                elif config.bs_date_mode == "dates":
                     bs_from_dt = _parse_local_date_filter(config.bs_from_date)
                     bs_to_dt = _parse_local_date_filter(config.bs_to_date, end_of_day=True)
+                    _bs_days = config.bs_days
                 else:
                     bs_from_dt = None
                     bs_to_dt = None
+                    _bs_days = config.bs_days
                 base_maps = load_beatsaver_maps(
                     steam_id=steam_id,
                     query=config.bs_query,
-                    days=config.bs_days,
+                    days=_bs_days,
                     min_rating=config.bs_min_rating / 100.0,
                     min_votes=config.bs_min_votes,
                     max_maps=config.bs_max_maps,
@@ -1566,22 +1572,33 @@ def load_beatsaver_maps(
     on_progress: Optional[Callable[[int, int, str], None]] = None,
     session: Optional[requests.Session] = None,
 ) -> List[MapEntry]:
-    """BeatSaver の検索 API から譜面を取得し、未プレイ判定付きで返す。"""
+    """BeatSaver の検索 API から譜面を取得し、未プレイ判定付きで返す。
+
+    days=0 を指定すると日付フィルタなしで全期間を対象にする。
+    """
+    no_date_filter = (days == 0 and from_dt is None and to_dt is None)
     now = datetime.now(timezone.utc)
-    if to_dt is None:
-        to_dt = now
-    elif to_dt.tzinfo is None:
-        to_dt = to_dt.replace(tzinfo=timezone.utc)
+    if no_date_filter:
+        # 日付制限なし: 変数は必要ないが型アノテーションのため初期化しておく
+        from_dt_api: Optional[datetime] = None
+        to_dt_api: Optional[datetime] = None
     else:
-        to_dt = to_dt.astimezone(timezone.utc)
-    if from_dt is None:
-        from_dt = to_dt - timedelta(days=max(1, days) - 1)
-    elif from_dt.tzinfo is None:
-        from_dt = from_dt.replace(tzinfo=timezone.utc)
-    else:
-        from_dt = from_dt.astimezone(timezone.utc)
-    if from_dt > to_dt:
-        from_dt, to_dt = to_dt, from_dt
+        if to_dt is None:
+            to_dt = now
+        elif to_dt.tzinfo is None:
+            to_dt = to_dt.replace(tzinfo=timezone.utc)
+        else:
+            to_dt = to_dt.astimezone(timezone.utc)
+        if from_dt is None:
+            from_dt = to_dt - timedelta(days=max(1, days) - 1)
+        elif from_dt.tzinfo is None:
+            from_dt = from_dt.replace(tzinfo=timezone.utc)
+        else:
+            from_dt = from_dt.astimezone(timezone.utc)
+        if from_dt > to_dt:
+            from_dt, to_dt = to_dt, from_dt
+        from_dt_api = from_dt
+        to_dt_api = to_dt
 
     ss_scores_raw: Dict[str, dict] = {}
     bl_scores_raw: Dict[str, dict] = {}
@@ -1618,18 +1635,20 @@ def load_beatsaver_maps(
             break
         if on_progress:
             on_progress(page, max(pages, 1), f"Searching BeatSaver... {page + 1}/{max(pages, 1)}")
+        _search_params: Dict[str, str] = {
+            "q": q,
+            "pageSize": str(100 if max_maps is None else min(100, max_maps)),
+            "minRating": str(min_rating),
+            "minVotes": str(min_votes),
+            "order": "Latest",
+            "ascending": "false",
+        }
+        if from_dt_api is not None and to_dt_api is not None:
+            _search_params["from"] = from_dt_api.isoformat().replace("+00:00", "Z")
+            _search_params["to"] = to_dt_api.isoformat().replace("+00:00", "Z")
         resp = session.get(
             f"https://api.beatsaver.com/search/text/{page}",
-            params={
-                "q": q,
-                "pageSize": 100 if max_maps is None else min(100, max_maps),
-                "from": from_dt.isoformat().replace("+00:00", "Z"),
-                "to": to_dt.isoformat().replace("+00:00", "Z"),
-                "minRating": min_rating,
-                "minVotes": min_votes,
-                "order": "Latest",
-                "ascending": "false",
-            },
+            params=_search_params,
             timeout=15,
         )
         resp.raise_for_status()
@@ -2705,7 +2724,9 @@ class _BatchConfig:
         if self.source in ("rl", "acc"):
             return f"{self.label}  [{src} / {filter_label} / {self.split_mode} / {sort_label}]{q_tag}"
         if self.source == "bs":
-            if self.bs_date_mode == "dates" and self.bs_from_date and self.bs_to_date:
+            if self.bs_date_mode == "none":
+                date_tag = "All dates"
+            elif self.bs_date_mode == "dates" and self.bs_from_date and self.bs_to_date:
                 date_tag = f"{self.bs_from_date}..{self.bs_to_date}"
             else:
                 date_tag = f"Last {max(1, self.bs_days)} days"
@@ -3574,12 +3595,21 @@ class PlaylistWindow(QMainWindow):
         self._last_load_label = QLabel("Last Load: -")
         self._last_load_label.setStyleSheet("color: #aaa;")
 
-        src_footer_row = QHBoxLayout()
-        src_footer_row.setSpacing(8)
-        src_footer_row.addStretch()
-        src_footer_row.addWidget(self._last_load_label)
-        src_footer_row.addWidget(self._btn_load)
-        src_vbox.addLayout(src_footer_row)
+        self._load_footer_widget = QWidget()
+        _load_footer_row = QHBoxLayout(self._load_footer_widget)
+        _load_footer_row.setContentsMargins(0, 0, 0, 0)
+        _load_footer_row.setSpacing(8)
+        _load_footer_row.addStretch()
+        _load_footer_row.addWidget(self._last_load_label)
+        _load_footer_row.addWidget(self._btn_load)
+
+        self._snapshot_load_host = QWidget()
+        self._snapshot_load_host.setContentsMargins(0, 0, 0, 0)
+        self._snapshot_load_host_layout = QHBoxLayout()
+        self._snapshot_load_host_layout.setContentsMargins(0, 0, 0, 0)
+        self._snapshot_load_host_layout.setSpacing(0)
+        self._snapshot_load_host.setLayout(self._snapshot_load_host_layout)
+        src_vbox.addWidget(self._snapshot_load_host)
 
         self._bs_filter_row_widget = QWidget()
         _bs_filter_rows = QVBoxLayout(self._bs_filter_row_widget)
@@ -3588,6 +3618,9 @@ class PlaylistWindow(QMainWindow):
         _bs_filter_row_top = QHBoxLayout()
         _bs_filter_row_top.setContentsMargins(0, 0, 0, 0)
         _bs_filter_row_top.setSpacing(8)
+        _bs_filter_row_middle = QHBoxLayout()
+        _bs_filter_row_middle.setContentsMargins(0, 0, 0, 0)
+        _bs_filter_row_middle.setSpacing(8)
         _bs_filter_row_bottom = QHBoxLayout()
         _bs_filter_row_bottom.setContentsMargins(0, 0, 0, 0)
         _bs_filter_row_bottom.setSpacing(8)
@@ -3603,6 +3636,8 @@ class PlaylistWindow(QMainWindow):
         self._bs_max_maps.setValue(1000)
         self._bs_max_maps.setToolTip("Load時に取得する最大件数")
         self._bs_date_mode_group = QButtonGroup(self)
+        self._bs_all_label = QRadioButton("All")
+        self._bs_all_label.setToolTip("日付で絞り込まない（全期間を対象にする）")
         self._bs_window_label = QRadioButton("Last")
         self._bs_days = QSpinBox()
         self._bs_days.setRange(1, 365)
@@ -3623,6 +3658,7 @@ class PlaylistWindow(QMainWindow):
         self._bs_to_date.setToolTip("固定の検索終了日")
         self._bs_to_latest_btn = QPushButton("Latest")
         self._bs_to_latest_btn.setToolTip("To を今日の日付に設定します")
+        self._bs_date_mode_group.addButton(self._bs_all_label)
         self._bs_date_mode_group.addButton(self._bs_window_label)
         self._bs_date_mode_group.addButton(self._bs_from_label)
         self._bs_window_label.setChecked(True)
@@ -3651,19 +3687,23 @@ class PlaylistWindow(QMainWindow):
         self._cb_bs_unranked.setChecked(True)
         self._cb_bs_no_ai = QCheckBox("Exclude AI")
         self._cb_bs_no_ai.setChecked(True)
-        _bs_filter_row_top.addWidget(self._bs_filter_label)
         _bs_filter_row_top.addWidget(self._bs_query_label)
         _bs_filter_row_top.addWidget(self._bs_query_edit)
         _bs_filter_row_top.addWidget(self._bs_max_label)
         _bs_filter_row_top.addWidget(self._bs_max_maps)
-        _bs_filter_row_top.addWidget(self._bs_window_label)
-        _bs_filter_row_top.addWidget(self._bs_days)
-        _bs_filter_row_top.addWidget(self._bs_from_label)
-        _bs_filter_row_top.addWidget(self._bs_from_date)
-        _bs_filter_row_top.addWidget(self._bs_to_label)
-        _bs_filter_row_top.addWidget(self._bs_to_date)
-        _bs_filter_row_top.addWidget(self._bs_to_latest_btn)
+        _bs_filter_row_top.addWidget(self._cb_bs_unranked)
+        _bs_filter_row_top.addWidget(self._cb_bs_no_ai)
         _bs_filter_row_top.addStretch()
+        _bs_filter_row_middle.addSpacing(6)
+        _bs_filter_row_middle.addWidget(self._bs_all_label)
+        _bs_filter_row_middle.addWidget(self._bs_window_label)
+        _bs_filter_row_middle.addWidget(self._bs_days)
+        _bs_filter_row_middle.addWidget(self._bs_from_label)
+        _bs_filter_row_middle.addWidget(self._bs_from_date)
+        _bs_filter_row_middle.addWidget(self._bs_to_label)
+        _bs_filter_row_middle.addWidget(self._bs_to_date)
+        _bs_filter_row_middle.addWidget(self._bs_to_latest_btn)
+        _bs_filter_row_middle.addStretch()
         _bs_filter_row_bottom.addSpacing(6)
         _bs_filter_row_bottom.addWidget(self._bs_rating_label)
         _bs_filter_row_bottom.addWidget(self._bs_min_rating)
@@ -3671,14 +3711,21 @@ class PlaylistWindow(QMainWindow):
         _bs_filter_row_bottom.addWidget(self._bs_votes_label)
         _bs_filter_row_bottom.addWidget(self._bs_min_votes)
         _bs_filter_row_bottom.addWidget(self._bs_votes_value_label)
-        _bs_filter_row_bottom.addWidget(self._cb_bs_unranked)
-        _bs_filter_row_bottom.addWidget(self._cb_bs_no_ai)
         _bs_filter_row_bottom.addStretch()
+        self._maps_load_host = QWidget()
+        self._maps_load_host.setContentsMargins(0, 0, 0, 0)
+        self._maps_load_host_layout = QHBoxLayout()
+        self._maps_load_host_layout.setContentsMargins(0, 0, 0, 0)
+        self._maps_load_host_layout.setSpacing(0)
+        self._maps_load_host.setLayout(self._maps_load_host_layout)
+        _bs_filter_row_bottom.addWidget(self._maps_load_host)
         _bs_filter_rows.addLayout(_bs_filter_row_top)
+        _bs_filter_rows.addLayout(_bs_filter_row_middle)
         _bs_filter_rows.addLayout(_bs_filter_row_bottom)
         self._bs_days.valueChanged.connect(self._sync_bs_dates_from_days)
         self._bs_from_date.dateChanged.connect(self._sync_bs_days_from_dates)
         self._bs_to_date.dateChanged.connect(self._sync_bs_days_from_dates)
+        self._bs_all_label.toggled.connect(self._on_bs_date_mode_toggled)
         self._bs_window_label.toggled.connect(self._on_bs_date_mode_toggled)
         self._bs_from_label.toggled.connect(self._on_bs_date_mode_toggled)
         self._bs_to_latest_btn.clicked.connect(self._set_bs_to_latest)
@@ -3688,6 +3735,7 @@ class PlaylistWindow(QMainWindow):
         self._bs_votes_value_label.valueChanged.connect(self._on_bs_source_votes_changed)
         _register_secondary_buttons(self._bs_to_latest_btn)
         _maps_layout.addWidget(self._bs_filter_row_widget)
+        self._set_load_footer_host(self._snapshot_load_host)
 
         self._src_group.buttonToggled.connect(self._on_source_changed)
         self._source_tabs.currentChanged.connect(self._on_source_tab_changed)
@@ -4708,15 +4756,21 @@ class PlaylistWindow(QMainWindow):
         return "ss"
 
     def _current_bs_date_mode(self) -> str:
-        return "dates" if self._bs_from_label.isChecked() else "days"
+        if self._bs_from_label.isChecked():
+            return "dates"
+        if self._bs_all_label.isChecked():
+            return "none"
+        return "days"
 
     def _apply_bs_date_mode_ui(self) -> None:
-        use_days = self._current_bs_date_mode() == "days"
+        mode = self._current_bs_date_mode()
+        use_days = (mode == "days")
+        use_dates = (mode == "dates")
         self._bs_days.setEnabled(use_days)
-        self._bs_from_date.setEnabled(not use_days)
-        self._bs_to_label.setEnabled(not use_days)
-        self._bs_to_date.setEnabled(not use_days)
-        self._bs_to_latest_btn.setEnabled(not use_days)
+        self._bs_from_date.setEnabled(use_dates)
+        self._bs_to_label.setEnabled(use_dates)
+        self._bs_to_date.setEnabled(use_dates)
+        self._bs_to_latest_btn.setEnabled(use_dates)
         if use_days:
             self._sync_bs_dates_from_days()
 
@@ -4724,7 +4778,7 @@ class PlaylistWindow(QMainWindow):
         self._apply_bs_date_mode_ui()
 
     def _sync_bs_dates_from_days(self, _value: int = 0) -> None:
-        if self._bs_date_sync or self._current_bs_date_mode() != "days":
+        if self._bs_date_sync or self._current_bs_date_mode() not in ("days",):
             return
         self._bs_date_sync = True
         try:
@@ -5012,8 +5066,11 @@ class PlaylistWindow(QMainWindow):
                 self._bs_to_date.setDate(to_date)
             if from_date.isValid():
                 self._bs_from_date.setDate(from_date)
-        self._bs_window_label.setChecked(bs_date_mode != "dates")
+        self._bs_all_label.setChecked(bs_date_mode == "none")
+        self._bs_window_label.setChecked(bs_date_mode == "days")
         self._bs_from_label.setChecked(bs_date_mode == "dates")
+        if bs_date_mode not in ("none", "dates", "days"):
+            self._bs_window_label.setChecked(True)
         self._apply_bs_date_mode_ui()
         self._set_bs_rating_value(int(state.get("bs_min_rating") or 50))
         self._set_bs_votes_value(int(state.get("bs_min_votes") or 0))
@@ -5225,13 +5282,32 @@ class PlaylistWindow(QMainWindow):
                 self._rb_bs.setChecked(True)
             if self._restored_maps_state:
                 self._schedule_deferred_maps_restore()
+            self._set_load_footer_host(self._maps_load_host)
         elif self._rb_bs.isChecked():
             self._last_snapshot_source_button.setChecked(True)
+            self._set_load_footer_host(self._snapshot_load_host)
+        else:
+            self._set_load_footer_host(self._snapshot_load_host)
         self._apply_highest_diff_only_for_current_tab()
         self._activate_table_for_tab(index)
         self._apply_saved_sort_for_current_tab()
         self._update_table_visual_mode()
         self._update_score_headers()
+
+    def _set_load_footer_host(self, host: QWidget) -> None:
+        current_parent = self._load_footer_widget.parentWidget()
+        if current_parent is host:
+            return
+        if current_parent is self._snapshot_load_host:
+            self._snapshot_load_host_layout.removeWidget(self._load_footer_widget)
+        elif current_parent is self._maps_load_host:
+            self._maps_load_host_layout.removeWidget(self._load_footer_widget)
+        if host is self._snapshot_load_host:
+            self._snapshot_load_host_layout.addWidget(self._load_footer_widget)
+        elif host is self._maps_load_host:
+            self._maps_load_host_layout.addWidget(self._load_footer_widget)
+        self._snapshot_load_host.setVisible(host is self._snapshot_load_host)
+        self._maps_load_host.setVisible(host is self._maps_load_host)
 
     def select_source_tab(self, tab_name: str) -> None:
         target = (tab_name or "snapshot").strip().lower()
@@ -5805,6 +5881,10 @@ class PlaylistWindow(QMainWindow):
             if date_mode == "dates":
                 from_dt = _parse_local_date_filter(from_date_raw)
                 to_dt = _parse_local_date_filter(to_date_raw, end_of_day=True)
+            elif date_mode == "none":
+                from_dt = None
+                to_dt = None
+                days = 0  # load_beatsaver_maps に「日付制限なし」を伝えるフラグ
             else:
                 from_dt = None
                 to_dt = None
