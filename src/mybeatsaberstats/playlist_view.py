@@ -431,6 +431,16 @@ STATUS_UNPLAYED = "✖"
 # 難易度の表示順
 _DIFF_ORDER: Dict[str, int] = {"Easy": 1, "Normal": 2, "Hard": 3, "Expert": 4, "ExpertPlus": 5}
 
+# Highest Diff Only 時のモード優先順 (2S > 1S > NA > 90° > 360° > LAW)
+_MODE_ORDER: Dict[str, int] = {
+    "Standard":  6,   # 2S
+    "OneSaber":  5,   # 1S
+    "NoArrows":  4,   # NA
+    "90Degree":  3,   # 90°
+    "360Degree": 2,   # 360°
+    "Lawless":   1,   # LAW
+}
+
 _CACHE_DIR = BASE_DIR / "cache"
 _COVER_CACHE_DIR = _CACHE_DIR / "covers"
 _BATCH_CONFIG_PATH = _CACHE_DIR / "batch_configs.json"
@@ -1821,7 +1831,7 @@ def _diff_item(difficulty: str) -> QTableWidgetItem:
 
 def _mode_item(mode: str) -> QTableWidgetItem:
     short = _MODE_INFO.get(mode, mode[:4])
-    item = QTableWidgetItem(short)
+    item = _NumItem(short, float(_MODE_ORDER.get(mode, 0)))
     item.setToolTip(mode)
     item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
     return item
@@ -2768,9 +2778,9 @@ def _sort_entries(entries: List[MapEntry], sort_mode: str) -> List[MapEntry]:
         _dord = {"Easy": 1, "Normal": 3, "Hard": 5, "Expert": 7, "ExpertPlus": 9}
         result.sort(key=lambda e: (_dord.get(e.difficulty, 0), e.song_name.lower()), reverse=(sort_mode == "diff_desc"))
     elif sort_mode == "mode_desc":
-        result.sort(key=lambda e: e.mode.lower(), reverse=True)
+        result.sort(key=lambda e: (-_MODE_ORDER.get(e.mode or "", 0), e.song_name.lower()))
     elif sort_mode == "mode_asc":
-        result.sort(key=lambda e: e.mode.lower())
+        result.sort(key=lambda e: (_MODE_ORDER.get(e.mode or "", 0), e.song_name.lower()))
     elif sort_mode == "cat_desc":
         result.sort(key=lambda e: e.acc_category.lower(), reverse=True)
     elif sort_mode == "cat_asc":
@@ -2833,25 +2843,34 @@ def _sort_entries(entries: List[MapEntry], sort_mode: str) -> List[MapEntry]:
 
 
 def _filter_highest_difficulty_only(entries: List[MapEntry]) -> List[MapEntry]:
-    best_by_key: Dict[Tuple[str, str], Tuple[int, float, MapEntry]] = {}
+    """同一曲につき最高難易度の1譜面のみを残す。
+
+    難易度が同じ場合はモード優先順 (2S > 1S > NA > 90° > 360° > LAW) で選択し、
+    それも同じ場合はスター値の高い方を残す。
+    """
+    best_by_key: Dict[str, Tuple[int, int, float, MapEntry]] = {}
     for entry in entries:
         song_key = entry.song_hash.upper() or "\t".join([
             entry.song_name,
             entry.song_author,
             entry.mapper,
         ]).lower()
-        key = (song_key, entry.mode or "")
-        candidate = (_DIFF_ORDER.get(entry.difficulty, 0), entry.stars, entry)
-        current = best_by_key.get(key)
-        if current is None or candidate[:2] > current[:2]:
-            best_by_key[key] = candidate
+        candidate = (
+            _DIFF_ORDER.get(entry.difficulty, 0),
+            _MODE_ORDER.get(entry.mode or "", 0),
+            entry.stars,
+            entry,
+        )
+        current = best_by_key.get(song_key)
+        if current is None or candidate[:3] > current[:3]:
+            best_by_key[song_key] = candidate
     return [
         entry for entry in entries
-        if best_by_key[(entry.song_hash.upper() or "\t".join([
+        if best_by_key[entry.song_hash.upper() or "\t".join([
             entry.song_name,
             entry.song_author,
             entry.mapper,
-        ]).lower(), entry.mode or "")][2] is entry
+        ]).lower()][3] is entry
     ]
 
 def _apply_config_filter(maps: List[MapEntry], cfg: "_BatchConfig") -> List[MapEntry]:
