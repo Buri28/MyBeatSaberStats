@@ -188,6 +188,8 @@ class _NoFocusItemDelegate(QStyledItemDelegate):
         option: QStyleOptionViewItem,
         index,
         text_color: QColor,
+        *,
+        left_padding: int = 4,
     ) -> None:
         font_data = index.data(Qt.ItemDataRole.FontRole)
         if isinstance(font_data, QFont):
@@ -202,7 +204,7 @@ class _NoFocusItemDelegate(QStyledItemDelegate):
             alignment = int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         else:
             alignment = int(alignment_data)
-        text_rect = option.rect.adjusted(4, 0, -4, 0)  # type: ignore[attr-defined]
+        text_rect = option.rect.adjusted(left_padding, 0, -4, 0)  # type: ignore[attr-defined]
         painter.drawText(text_rect, alignment, display_text)
 
     @staticmethod
@@ -222,6 +224,7 @@ class _NoFocusItemDelegate(QStyledItemDelegate):
         active = bool(opt.state & QStyle.StateFlag.State_Active)  # type: ignore[attr-defined]
         background_brush = index.data(Qt.ItemDataRole.BackgroundRole)
         foreground_brush = index.data(Qt.ItemDataRole.ForegroundRole)
+        marker_color = index.data(Qt.ItemDataRole.UserRole + 101)
         text_color = opt.palette.color(QPalette.ColorRole.Text)  # type: ignore[attr-defined]
         if selected:
             fill = self._resolved_selection_fill(opt, index, active)
@@ -236,7 +239,14 @@ class _NoFocusItemDelegate(QStyledItemDelegate):
             painter.fillRect(opt.rect, background_brush)  # type: ignore[arg-type]
         if fill is not None:
             painter.fillRect(opt.rect, fill)  # type: ignore[attr-defined]
-        self._paint_cell_text(painter, opt, index, text_color)
+        if index.column() == _COL_SONG:
+            if isinstance(marker_color, QColor):
+                marker_rect = opt.rect.adjusted(0, 1, 0, -1)  # type: ignore[attr-defined]
+                painter.fillRect(marker_rect.x(), marker_rect.y(), 4, marker_rect.height(), marker_color)
+            left_padding = 10
+        else:
+            left_padding = 4
+        self._paint_cell_text(painter, opt, index, text_color, left_padding=left_padding)
         painter.restore()
 
 
@@ -751,6 +761,8 @@ class MapEntry:
     beatsaver_downvotes: int = 0
     beatsaver_uploaded_ts: int = 0
     beatsaver_description: str = ""
+    beatsaver_curated: bool = False
+    beatsaver_verified_mapper: bool = False
     beatleader_page_url: str = ""
     beatleader_replay_url: str = ""
     beatleader_global1_replay_url: str = ""
@@ -900,6 +912,10 @@ def _apply_beatsaver_meta(entry: MapEntry, meta: Optional[dict]) -> None:
         entry.beatsaver_downvotes = int(meta.get("beatsaver_downvotes") or 0)
     if entry.beatsaver_rating <= 0:
         entry.beatsaver_rating = float(meta.get("beatsaver_rating") or 0.0)
+    if meta.get("beatsaver_curated"):
+        entry.beatsaver_curated = True
+    if meta.get("beatsaver_verified_mapper"):
+        entry.beatsaver_verified_mapper = True
 
 
 def _enrich_entries_with_beatsaver_cache(entries: List[MapEntry]) -> List[MapEntry]:
@@ -955,6 +971,7 @@ def _collect_beatsaver_cache_targets(entries: List[MapEntry]) -> Tuple[List[str]
     missing_hashes: List[str] = []
     seed_map: Dict[str, str] = {}
     seen_hashes: set[str] = set()
+    cache = load_beatsaver_meta_cache()
     for entry in entries:
         song_hash = (entry.song_hash or "").upper()
         if not song_hash or song_hash in seen_hashes:
@@ -963,7 +980,9 @@ def _collect_beatsaver_cache_targets(entries: List[MapEntry]) -> Tuple[List[str]
         if entry.beatsaver_key:
             seed_map[song_hash] = str(entry.beatsaver_key).strip()
         has_link = bool(entry.beatsaver_key or entry.beatsaver_page_url or entry.beatsaver_download_url)
-        if not has_link:
+        # beatsaver_curated キーが存在しない旧キャッシュエントリも API 再取得対象に含める
+        needs_refresh = "beatsaver_curated" not in (cache.get(song_hash) or {})
+        if not has_link or needs_refresh:
             missing_hashes.append(song_hash)
     return missing_hashes, seed_map
 
@@ -1725,6 +1744,8 @@ def load_beatsaver_maps(
                     beatsaver_downvotes=downvotes,
                     beatsaver_uploaded_ts=uploaded_ts,
                     beatsaver_description=description,
+                    beatsaver_curated=bool(doc.get("curatedAt")),
+                    beatsaver_verified_mapper=bool((doc.get("uploader") or {}).get("verifiedMapper")),
                     beatleader_page_url=bl_page_url,
                     beatleader_replay_url=bl_replay_url,
                     beatleader_global1_replay_url="",
@@ -1773,6 +1794,14 @@ _MODE_INFO: Dict[str, str] = {
     "Lightshow": "LS",
     "Lawless":   "Law",
 }
+
+def _beatsaver_song_marker_color(entry: MapEntry) -> Optional[QColor]:
+    """BeatSaver のキュレート済みマップ（紫）または Verified Mapper（緑）の帯色を返す。"""
+    if entry.beatsaver_curated:
+        return QColor("#8E44ED") if not is_dark() else QColor("#B07CFF")
+    if entry.beatsaver_verified_mapper:
+        return QColor("#4CAF50") if not is_dark() else QColor("#7BE07F")
+    return None
 
 
 def _diff_item(difficulty: str) -> QTableWidgetItem:
@@ -4956,12 +4985,14 @@ class PlaylistWindow(QMainWindow):
         bs_date_mode = str(state.get("bs_date_mode") or "days")
         from_date = QDate.fromString(str(state.get("bs_from_date") or ""), "yyyy-MM-dd")
         to_date = QDate.fromString(str(state.get("bs_to_date") or ""), "yyyy-MM-dd")
-        if to_date.isValid():
-            self._bs_to_date.setDate(to_date)
-        if from_date.isValid():
-            self._bs_from_date.setDate(from_date)
-        elif bs_date_mode == "days":
+        if bs_date_mode == "days":
+            # "Last N days" モードでは常に今日基準でピッカーを更新する
             self._sync_bs_dates_from_days()
+        else:
+            if to_date.isValid():
+                self._bs_to_date.setDate(to_date)
+            if from_date.isValid():
+                self._bs_from_date.setDate(from_date)
         self._bs_window_label.setChecked(bs_date_mode != "dates")
         self._bs_from_label.setChecked(bs_date_mode == "dates")
         self._apply_bs_date_mode_ui()
@@ -5027,8 +5058,20 @@ class PlaylistWindow(QMainWindow):
         self._snapshot_table.setStyleSheet(self._playlist_table_stylesheet())
         self._maps_table.setStyleSheet(self._playlist_table_stylesheet())
         self._apply_preview_meta_frame_theme()
+        # アクティブなテーブルを更新
         if self._all_entries:
             self._refresh_table(self._filtered)
+        # 非アクティブなテーブルも行色を更新する
+        if self._table is self._snapshot_table and self._maps_filtered:
+            saved_table = self._table
+            self._table = self._maps_table
+            self._refresh_table(self._maps_filtered)
+            self._table = saved_table
+        elif self._table is self._maps_table and self._snapshot_filtered:
+            saved_table = self._table
+            self._table = self._snapshot_table
+            self._refresh_table(self._snapshot_filtered)
+            self._table = saved_table
 
     def can_reuse_filter_preset_source(self, source: str) -> bool:
         source_key = str(source or "").strip().lower()
@@ -7231,6 +7274,9 @@ class PlaylistWindow(QMainWindow):
         table.setItem(row, _COL_STATUS, status_item)
 
         song_item = QTableWidgetItem(e.song_name)
+        marker_color = _beatsaver_song_marker_color(e)
+        if marker_color is not None:
+            song_item.setData(Qt.ItemDataRole.UserRole + 101, marker_color)
         song_item.setData(Qt.ItemDataRole.UserRole, e)
         table.setItem(row, _COL_SONG, song_item)
 
