@@ -142,6 +142,8 @@ def _meta_from_map_payload(payload: dict, fallback_hash: str = "", fallback_key:
         "song_name": str(metadata.get("songName") or payload.get("name") or ""),
         "song_author": str(metadata.get("songAuthorName") or ""),
         "mapper": str(metadata.get("levelAuthorName") or (payload.get("uploader") or {}).get("name") or ""),
+        "beatsaver_curated": bool(payload.get("curatedAt")),
+        "beatsaver_verified_mapper": bool((payload.get("uploader") or {}).get("verifiedMapper")),
     }
 
 
@@ -171,6 +173,9 @@ def _seed_meta_from_hash_and_key(song_hash: object, beatsaver_key: object) -> Op
 
 def _has_full_beatsaver_meta(entry: Optional[dict]) -> bool:
     if not isinstance(entry, dict):
+        return False
+    # "beatsaver_curated" キーが存在しない場合は旧フォーマットのキャッシュ → 再取得が必要
+    if "beatsaver_curated" not in entry:
         return False
     return bool(
         str(entry.get("beatsaver_cover_url") or "").strip()
