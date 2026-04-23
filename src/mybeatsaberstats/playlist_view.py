@@ -1415,6 +1415,120 @@ def _build_bl_leaderboard_hash_index(bl_scores: Dict[str, dict]) -> Dict[Tuple[s
     return idx
 
 
+def _load_cached_player_score_dicts(steam_id: Optional[str]) -> Tuple[Dict[str, dict], Dict[str, dict]]:
+    ss_scores_raw: Dict[str, dict] = {}
+    bl_scores_raw: Dict[str, dict] = {}
+    if not steam_id:
+        return ss_scores_raw, bl_scores_raw
+
+    ss_path = _CACHE_DIR / f"scoresaber_player_scores_{steam_id}.json"
+    if ss_path.exists():
+        try:
+            ss_data = json.loads(ss_path.read_text(encoding="utf-8"))
+            ss_scores_raw = ss_data.get("scores", {})
+        except Exception:
+            ss_scores_raw = {}
+
+    bl_path = _CACHE_DIR / f"beatleader_player_scores_{steam_id}.json"
+    if bl_path.exists():
+        try:
+            bl_data = json.loads(bl_path.read_text(encoding="utf-8"))
+            bl_scores_raw = bl_data.get("scores", {})
+        except Exception:
+            bl_scores_raw = {}
+
+    return ss_scores_raw, bl_scores_raw
+
+
+def _refresh_entries_from_cached_player_scores(entries: List[MapEntry], steam_id: Optional[str]) -> set[str]:
+    if not entries or not steam_id:
+        return set()
+
+    ss_scores_raw, bl_scores_raw = _load_cached_player_score_dicts(steam_id)
+    if not ss_scores_raw and not bl_scores_raw:
+        return set()
+
+    ss_score_idx = _build_ss_score_hash_index(ss_scores_raw) if ss_scores_raw else {}
+    bl_score_idx = _build_bl_score_hash_index(bl_scores_raw) if bl_scores_raw else {}
+    bl_replay_idx = _build_bl_replay_hash_index(bl_scores_raw) if bl_scores_raw else {}
+    bl_leaderboard_idx = _build_bl_leaderboard_hash_index(bl_scores_raw) if bl_scores_raw else {}
+    bl_ranked_idx = _build_bl_hash_index(load_bl_maps())
+    changed_hashes: set[str] = set()
+
+    for entry in entries:
+        song_hash = (entry.song_hash or "").upper()
+        if not song_hash or not entry.difficulty:
+            continue
+
+        key = (song_hash, entry.mode or "Standard", entry.difficulty)
+        ss_match = ss_score_idx.get(key)
+        bl_match = bl_score_idx.get(key)
+        bl_ranked_entry = bl_ranked_idx.get(key)
+
+        best_match: Optional[Tuple[float, bool, bool, float, int, str, int]] = None
+        new_score_source = entry.score_source
+        if entry.source == "scoresaber":
+            best_match = ss_match
+            new_score_source = "SS" if ss_match else ""
+        elif entry.source == "beatleader":
+            best_match = bl_match
+            new_score_source = "BL" if bl_match else ""
+        else:
+            if ss_match and bl_match:
+                ss_priority = (2 if ss_match[1] else 1 if ss_match[2] else 0, ss_match[3])
+                bl_priority = (2 if bl_match[1] else 1 if bl_match[2] else 0, bl_match[3])
+                best_match = ss_match if ss_priority >= bl_priority else bl_match
+                new_score_source = "SS" if best_match is ss_match else "BL"
+            elif ss_match:
+                best_match = ss_match
+                new_score_source = "SS"
+            elif bl_match:
+                best_match = bl_match
+                new_score_source = "BL"
+            else:
+                new_score_source = ""
+
+        new_played_at_ts = best_match[6] if best_match is not None else 0
+        new_bl_leaderboard_id = bl_leaderboard_idx.get(key) or (bl_ranked_entry.leaderboard_id if bl_ranked_entry else "")
+        new_bl_page_url = f"https://beatleader.com/leaderboard/global/{new_bl_leaderboard_id}" if new_bl_leaderboard_id else ""
+        new_bl_replay_url = bl_replay_idx.get(key, "")
+        new_bl_attempts = bl_ranked_entry.beatleader_attempts if bl_ranked_entry else entry.beatleader_attempts
+        new_bl_plays = bl_ranked_entry.beatleader_plays if bl_ranked_entry else entry.beatleader_plays
+
+        old_state = (
+            entry.played_at_ts,
+            entry.score_source,
+            entry.leaderboard_id,
+            entry.beatleader_page_url,
+            entry.beatleader_replay_url,
+            entry.beatleader_attempts,
+            entry.beatleader_plays,
+        )
+
+        entry.played_at_ts = new_played_at_ts
+        entry.score_source = new_score_source
+        if entry.source != "scoresaber":
+            entry.leaderboard_id = new_bl_leaderboard_id
+        entry.beatleader_page_url = new_bl_page_url
+        entry.beatleader_replay_url = new_bl_replay_url
+        entry.beatleader_attempts = new_bl_attempts
+        entry.beatleader_plays = new_bl_plays
+
+        new_state = (
+            entry.played_at_ts,
+            entry.score_source,
+            entry.leaderboard_id,
+            entry.beatleader_page_url,
+            entry.beatleader_replay_url,
+            entry.beatleader_attempts,
+            entry.beatleader_plays,
+        )
+        if new_state != old_state:
+            changed_hashes.add(song_hash)
+
+    return changed_hashes
+
+
 def _fetch_bl_leaderboards_by_hash(session: requests.Session, song_hash: str) -> Dict[Tuple[str, str], str]:
     if not song_hash:
         return {}
@@ -5927,7 +6041,10 @@ class PlaylistWindow(QMainWindow):
         else:
             self._snapshot_loaded_steam_id = self._steam_id
             self._snapshot_loaded_source_key = self._pending_load_source_key
+            self._invalidate_bl_preview_link_indices()
         self._sync_active_table_state()
+        if not self._pending_load_maps_tab:
+            self._refresh_maps_entries_from_player_caches()
         if not entries:
             self._count_label.setText("0 maps")
             self._save_window_state()
@@ -6071,6 +6188,19 @@ class PlaylistWindow(QMainWindow):
             self._bl_preview_replay_index = replay_index
             self._bl_preview_leaderboard_index = leaderboard_index
         return self._bl_preview_replay_index, self._bl_preview_leaderboard_index
+
+    def _invalidate_bl_preview_link_indices(self) -> None:
+        self._bl_preview_replay_index = None
+        self._bl_preview_leaderboard_index = None
+
+    def _refresh_maps_entries_from_player_caches(self) -> None:
+        changed_hashes = _refresh_entries_from_cached_player_scores(self._maps_all_entries, self._steam_id)
+        if not changed_hashes:
+            return
+        self._refresh_rows_for_hashes(changed_hashes)
+        selected_entry = self._selected_entry()
+        if selected_entry is not None and (selected_entry.song_hash or "").upper() in changed_hashes:
+            self._update_preview_from_selection()
 
     def _update_preview_title_label(self) -> None:
         available_width = self._preview_title_widget.width()
@@ -7215,6 +7345,22 @@ class PlaylistWindow(QMainWindow):
                     delete_item.setToolTip("Installed" if delete_sort_val > 0 else "Not installed")
                     table.setItem(row, _COL_DELETE, delete_item)
                     table.setCellWidget(row, _COL_DELETE, self._make_delete_button(entry))
+                played_at_item = _played_at_item(entry.played_at_ts)
+                played_at_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+                table.setItem(row, _COL_PLAY_TIME, played_at_item)
+                has_bl_stats_source = bool(entry.leaderboard_id and entry.source in ("beatleader", "beatsaver"))
+                bl_plays_item = _NumItem(
+                    str(entry.beatleader_plays) if has_bl_stats_source else "-",
+                    float(entry.beatleader_plays if has_bl_stats_source else -1.0),
+                )
+                bl_plays_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                table.setItem(row, _COL_BL_PLAYS, bl_plays_item)
+                bl_attempts_item = _NumItem(
+                    str(entry.beatleader_attempts) if has_bl_stats_source else "-",
+                    float(entry.beatleader_attempts if has_bl_stats_source else -1.0),
+                )
+                bl_attempts_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                table.setItem(row, _COL_BL_ATTEMPTS, bl_attempts_item)
 
     def _hydrate_visible_row_widgets(self, table: Optional[QTableWidget] = None) -> None:
         target_table = self._table if table is None else table
