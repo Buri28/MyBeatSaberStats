@@ -377,7 +377,7 @@ def load_beatsaver_maps(
                     beatleader_global1_replay_url="",
                     beatleader_local1_replay_url="",
                     beatleader_attempts=bl_entry.beatleader_attempts if bl_entry else 0,
-                    beatleader_plays=bl_entry.beatleader_plays if bl_entry else 0,
+                    beatleader_replays_watched=bl_entry.beatleader_replays_watched if bl_entry else 0,
                 ))
         if page + 1 >= pages:
             break

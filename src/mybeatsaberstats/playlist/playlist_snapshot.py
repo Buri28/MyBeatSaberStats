@@ -320,7 +320,7 @@ def load_bl_maps(steam_id: Optional[str] = None) -> List[MapEntry]:
             beatleader_page_url=f"https://beatleader.com/leaderboard/global/{map_id}" if map_id else "",
             beatleader_replay_url=replay_url,
             beatleader_attempts=int(m.get("attempts") or 0),
-            beatleader_plays=int(m.get("plays") or 0),
+            beatleader_replays_watched=int((bl_scores.get(str(map_id)) or {}).get("replaysWatched") or 0),
         ))
 
     _MAP_ENTRIES_CACHE[cache_key] = _clone_entries(entries)
@@ -471,6 +471,16 @@ def _refresh_entries_from_cached_player_scores(entries: List[MapEntry], steam_id
     bl_replay_idx = _build_bl_replay_hash_index(bl_scores_raw) if bl_scores_raw else {}
     bl_leaderboard_idx = _build_bl_leaderboard_hash_index(bl_scores_raw) if bl_scores_raw else {}
     bl_ranked_idx = _build_bl_hash_index(load_bl_maps())
+    bl_watched_idx: Dict[Tuple[str, str, str], int] = {}
+    for _mid, sc_entry in bl_scores_raw.items():
+        _lb = sc_entry.get("leaderboard") or {}
+        _song = _lb.get("song") or {}
+        _diff = _lb.get("difficulty") or {}
+        _h = (_song.get("hash") or "").upper()
+        if _h:
+            _dn = _diff.get("difficultyName") or "ExpertPlus"
+            _mo = _diff.get("modeName") or "Standard"
+            bl_watched_idx[(_h, _mo, _dn)] = int(sc_entry.get("replaysWatched") or 0)
     changed_hashes: set[str] = set()
 
     for entry in entries:
@@ -511,7 +521,7 @@ def _refresh_entries_from_cached_player_scores(entries: List[MapEntry], steam_id
         new_bl_page_url = f"https://beatleader.com/leaderboard/global/{new_bl_leaderboard_id}" if new_bl_leaderboard_id else ""
         new_bl_replay_url = bl_replay_idx.get(key, "")
         new_bl_attempts = bl_ranked_entry.beatleader_attempts if bl_ranked_entry else entry.beatleader_attempts
-        new_bl_plays = bl_ranked_entry.beatleader_plays if bl_ranked_entry else entry.beatleader_plays
+        new_bl_replays_watched = bl_watched_idx.get(key, entry.beatleader_replays_watched)
 
         old_state = (
             entry.played_at_ts,
@@ -520,7 +530,7 @@ def _refresh_entries_from_cached_player_scores(entries: List[MapEntry], steam_id
             entry.beatleader_page_url,
             entry.beatleader_replay_url,
             entry.beatleader_attempts,
-            entry.beatleader_plays,
+            entry.beatleader_replays_watched,
         )
 
         entry.played_at_ts = new_played_at_ts
@@ -530,7 +540,7 @@ def _refresh_entries_from_cached_player_scores(entries: List[MapEntry], steam_id
         entry.beatleader_page_url = new_bl_page_url
         entry.beatleader_replay_url = new_bl_replay_url
         entry.beatleader_attempts = new_bl_attempts
-        entry.beatleader_plays = new_bl_plays
+        entry.beatleader_replays_watched = new_bl_replays_watched
 
         new_state = (
             entry.played_at_ts,
@@ -539,7 +549,7 @@ def _refresh_entries_from_cached_player_scores(entries: List[MapEntry], steam_id
             entry.beatleader_page_url,
             entry.beatleader_replay_url,
             entry.beatleader_attempts,
-            entry.beatleader_plays,
+            entry.beatleader_replays_watched,
         )
         if new_state != old_state:
             changed_hashes.add(song_hash)
@@ -564,7 +574,7 @@ def _apply_entry_snapshot_service_field(entry: MapEntry, service_entry: MapEntry
         entry.bl_played_at_ts = service_entry.played_at_ts
         entry.bl_leaderboard_id = service_entry.leaderboard_id
         entry.beatleader_attempts = service_entry.beatleader_attempts
-        entry.beatleader_plays = service_entry.beatleader_plays
+        entry.beatleader_replays_watched = service_entry.beatleader_replays_watched
         if service_entry.beatleader_page_url:
             entry.beatleader_page_url = service_entry.beatleader_page_url
         if service_entry.beatleader_replay_url:
