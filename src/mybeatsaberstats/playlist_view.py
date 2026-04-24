@@ -1333,7 +1333,7 @@ def _sort_dir_from_mode(sort_mode: str) -> str:
         "rl_ap_high", "rl_acc_high", "rl_rank_high", "rl_complexity_desc", "rl_cat_desc", "rl_played_desc",
         "pp_high", "ap_high", "acc_high", "rank_high", "star_desc", "fc_desc", "duration_desc",
         "bl_watched_desc",
-        "bl_maps_watched_desc",
+        "bl_maps_watched_desc", "bl_maps_played_desc",
         "status_desc", "song_desc", "date_desc", "playtime_desc", "diff_desc", "mode_desc", "cat_desc",
         "mapper_desc", "author_desc",
     ) else "asc"
@@ -2125,6 +2125,7 @@ class _BatchConfig:
             "date_desc": "Date↓", "date_asc": "Date↑",
             "duration_desc": "Len↓", "duration_asc": "Len↑",
             "bl_watched_desc": "BLWatched↓", "bl_watched_asc": "BLWatched↑",
+            "bl_maps_played_desc": "BLPlayed↓", "bl_maps_played_asc": "BLPlayed↑",
             "bl_maps_watched_desc": "BLWatched↓", "bl_maps_watched_asc": "BLWatched↑",
             "diff_desc": "Diff↓", "diff_asc": "Diff↑",
             "mode_desc": "Mode↓", "mode_asc": "Mode↑",
@@ -2339,6 +2340,10 @@ def _sort_entries(entries: List[MapEntry], sort_mode: str) -> List[MapEntry]:
         result.sort(key=lambda e: (-e.beatleader_replays_watched, e.song_name.lower()))
     elif sort_mode == "bl_watched_asc":
         result.sort(key=lambda e: (e.beatleader_replays_watched, e.song_name.lower()))
+    elif sort_mode == "bl_maps_played_desc":
+        result.sort(key=lambda e: (0 if e.bl_played_at_ts > 0 else 1, -e.bl_played_at_ts if e.bl_played_at_ts > 0 else 0, e.song_name.lower()))
+    elif sort_mode == "bl_maps_played_asc":
+        result.sort(key=lambda e: (0 if e.bl_played_at_ts > 0 else 1, e.bl_played_at_ts if e.bl_played_at_ts > 0 else 0, e.song_name.lower()))
     elif sort_mode == "bl_maps_watched_desc":
         result.sort(key=lambda e: (-e.beatleader_replays_watched, e.song_name.lower()))
     elif sort_mode == "bl_maps_watched_asc":
@@ -2495,6 +2500,7 @@ def _config_export_tag(cfg: "_BatchConfig") -> str:
         "date_desc": "DateDesc", "date_asc": "DateAsc",
         "duration_desc": "DurationDesc", "duration_asc": "DurationAsc",
         "bl_watched_desc": "BLWatchedDesc", "bl_watched_asc": "BLWatchedAsc",
+        "bl_maps_played_desc": "BLMapsPlayedDesc", "bl_maps_played_asc": "BLMapsPlayedAsc",
         "bl_maps_watched_desc": "BLMapsWatchedDesc", "bl_maps_watched_asc": "BLMapsWatchedAsc",
         "playtime_desc": "PlayedDesc", "playtime_asc": "PlayedAsc",
         "pp_high": "PPDesc", "pp_low": "PPAsc",
@@ -2564,6 +2570,8 @@ _SORT_SYMBOL: Dict[str, str] = {
     "duration_asc":  "Len↑",
     "bl_watched_desc": "BLWatched↓",
     "bl_watched_asc":  "BLWatched↑",
+    "bl_maps_played_desc": "BLPlayed↓",
+    "bl_maps_played_asc":  "BLPlayed↑",
     "bl_maps_watched_desc": "BLWatched↓",
     "bl_maps_watched_asc":  "BLWatched↑",
     "playtime_desc": "Played↓",
@@ -2639,6 +2647,8 @@ def _sort_indicator_from_mode(sort_mode: str) -> Tuple[int, Qt.SortOrder]:
         "bl_pp_low": (_COL_BL_PP, Qt.SortOrder.AscendingOrder),
         "bl_watched_desc": (_COL_BL_WATCHED, Qt.SortOrder.DescendingOrder),
         "bl_watched_asc": (_COL_BL_WATCHED, Qt.SortOrder.AscendingOrder),
+        "bl_maps_played_desc": (_COL_BL_MAPS_PLAYED, Qt.SortOrder.DescendingOrder),
+        "bl_maps_played_asc": (_COL_BL_MAPS_PLAYED, Qt.SortOrder.AscendingOrder),
         "bl_maps_watched_desc": (_COL_BL_MAPS_WATCHED, Qt.SortOrder.DescendingOrder),
         "bl_maps_watched_asc": (_COL_BL_MAPS_WATCHED, Qt.SortOrder.AscendingOrder),
         "bl_attempts_desc": (_COL_BL_WATCHED, Qt.SortOrder.DescendingOrder),
@@ -2925,8 +2935,9 @@ _COL_FC = 35
 _COL_MOD = 36
 _COL_MAPPER = 37
 _COL_AUTHOR = 38
-_COL_BL_MAPS_WATCHED = 39
-_COL_COUNT = 40
+_COL_BL_MAPS_PLAYED = 39
+_COL_BL_MAPS_WATCHED = 40
+_COL_COUNT = 41
 
 _COL_LABELS = [
     "Status", "Cover", "Song", "DL", "Del", "Date", "Length", "Diff", "Mode",
@@ -2934,7 +2945,7 @@ _COL_LABELS = [
     "Played", "Rank", "★", "Acc %", "PP", "Watched",
     "Played", "Category", "Cmplx", "Acc %", "AP", "Rank",
     "Played", "Category", "Cmplx", "Acc %", "AP", "Rank",
-    "Rate %", "⇧", "⇩", "FC", "Mods", "Mapper", "Author", "Watched",
+    "Rate %", "⇧", "⇩", "FC", "Mods", "Mapper", "Author", "Played", "Watched",
 ]
 
 
@@ -4003,6 +4014,7 @@ class PlaylistWindow(QMainWindow):
         table.setColumnWidth(_COL_AUTHOR, 140)
         table.setColumnWidth(_COL_MAPPER, 120)
         table.setColumnWidth(_COL_BL_WATCHED, 78)
+        table.setColumnWidth(_COL_BL_MAPS_PLAYED, 110)
         table.setColumnWidth(_COL_BL_MAPS_WATCHED, 78)
         table.setItemDelegateForColumn(_COL_DIFF, self._transparent_selection_delegate)
         table.itemSelectionChanged.connect(self._update_selection_status)
@@ -4998,7 +5010,12 @@ class PlaylistWindow(QMainWindow):
         for col in (_COL_BS_RATE, _COL_BS_UPVOTES, _COL_BS_DOWNVOTES):
             self._table.setColumnHidden(col, not is_bs)
         is_maps = self._is_maps_tab()
+        self._table.setColumnHidden(_COL_BL_MAPS_PLAYED, not is_maps)
         self._table.setColumnHidden(_COL_BL_MAPS_WATCHED, not is_maps)
+        self._table.setColumnHidden(_COL_FC, is_maps)
+        self._table.setColumnHidden(_COL_MOD, is_maps)
+        if is_maps:
+            self._table.setColumnHidden(_COL_BL_PLAYED, True)
         self._table.setColumnHidden(_COL_COVER, not show_cover)
         self._table.setColumnHidden(_COL_ONECLICK, not is_bs)
         self._table.setColumnHidden(_COL_DELETE, not is_bs)
@@ -5042,7 +5059,7 @@ class PlaylistWindow(QMainWindow):
         for col, text in [
             (_COL_BL_PLAYED, "Played"), (_COL_BL_RANK, "Rank"), (_COL_BL_STARS, "★"), (_COL_BL_ACC, "Acc %"), (_COL_BL_PP, "PP"),
             (_COL_BL_WATCHED, "Watched"),
-            (_COL_BL_MAPS_WATCHED, "Watched"),
+            (_COL_BL_MAPS_PLAYED, "Played"), (_COL_BL_MAPS_WATCHED, "Watched"),
         ]:
             self._set_table_header_item(col, text, bl_icon)
         for col, text in [
@@ -5089,6 +5106,8 @@ class PlaylistWindow(QMainWindow):
             return "bl_pp_high" if is_desc else "bl_pp_low"
         if col == _COL_BL_WATCHED:
             return "bl_watched_desc" if is_desc else "bl_watched_asc"
+        if col == _COL_BL_MAPS_PLAYED:
+            return "bl_maps_played_desc" if is_desc else "bl_maps_played_asc"
         if col == _COL_BL_MAPS_WATCHED:
             return "bl_maps_watched_desc" if is_desc else "bl_maps_watched_asc"
         if col == _COL_ACC_PLAYED:
@@ -5181,6 +5200,7 @@ class PlaylistWindow(QMainWindow):
             "date_desc": "date_desc", "date_asc": "date_asc",
             "duration_desc": "duration_desc", "duration_asc": "duration_asc",
             "bl_watched_desc": "bl_watched_desc", "bl_watched_asc": "bl_watched_asc",
+            "bl_maps_played_desc": "bl_maps_played_desc", "bl_maps_played_asc": "bl_maps_played_asc",
             "bl_maps_watched_desc": "bl_maps_watched_desc", "bl_maps_watched_asc": "bl_maps_watched_asc",
             "playtime_desc": "playtime_desc", "playtime_asc": "playtime_asc",
             "pp_high": "pp_desc", "pp_low": "pp_asc",
@@ -5715,6 +5735,23 @@ class PlaylistWindow(QMainWindow):
         if self._bl_preview_replay_index is None or self._bl_preview_leaderboard_index is None:
             replay_index: Dict[Tuple[str, str, str], str] = {}
             leaderboard_index: Dict[Tuple[str, str, str], str] = {}
+            # Build leaderboard index from ranked maps cache (covers unplayed songs too)
+            ranked_path = _CACHE_DIR / "beatleader_ranked_maps.json"
+            if ranked_path.exists():
+                try:
+                    raw = json.loads(ranked_path.read_text(encoding="utf-8"))
+                    for page in raw.get("pages", []):
+                        for m in (page.get("data", {}) or {}).get("data", []):
+                            diff = m.get("difficulty", {})
+                            song = m.get("song", {})
+                            map_id = str(m.get("id") or "")
+                            song_hash = (song.get("hash") or "").upper()
+                            if song_hash and map_id:
+                                diff_name = diff.get("difficultyName") or "ExpertPlus"
+                                mode_name = diff.get("modeName") or "Standard"
+                                leaderboard_index[(song_hash, mode_name, diff_name)] = map_id
+                except Exception:
+                    pass
             steam_id = self._steam_id
             if steam_id:
                 bp = _CACHE_DIR / f"beatleader_player_scores_{steam_id}.json"
@@ -5723,10 +5760,10 @@ class PlaylistWindow(QMainWindow):
                         bd = json.loads(bp.read_text(encoding="utf-8"))
                         bl_scores = bd.get("scores", {})
                         replay_index = _build_bl_replay_hash_index(bl_scores)
-                        leaderboard_index = _build_bl_leaderboard_hash_index(bl_scores)
+                        # Player scores override ranked maps (more accurate leaderboard IDs)
+                        leaderboard_index.update(_build_bl_leaderboard_hash_index(bl_scores))
                     except Exception:
                         replay_index = {}
-                        leaderboard_index = {}
             self._bl_preview_replay_index = replay_index
             self._bl_preview_leaderboard_index = leaderboard_index
         return self._bl_preview_replay_index, self._bl_preview_leaderboard_index
@@ -5810,8 +5847,14 @@ class PlaylistWindow(QMainWindow):
         self._preview_meta_text.setHtml(_preview_text_to_html("\n".join(details)))
         self._btn_preview_open.setEnabled(bool(entry.beatsaver_page_url))
         self._btn_preview_open.setProperty("url", entry.beatsaver_page_url)
-        self._btn_preview_bl.setEnabled(bool(entry.beatleader_page_url))
+        song_hash = (entry.song_hash or "").upper()
+        song_mode = entry.mode or "Standard"
+        song_diff = entry.difficulty or "ExpertPlus"
+        self._btn_preview_bl.setEnabled(bool(entry.beatleader_page_url or song_hash))
         self._btn_preview_bl.setProperty("url", entry.beatleader_page_url)
+        self._btn_preview_bl.setProperty("song_hash", song_hash)
+        self._btn_preview_bl.setProperty("song_mode", song_mode)
+        self._btn_preview_bl.setProperty("song_diff", song_diff)
         self._btn_preview_replay.setEnabled(bool(entry.beatleader_replay_url))
         self._btn_preview_replay.setProperty("url", entry.beatleader_replay_url)
         self._btn_preview_download.setEnabled(self._can_download_beatsaver_entry(entry))
@@ -5823,11 +5866,17 @@ class PlaylistWindow(QMainWindow):
             bl_leaderboard_id = entry.beatleader_page_url.rstrip("/").rsplit("/", 1)[-1]
         self._btn_preview_global1_replay.setProperty("leaderboard_id", bl_leaderboard_id)
         self._btn_preview_global1_replay.setProperty("countries", "")
+        self._btn_preview_global1_replay.setProperty("song_hash", song_hash)
+        self._btn_preview_global1_replay.setProperty("song_mode", song_mode)
+        self._btn_preview_global1_replay.setProperty("song_diff", song_diff)
         self._btn_preview_local1_replay.setProperty("leaderboard_id", bl_leaderboard_id)
         self._btn_preview_local1_replay.setProperty("countries", "JP")
-        self._btn_preview_global1_replay.setEnabled(bool(bl_leaderboard_id or entry.beatleader_global1_replay_url))
+        self._btn_preview_local1_replay.setProperty("song_hash", song_hash)
+        self._btn_preview_local1_replay.setProperty("song_mode", song_mode)
+        self._btn_preview_local1_replay.setProperty("song_diff", song_diff)
+        self._btn_preview_global1_replay.setEnabled(bool(bl_leaderboard_id or entry.beatleader_global1_replay_url or song_hash))
         self._btn_preview_global1_replay.setProperty("url", entry.beatleader_global1_replay_url)
-        self._btn_preview_local1_replay.setEnabled(bool(bl_leaderboard_id or entry.beatleader_local1_replay_url))
+        self._btn_preview_local1_replay.setEnabled(bool(bl_leaderboard_id or entry.beatleader_local1_replay_url or song_hash))
         self._btn_preview_local1_replay.setProperty("url", entry.beatleader_local1_replay_url)
 
         cover_url = entry.beatsaver_cover_url
@@ -5992,9 +6041,33 @@ class PlaylistWindow(QMainWindow):
     def _open_selected_preview_url(self) -> None:
         sender = self.sender()
         url = str(sender.property("url") if sender is not None else self._btn_preview_open.property("url") or "")
+        if not url and sender is self._btn_preview_bl:
+            h = str(sender.property("song_hash") or "")
+            m = str(sender.property("song_mode") or "Standard")
+            d = str(sender.property("song_diff") or "ExpertPlus")
+            if h:
+                lb_map = _fetch_bl_leaderboards_by_hash(self._bl_api_session, h)
+                lb_id = lb_map.get((m, d), "")
+                if lb_id:
+                    url = f"https://beatleader.com/leaderboard/global/{lb_id}"
+                    sender.setProperty("url", url)
+                    entry = self._selected_entry()
+                    if entry is not None:
+                        entry.beatleader_page_url = url
+                        if not entry.leaderboard_id:
+                            entry.leaderboard_id = lb_id
         if not url and sender in (self._btn_preview_global1_replay, self._btn_preview_local1_replay):
             leaderboard_id = str(sender.property("leaderboard_id") or "")
             countries = str(sender.property("countries") or "")
+            if not leaderboard_id:
+                h = str(sender.property("song_hash") or "")
+                m = str(sender.property("song_mode") or "Standard")
+                d = str(sender.property("song_diff") or "ExpertPlus")
+                if h:
+                    lb_map = _fetch_bl_leaderboards_by_hash(self._bl_api_session, h)
+                    leaderboard_id = lb_map.get((m, d), "")
+                    if leaderboard_id:
+                        sender.setProperty("leaderboard_id", leaderboard_id)
             if leaderboard_id:
                 url = self._resolve_bl_top_replay_url(leaderboard_id, countries)
                 sender.setProperty("url", url)
@@ -7176,6 +7249,7 @@ class PlaylistWindow(QMainWindow):
             float(e.beatleader_replays_watched if has_bl_stats_source else -1.0),
         )
         bl_maps_watched_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        table.setItem(row, _COL_BL_MAPS_PLAYED, _played_at_item(e.bl_played_at_ts))
         table.setItem(row, _COL_BL_MAPS_WATCHED, bl_maps_watched_item)
 
         fc_item = _NumItem("FC" if e.full_combo else "", 1.0 if e.full_combo else 0.0)
