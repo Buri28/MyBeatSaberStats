@@ -1051,726 +1051,104 @@ def _cache_missing_beatsaver_metadata(
 # データ読み込み
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _ss_player_score_info(scores: Dict, lb_id: str, max_score_from_map: int = 0
-                          ) -> Tuple[float, bool, bool, float, int, str]:
-    """SS player scores から (player_pp, cleared, nf_clear, acc, rank, mods) を返す。"""
-    entry = scores.get(str(lb_id))
-    if not entry:
-        return 0.0, False, False, 0.0, 0, ""
-    sc = entry.get("score", {})
-    player_pp = float(sc.get("pp") or 0)
-    base_score = int(sc.get("baseScore") or 0)
-    modifiers = (sc.get("modifiers") or "").upper()
-    # SS modifiers は "NFSC" のように連結されているので 2 文字ずつカンマ区切りに正規化
-    mods_str = ",".join(modifiers[i:i+2] for i in range(0, len(modifiers), 2)) if modifiers else ""
-    rank = int(sc.get("rank") or 0)
-    # 精度算出 (max_score が 0 の場合は 0%)
-    acc = (base_score / max_score_from_map * 100.0) if max_score_from_map > 0 and base_score > 0 else 0.0
-    has_nf = "NF" in modifiers
-    cleared = base_score > 0 and not has_nf
-    nf_clear = base_score > 0 and has_nf
-    return player_pp, cleared, nf_clear, acc, rank, mods_str
+def _snapshot_logic():
+    from .playlist import playlist_snapshot as module
+
+    return module
 
 
-def _bl_player_score_info(scores: Dict, map_id: str
-                          ) -> Tuple[float, bool, bool, float, int, str]:
-    """BL player scores から (player_pp, cleared, nf_clear, acc, rank, mods) を返す。"""
-    entry = scores.get(str(map_id))
-    if not entry:
-        return 0.0, False, False, 0.0, 0, ""
-    player_pp = float(entry.get("pp") or 0)
-    base_score = int(entry.get("baseScore") or 0)
-    modifiers = (entry.get("modifiers") or "").upper()
-    # BL modifiers は "NF,SC" 形式だが念のため正規化
-    mods_str = ",".join(m.strip() for m in modifiers.replace(",", " ").split() if m.strip()) if modifiers else ""
-    accuracy = float(entry.get("accuracy") or 0)
-    rank = int(entry.get("rank") or 0)
-    acc = accuracy * 100.0 if accuracy else 0.0
-    has_nf = "NF" in modifiers
-    cleared = base_score > 0 and not has_nf
-    nf_clear = base_score > 0 and has_nf
-    return player_pp, cleared, nf_clear, acc, rank, mods_str
+def _maps_logic():
+    from .playlist import playlist_maps as module
+
+    return module
+
+
+def _ss_player_score_info(scores: Dict, lb_id: str, max_score_from_map: int = 0) -> Tuple[float, bool, bool, float, int, str]:
+    return _snapshot_logic()._ss_player_score_info(scores, lb_id, max_score_from_map)
+
+
+def _bl_player_score_info(scores: Dict, map_id: str) -> Tuple[float, bool, bool, float, int, str]:
+    return _snapshot_logic()._bl_player_score_info(scores, map_id)
 
 
 def _ss_player_score_timeset(scores: Dict, lb_id: str) -> int:
-    entry = scores.get(str(lb_id)) or {}
-    sc = entry.get("score", {})
-    return _parse_iso_datetime_to_ts(sc.get("timeSet"))
+    return _snapshot_logic()._ss_player_score_timeset(scores, lb_id)
 
 
 def _bl_player_score_timeset(scores: Dict, map_id: str) -> int:
-    entry = scores.get(str(map_id)) or {}
-    return _parse_unix_datetime_to_ts(entry.get("timeset"))
-
-
-_MAP_ENTRIES_CACHE: Dict[Tuple[str, str, bool, Tuple[Tuple[str, bool, int, int], ...]], List[MapEntry]] = {}
+    return _snapshot_logic()._bl_player_score_timeset(scores, map_id)
 
 
 def _file_signature(*paths: Path) -> Tuple[Tuple[str, bool, int, int], ...]:
-    signature: List[Tuple[str, bool, int, int]] = []
-    for path in paths:
-        try:
-            stat = path.stat()
-            signature.append((str(path), True, stat.st_mtime_ns, stat.st_size))
-        except OSError:
-            signature.append((str(path), False, 0, 0))
-    return tuple(signature)
+    return _snapshot_logic()._file_signature(*paths)
 
 
 def _clone_entries(entries: List[MapEntry]) -> List[MapEntry]:
-    return [replace(entry) for entry in entries]
+    return _snapshot_logic()._clone_entries(entries)
 
 
 def load_ss_maps(steam_id: Optional[str] = None, filter_stars: bool = True) -> List[MapEntry]:
-    """ScoreSaber ランクマップをキャッシュから読み込む。
-
-    filter_stars=False にすると stars=0 のマップも返す（AccSaber 用）。
-    """
-    path = _CACHE_DIR / "scoresaber_ranked_maps.json"
-    if not path.exists():
-        return []
-    ss_player_path = _CACHE_DIR / f"scoresaber_player_scores_{steam_id}.json" if steam_id else Path()
-    bl_ranked_path = _CACHE_DIR / "beatleader_ranked_maps.json"
-    bl_player_path = _CACHE_DIR / f"beatleader_player_scores_{steam_id}.json" if steam_id else Path()
-    cache_key = (
-        "ss",
-        steam_id or "",
-        bool(filter_stars),
-        _file_signature(path, ss_player_path, bl_ranked_path, bl_player_path),
-    )
-    cached_entries = _MAP_ENTRIES_CACHE.get(cache_key)
-    if cached_entries is not None:
-        return _enrich_entries_with_beatsaver_cache(_clone_entries(cached_entries))
-
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return []
-
-    # トップレベル構造: {fetched_at: ..., leaderboards: {lb_id: {...}, ...}, ...}
-    if "leaderboards" in raw:
-        maps_dict: Dict[str, dict] = raw["leaderboards"]
-    else:
-        # 旧フォーマット互換: トップレベルに直接マップがある場合
-        maps_dict = {
-            k: v for k, v in raw.items()
-            if k not in ("fetched_at", "max_pages", "total_maps") and isinstance(v, dict)
-        }
-
-    # プレイヤースコアを読み込む
-    ss_scores: Dict[str, dict] = {}
-    if steam_id:
-        if ss_player_path.exists():
-            try:
-                sd = json.loads(ss_player_path.read_text(encoding="utf-8"))
-                ss_scores = sd.get("scores", {})
-            except Exception:
-                pass
-
-    # ScoreSaber キャッシュには譜面時間がないため BL キャッシュから補完する
-    bl_maps = load_bl_maps(steam_id)
-    bl_duration_index = {
-        (e.song_hash.upper(), e.mode, e.difficulty): e.duration_seconds
-        for e in bl_maps
-        if e.duration_seconds > 0
-    }
-    bl_link_index = {
-        (e.song_hash.upper(), e.mode, e.difficulty): e
-        for e in bl_maps
-        if e.leaderboard_id or e.beatleader_page_url or e.beatleader_replay_url
-    }
-
-    entries: List[MapEntry] = []
-    for lb_id_str, m in maps_dict.items():
-        stars = float(m.get("stars") or 0)
-        if filter_stars and stars <= 0:
-            continue
-
-        diff_info = m.get("difficulty", {})
-        diff_num = int(diff_info.get("difficulty") or 0)
-        diff_raw = diff_info.get("difficultyRaw") or ""
-        game_mode = diff_info.get("gameMode") or "SoloStandard"
-        max_score = int(m.get("maxScore") or 0)
-        song_hash = (m.get("songHash") or "").upper()
-        difficulty = _diff_from_raw(diff_raw, diff_num)
-        mode = _mode_from_gamemode(game_mode)
-        ranked_date_ts = _parse_iso_datetime_to_ts(m.get("rankedDate") or m.get("qualifiedDate"))
-        bl_link_entry = bl_link_index.get((song_hash, mode, difficulty))
-
-        player_pp, cleared, nf_clear, acc, rank, mods = _ss_player_score_info(
-            ss_scores, lb_id_str, max_score
-        )
-        played_at_ts = _ss_player_score_timeset(ss_scores, lb_id_str)
-        _fc = bool((ss_scores.get(str(lb_id_str)) or {}).get("score", {}).get("fullCombo"))
-
-        entries.append(MapEntry(
-            song_name=m.get("songName") or "",
-            song_author=m.get("songAuthorName") or "",
-            mapper=m.get("levelAuthorName") or "",
-            song_hash=song_hash,
-            difficulty=difficulty,
-            mode=mode,
-            stars=stars,
-            max_pp=float(m.get("maxPP") or 0),
-            player_pp=player_pp,
-            cleared=cleared,
-            nf_clear=nf_clear,
-            player_acc=acc,
-            player_rank=rank,
-            leaderboard_id=lb_id_str,
-            source="scoresaber",
-            player_mods=mods,
-            full_combo=_fc,
-            score_source="SS",
-            duration_seconds=bl_duration_index.get((song_hash, mode, difficulty), 0),
-            played_at_ts=played_at_ts,
-            source_date_ts=ranked_date_ts,
-            beatleader_page_url=bl_link_entry.beatleader_page_url if bl_link_entry else "",
-            beatleader_replay_url=bl_link_entry.beatleader_replay_url if bl_link_entry else "",
-        ))
-
-    _MAP_ENTRIES_CACHE[cache_key] = _clone_entries(entries)
-    return _enrich_entries_with_beatsaver_cache(entries)
+    return _snapshot_logic().load_ss_maps(steam_id, filter_stars)
 
 
 def load_bl_maps(steam_id: Optional[str] = None) -> List[MapEntry]:
-    """BeatLeader ランクマップをキャッシュから読み込む。"""
-    path = _CACHE_DIR / "beatleader_ranked_maps.json"
-    if not path.exists():
-        return []
-    bl_player_path = _CACHE_DIR / f"beatleader_player_scores_{steam_id}.json" if steam_id else Path()
-    cache_key = (
-        "bl",
-        steam_id or "",
-        True,
-        _file_signature(path, bl_player_path),
-    )
-    cached_entries = _MAP_ENTRIES_CACHE.get(cache_key)
-    if cached_entries is not None:
-        return _enrich_entries_with_beatsaver_cache(_clone_entries(cached_entries))
-
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return []
-
-    all_maps: List[dict] = []
-    for page in raw.get("pages", []):
-        page_data = page.get("data", {})
-        if isinstance(page_data, dict):
-            inner = page_data.get("data", [])
-            if isinstance(inner, list):
-                all_maps.extend(inner)
-
-    # プレイヤースコアを読み込む
-    bl_scores: Dict[str, dict] = {}
-    if steam_id:
-        if bl_player_path.exists():
-            try:
-                bd = json.loads(bl_player_path.read_text(encoding="utf-8"))
-                bl_scores = bd.get("scores", {})
-            except Exception:
-                pass
-
-    entries: List[MapEntry] = []
-    bl_replay_idx = _build_bl_replay_hash_index(bl_scores) if bl_scores else {}
-    for m in all_maps:
-        diff = m.get("difficulty", {})
-        song = m.get("song", {})
-        map_id = str(m.get("id") or "")
-        stars = float(diff.get("stars") or 0)
-        ranked_date_ts = int(diff.get("rankedTime") or diff.get("qualifiedTime") or diff.get("nominatedTime") or 0)
-        diff_name = diff.get("difficultyName") or "ExpertPlus"
-        mode_name = diff.get("modeName") or "Standard"
-        song_hash = (song.get("hash") or "").upper()
-        replay_url = bl_replay_idx.get((song_hash, mode_name, diff_name), "")
-
-        player_pp, cleared, nf_clear, acc, rank, mods = _bl_player_score_info(bl_scores, map_id)
-        played_at_ts = _bl_player_score_timeset(bl_scores, map_id)
-        _fc = bool((bl_scores.get(str(map_id)) or {}).get("fullCombo"))
-
-        entries.append(MapEntry(
-            song_name=song.get("name") or "",
-            song_author=song.get("author") or "",
-            mapper=song.get("mapper") or "",
-            song_hash=song_hash,
-            difficulty=diff_name,
-            mode=mode_name,
-            stars=stars,
-            max_pp=0.0,
-            player_pp=player_pp,
-            cleared=cleared,
-            nf_clear=nf_clear,
-            player_acc=acc,
-            player_rank=rank,
-            leaderboard_id=map_id,
-            source="beatleader",
-            player_mods=mods,
-            full_combo=_fc,
-            score_source="BL",
-            duration_seconds=_normalize_duration_seconds(song.get("duration")),
-            played_at_ts=played_at_ts,
-            source_date_ts=ranked_date_ts,
-            beatleader_page_url=f"https://beatleader.com/leaderboard/global/{map_id}" if map_id else "",
-            beatleader_replay_url=replay_url,
-            beatleader_attempts=int(m.get("attempts") or 0),
-            beatleader_plays=int(m.get("plays") or 0),
-        ))
-
-    _MAP_ENTRIES_CACHE[cache_key] = _clone_entries(entries)
-    return _enrich_entries_with_beatsaver_cache(entries)
+    return _snapshot_logic().load_bl_maps(steam_id)
 
 
-def _build_ss_score_hash_index(
-    ss_scores: Dict[str, dict],
-) -> Dict[Tuple[str, str, str], Tuple[float, bool, bool, float, int, str, int]]:
-    """SS player scores キャッシュから (hash, mode, diff) → (pp, cleared, nf_clear, acc, rank, mods, played_at_ts) を構築。
-
-    SS ranked maps に含まれない Easy 等のマップもカバーするため AccSaber 用途で使用。
-    """
-    idx: Dict[Tuple[str, str, str], Tuple[float, bool, bool, float, int, str, int]] = {}
-    for lb_id_str, entry in ss_scores.items():
-        lb = entry.get("leaderboard", {})
-        song_hash = (lb.get("songHash") or "").upper()
-        if not song_hash:
-            continue
-        diff_info = lb.get("difficulty", {})
-        diff_raw = diff_info.get("difficultyRaw") or ""
-        diff_num = int(diff_info.get("difficulty") or 0)
-        game_mode = diff_info.get("gameMode") or "SoloStandard"
-        diff_name = _diff_from_raw(diff_raw, diff_num)
-        mode = _mode_from_gamemode(game_mode)
-        max_score = int(lb.get("maxScore") or 0)
-        pp, cleared, nf_clear, acc, rank, mods = _ss_player_score_info(ss_scores, lb_id_str, max_score)
-        played_at_ts = _ss_player_score_timeset(ss_scores, lb_id_str)
-        key = (song_hash, mode, diff_name)
-        # クリア済み優先、同キーに複数スコアがあれば最高 pp を保持
-        if key not in idx or (cleared and not idx[key][1]) or pp > idx[key][0]:
-            idx[key] = (pp, cleared, nf_clear, acc, rank, mods, played_at_ts)
-    return idx
+def _build_ss_score_hash_index(ss_scores: Dict[str, dict]) -> Dict[Tuple[str, str, str], Tuple[float, bool, bool, float, int, str, int]]:
+    return _snapshot_logic()._build_ss_score_hash_index(ss_scores)
 
 
 def _build_ss_hash_index(entries: List[MapEntry]) -> Dict[Tuple[str, str, str], MapEntry]:
-    """hash+mode+diff → MapEntry のインデックスを構築。"""
-    idx: Dict[Tuple[str, str, str], MapEntry] = {}
-    for e in entries:
-        key = (e.song_hash.upper(), e.mode, e.difficulty)
-        idx[key] = e
-    return idx
+    return _snapshot_logic()._build_ss_hash_index(entries)
 
 
 def _build_bl_hash_index(entries: List[MapEntry]) -> Dict[Tuple[str, str, str], MapEntry]:
-    return _build_ss_hash_index(entries)
+    return _snapshot_logic()._build_bl_hash_index(entries)
 
 
-def _build_bl_score_hash_index(
-    bl_scores: Dict[str, dict],
-) -> Dict[Tuple[str, str, str], Tuple[float, bool, bool, float, int, str, int]]:
-    """BL player scores キャッシュから (hash, mode, diff) のインデックスを構築する。"""
-    idx: Dict[Tuple[str, str, str], Tuple[float, bool, bool, float, int, str, int]] = {}
-    for map_id, entry in bl_scores.items():
-        lb = entry.get("leaderboard") or {}
-        song = lb.get("song") or {}
-        diff = lb.get("difficulty") or {}
-        song_hash = (song.get("hash") or "").upper()
-        if not song_hash:
-            continue
-        diff_name = diff.get("difficultyName") or "ExpertPlus"
-        mode = diff.get("modeName") or "Standard"
-        pp, cleared, nf_clear, acc, rank, mods = _bl_player_score_info(bl_scores, str(map_id))
-        played_at_ts = _bl_player_score_timeset(bl_scores, str(map_id))
-        key = (song_hash, mode, diff_name)
-        if key not in idx or (cleared and not idx[key][1]) or pp > idx[key][0]:
-            idx[key] = (pp, cleared, nf_clear, acc, rank, mods, played_at_ts)
-    return idx
+def _build_bl_score_hash_index(bl_scores: Dict[str, dict]) -> Dict[Tuple[str, str, str], Tuple[float, bool, bool, float, int, str, int]]:
+    return _snapshot_logic()._build_bl_score_hash_index(bl_scores)
 
 
 def _build_bl_replay_hash_index(bl_scores: Dict[str, dict]) -> Dict[Tuple[str, str, str], str]:
-    idx: Dict[Tuple[str, str, str], str] = {}
-    best_meta: Dict[Tuple[str, str, str], Tuple[bool, float, int]] = {}
-    for map_id, entry in bl_scores.items():
-        lb = entry.get("leaderboard") or {}
-        song = lb.get("song") or {}
-        diff = lb.get("difficulty") or {}
-        song_hash = (song.get("hash") or "").upper()
-        if not song_hash:
-            continue
-        diff_name = diff.get("difficultyName") or "ExpertPlus"
-        mode = diff.get("modeName") or "Standard"
-        key = (song_hash, mode, diff_name)
-        score_id = str(entry.get("id") or entry.get("originalId") or "").strip()
-        if not score_id:
-            continue
-        pp = float(entry.get("pp") or 0.0)
-        played_at_ts = _bl_player_score_timeset(bl_scores, str(map_id))
-        cleared = bool(entry.get("baseScore") or 0)
-        current = best_meta.get(key)
-        candidate = (cleared, pp, played_at_ts)
-        if current is None or candidate > current:
-            best_meta[key] = candidate
-            idx[key] = f"https://replay.beatleader.com/?scoreId={score_id}"
-    return idx
+    return _snapshot_logic()._build_bl_replay_hash_index(bl_scores)
 
 
 def _build_bl_leaderboard_hash_index(bl_scores: Dict[str, dict]) -> Dict[Tuple[str, str, str], str]:
-    idx: Dict[Tuple[str, str, str], str] = {}
-    best_meta: Dict[Tuple[str, str, str], Tuple[bool, float, int]] = {}
-    for map_id, entry in bl_scores.items():
-        lb = entry.get("leaderboard") or {}
-        song = lb.get("song") or {}
-        diff = lb.get("difficulty") or {}
-        song_hash = (song.get("hash") or "").upper()
-        if not song_hash:
-            continue
-        diff_name = diff.get("difficultyName") or "ExpertPlus"
-        mode = diff.get("modeName") or "Standard"
-        leaderboard_id = str(entry.get("leaderboardId") or lb.get("id") or map_id or "")
-        if not leaderboard_id:
-            continue
-        key = (song_hash, mode, diff_name)
-        pp = float(entry.get("pp") or 0.0)
-        played_at_ts = _bl_player_score_timeset(bl_scores, str(map_id))
-        cleared = bool(entry.get("baseScore") or 0)
-        candidate = (cleared, pp, played_at_ts)
-        current = best_meta.get(key)
-        if current is None or candidate > current:
-            best_meta[key] = candidate
-            idx[key] = leaderboard_id
-    return idx
+    return _snapshot_logic()._build_bl_leaderboard_hash_index(bl_scores)
 
 
 def _load_cached_player_score_dicts(steam_id: Optional[str]) -> Tuple[Dict[str, dict], Dict[str, dict]]:
-    ss_scores_raw: Dict[str, dict] = {}
-    bl_scores_raw: Dict[str, dict] = {}
-    if not steam_id:
-        return ss_scores_raw, bl_scores_raw
-
-    ss_path = _CACHE_DIR / f"scoresaber_player_scores_{steam_id}.json"
-    if ss_path.exists():
-        try:
-            ss_data = json.loads(ss_path.read_text(encoding="utf-8"))
-            ss_scores_raw = ss_data.get("scores", {})
-        except Exception:
-            ss_scores_raw = {}
-
-    bl_path = _CACHE_DIR / f"beatleader_player_scores_{steam_id}.json"
-    if bl_path.exists():
-        try:
-            bl_data = json.loads(bl_path.read_text(encoding="utf-8"))
-            bl_scores_raw = bl_data.get("scores", {})
-        except Exception:
-            bl_scores_raw = {}
-
-    return ss_scores_raw, bl_scores_raw
+    return _snapshot_logic()._load_cached_player_score_dicts(steam_id)
 
 
 def _refresh_entries_from_cached_player_scores(entries: List[MapEntry], steam_id: Optional[str]) -> set[str]:
-    if not entries or not steam_id:
-        return set()
-
-    ss_scores_raw, bl_scores_raw = _load_cached_player_score_dicts(steam_id)
-    if not ss_scores_raw and not bl_scores_raw:
-        return set()
-
-    ss_score_idx = _build_ss_score_hash_index(ss_scores_raw) if ss_scores_raw else {}
-    bl_score_idx = _build_bl_score_hash_index(bl_scores_raw) if bl_scores_raw else {}
-    bl_replay_idx = _build_bl_replay_hash_index(bl_scores_raw) if bl_scores_raw else {}
-    bl_leaderboard_idx = _build_bl_leaderboard_hash_index(bl_scores_raw) if bl_scores_raw else {}
-    bl_ranked_idx = _build_bl_hash_index(load_bl_maps())
-    changed_hashes: set[str] = set()
-
-    for entry in entries:
-        song_hash = (entry.song_hash or "").upper()
-        if not song_hash or not entry.difficulty:
-            continue
-
-        key = (song_hash, entry.mode or "Standard", entry.difficulty)
-        ss_match = ss_score_idx.get(key)
-        bl_match = bl_score_idx.get(key)
-        bl_ranked_entry = bl_ranked_idx.get(key)
-
-        best_match: Optional[Tuple[float, bool, bool, float, int, str, int]] = None
-        new_score_source = entry.score_source
-        if entry.source == "scoresaber":
-            best_match = ss_match
-            new_score_source = "SS" if ss_match else ""
-        elif entry.source == "beatleader":
-            best_match = bl_match
-            new_score_source = "BL" if bl_match else ""
-        else:
-            if ss_match and bl_match:
-                ss_priority = (2 if ss_match[1] else 1 if ss_match[2] else 0, ss_match[3])
-                bl_priority = (2 if bl_match[1] else 1 if bl_match[2] else 0, bl_match[3])
-                best_match = ss_match if ss_priority >= bl_priority else bl_match
-                new_score_source = "SS" if best_match is ss_match else "BL"
-            elif ss_match:
-                best_match = ss_match
-                new_score_source = "SS"
-            elif bl_match:
-                best_match = bl_match
-                new_score_source = "BL"
-            else:
-                new_score_source = ""
-
-        new_played_at_ts = best_match[6] if best_match is not None else 0
-        new_bl_leaderboard_id = bl_leaderboard_idx.get(key) or (bl_ranked_entry.leaderboard_id if bl_ranked_entry else "")
-        new_bl_page_url = f"https://beatleader.com/leaderboard/global/{new_bl_leaderboard_id}" if new_bl_leaderboard_id else ""
-        new_bl_replay_url = bl_replay_idx.get(key, "")
-        new_bl_attempts = bl_ranked_entry.beatleader_attempts if bl_ranked_entry else entry.beatleader_attempts
-        new_bl_plays = bl_ranked_entry.beatleader_plays if bl_ranked_entry else entry.beatleader_plays
-
-        old_state = (
-            entry.played_at_ts,
-            entry.score_source,
-            entry.leaderboard_id,
-            entry.beatleader_page_url,
-            entry.beatleader_replay_url,
-            entry.beatleader_attempts,
-            entry.beatleader_plays,
-        )
-
-        entry.played_at_ts = new_played_at_ts
-        entry.score_source = new_score_source
-        if entry.source != "scoresaber":
-            entry.leaderboard_id = new_bl_leaderboard_id
-        entry.beatleader_page_url = new_bl_page_url
-        entry.beatleader_replay_url = new_bl_replay_url
-        entry.beatleader_attempts = new_bl_attempts
-        entry.beatleader_plays = new_bl_plays
-
-        new_state = (
-            entry.played_at_ts,
-            entry.score_source,
-            entry.leaderboard_id,
-            entry.beatleader_page_url,
-            entry.beatleader_replay_url,
-            entry.beatleader_attempts,
-            entry.beatleader_plays,
-        )
-        if new_state != old_state:
-            changed_hashes.add(song_hash)
-
-    return changed_hashes
+    return _snapshot_logic()._refresh_entries_from_cached_player_scores(entries, steam_id)
 
 
 def _apply_entry_snapshot_service_field(entry: MapEntry, service_entry: MapEntry) -> None:
-    if service_entry.source == "scoresaber":
-        entry.ss_stars = service_entry.stars
-        entry.ss_player_pp = service_entry.player_pp
-        entry.ss_player_acc = service_entry.player_acc
-        entry.ss_player_rank = service_entry.player_rank
-        entry.ss_played_at_ts = service_entry.played_at_ts
-        entry.ss_leaderboard_id = service_entry.leaderboard_id
-        return
-    if service_entry.source == "beatleader":
-        entry.bl_stars = service_entry.stars
-        entry.bl_player_pp = service_entry.player_pp
-        entry.bl_player_acc = service_entry.player_acc
-        entry.bl_player_rank = service_entry.player_rank
-        entry.bl_played_at_ts = service_entry.played_at_ts
-        entry.bl_leaderboard_id = service_entry.leaderboard_id
-        entry.beatleader_attempts = service_entry.beatleader_attempts
-        entry.beatleader_plays = service_entry.beatleader_plays
-        if service_entry.beatleader_page_url:
-            entry.beatleader_page_url = service_entry.beatleader_page_url
-        if service_entry.beatleader_replay_url:
-            entry.beatleader_replay_url = service_entry.beatleader_replay_url
-        return
-    if service_entry.source == "accsaber":
-        entry.acc_category_value = service_entry.acc_category
-        entry.acc_complexity_value = service_entry.acc_complexity
-        entry.acc_player_acc = service_entry.player_acc
-        entry.acc_player_rank_value = service_entry.player_rank
-        entry.acc_ap_value = service_entry.acc_rl_ap
-        entry.acc_played_at_ts = service_entry.played_at_ts
-        return
-    if service_entry.source == "accsaber_reloaded":
-        entry.rl_category_value = service_entry.acc_category
-        entry.rl_complexity_value = service_entry.acc_complexity
-        entry.rl_player_acc = service_entry.player_acc
-        entry.rl_player_rank_value = service_entry.player_rank
-        entry.rl_ap_value = service_entry.acc_rl_ap
-        entry.rl_played_at_ts = service_entry.played_at_ts
+    _snapshot_logic()._apply_entry_snapshot_service_field(entry, service_entry)
 
 
 def _load_snapshot_service_entries_from_cache(steam_id: Optional[str]) -> Dict[str, List[MapEntry]]:
-    service_entries: Dict[str, List[MapEntry]] = {
-        "scoresaber": [],
-        "beatleader": [],
-        "accsaber": [],
-        "accsaber_reloaded": [],
-    }
-    try:
-        service_entries["scoresaber"] = load_ss_maps(steam_id)
-    except Exception:
-        service_entries["scoresaber"] = []
-    try:
-        service_entries["beatleader"] = load_bl_maps(steam_id)
-    except Exception:
-        service_entries["beatleader"] = []
-
-    acc_maps_cache = _CACHE_DIR / "accsaber_maps.json"
-    acc_score_cache = _CACHE_DIR / f"accsaber_player_scores_{steam_id}.json" if steam_id else Path()
-    if acc_maps_cache.exists():
-        acc_steam_id = steam_id if acc_score_cache.exists() else None
-        try:
-            service_entries["accsaber"] = load_accsaber_maps(acc_steam_id, "all")
-        except Exception:
-            service_entries["accsaber"] = []
-
-    rl_maps_cache = _CACHE_DIR / "accsaber_reloaded_maps.json"
-    rl_score_cache = _CACHE_DIR / f"accsaber_reloaded_player_scores_{steam_id}.json" if steam_id else Path()
-    if rl_maps_cache.exists():
-        rl_steam_id = steam_id if rl_score_cache.exists() else None
-        try:
-            service_entries["accsaber_reloaded"] = load_accsaber_reloaded_maps(rl_steam_id, "all")
-        except Exception:
-            service_entries["accsaber_reloaded"] = []
-
-    return service_entries
+    return _snapshot_logic()._load_snapshot_service_entries_from_cache(steam_id)
 
 
 def _refresh_snapshot_entries_service_columns(entries: List[MapEntry], steam_id: Optional[str]) -> None:
-    if not entries:
-        return
-
-    service_entries = _load_snapshot_service_entries_from_cache(steam_id)
-    ss_scores_raw, bl_scores_raw = _load_cached_player_score_dicts(steam_id)
-    service_indices = {
-        service: {
-            ((item.song_hash or "").upper(), item.mode or "Standard", item.difficulty or ""): item
-            for item in items
-            if item.song_hash and item.difficulty
-        }
-        for service, items in service_entries.items()
-    }
-    ss_score_idx = _build_ss_score_hash_index(ss_scores_raw) if ss_scores_raw else {}
-    bl_score_idx = _build_bl_score_hash_index(bl_scores_raw) if bl_scores_raw else {}
-    bl_replay_idx = _build_bl_replay_hash_index(bl_scores_raw) if bl_scores_raw else {}
-    bl_leaderboard_idx = _build_bl_leaderboard_hash_index(bl_scores_raw) if bl_scores_raw else {}
-
-    for entry in entries:
-        entry.ss_stars = 0.0
-        entry.ss_player_pp = 0.0
-        entry.ss_player_acc = 0.0
-        entry.ss_player_rank = 0
-        entry.ss_played_at_ts = 0
-        entry.ss_leaderboard_id = ""
-        entry.bl_stars = 0.0
-        entry.bl_player_pp = 0.0
-        entry.bl_player_acc = 0.0
-        entry.bl_player_rank = 0
-        entry.bl_played_at_ts = 0
-        entry.bl_leaderboard_id = ""
-        entry.acc_category_value = ""
-        entry.acc_complexity_value = 0.0
-        entry.acc_player_acc = 0.0
-        entry.acc_player_rank_value = 0
-        entry.acc_ap_value = 0.0
-        entry.acc_played_at_ts = 0
-        entry.rl_category_value = ""
-        entry.rl_complexity_value = 0.0
-        entry.rl_player_acc = 0.0
-        entry.rl_player_rank_value = 0
-        entry.rl_ap_value = 0.0
-        entry.rl_played_at_ts = 0
-
-        _apply_entry_snapshot_service_field(entry, entry)
-
-        key = ((entry.song_hash or "").upper(), entry.mode or "Standard", entry.difficulty or "")
-        if not key[0] or not key[2]:
-            continue
-        for service in ("scoresaber", "beatleader", "accsaber", "accsaber_reloaded"):
-            service_entry = service_indices.get(service, {}).get(key)
-            if service_entry is not None:
-                _apply_entry_snapshot_service_field(entry, service_entry)
-
-        ss_match = ss_score_idx.get(key)
-        if ss_match is not None:
-            entry.ss_player_pp = ss_match[0]
-            entry.ss_player_acc = ss_match[3]
-            entry.ss_player_rank = ss_match[4]
-            entry.ss_played_at_ts = ss_match[6]
-
-        bl_match = bl_score_idx.get(key)
-        if bl_match is not None:
-            entry.bl_player_pp = bl_match[0]
-            entry.bl_player_acc = bl_match[3]
-            entry.bl_player_rank = bl_match[4]
-            entry.bl_played_at_ts = bl_match[6]
-
-        if not entry.bl_leaderboard_id:
-            entry.bl_leaderboard_id = bl_leaderboard_idx.get(key, "")
-        if entry.bl_leaderboard_id and not entry.beatleader_page_url:
-            entry.beatleader_page_url = f"https://beatleader.com/leaderboard/global/{entry.bl_leaderboard_id}"
-        if not entry.beatleader_replay_url:
-            entry.beatleader_replay_url = bl_replay_idx.get(key, "")
+    _snapshot_logic()._refresh_snapshot_entries_service_columns(entries, steam_id)
 
 
 def _fetch_bl_leaderboards_by_hash(session: requests.Session, song_hash: str) -> Dict[Tuple[str, str], str]:
-    if not song_hash:
-        return {}
-    try:
-        resp = session.get(f"https://api.beatleader.xyz/leaderboards/hash/{song_hash}", timeout=15)
-        resp.raise_for_status()
-        payload = resp.json()
-    except Exception:
-        return {}
-
-    result: Dict[Tuple[str, str], str] = {}
-    for item in payload.get("leaderboards") or []:
-        diff = item.get("difficulty") or {}
-        difficulty = str(diff.get("difficultyName") or "ExpertPlus")
-        mode = str(diff.get("modeName") or "Standard")
-        leaderboard_id = str(item.get("id") or "")
-        if leaderboard_id:
-            result[(mode, difficulty)] = leaderboard_id
-    return result
+    return _maps_logic()._fetch_bl_leaderboards_by_hash(session, song_hash)
 
 
-def _fetch_bl_top_replay_url(
-    session: requests.Session,
-    leaderboard_id: str,
-    countries: str = "",
-) -> str:
-    if not leaderboard_id:
-        return ""
-    params = {
-        "page": 1,
-        "count": 1,
-        "sortBy": "rank",
-        "order": "desc",
-    }
-    if countries:
-        params["countries"] = countries
-    try:
-        resp = session.get(f"https://api.beatleader.xyz/leaderboard/{leaderboard_id}", params=params, timeout=15)
-        resp.raise_for_status()
-        payload = resp.json()
-    except Exception:
-        return ""
-
-    scores = payload.get("scores") or []
-    if not scores:
-        return ""
-    score_id = str(scores[0].get("id") or scores[0].get("originalId") or "").strip()
-    if not score_id:
-        return ""
-    return f"https://replay.beatleader.com/?scoreId={score_id}"
+def _fetch_bl_top_replay_url(session: requests.Session, leaderboard_id: str, countries: str = "") -> str:
+    return _maps_logic()._fetch_bl_top_replay_url(session, leaderboard_id, countries)
 
 
 def _normalize_duration_seconds(value: object) -> int:
-    if value is None:
-        return 0
-    try:
-        if isinstance(value, (int, float, str)):
-            raw_value = value
-        else:
-            raw_value = str(value)
-        seconds = int(round(float(raw_value)))
-    except (TypeError, ValueError):
-        return 0
-    return seconds if seconds > 0 else 0
+    return _maps_logic()._normalize_duration_seconds(value)
 
 
 def load_bplist_maps(
@@ -1779,75 +1157,7 @@ def load_bplist_maps(
     steam_id: Optional[str] = None,
     on_progress: Optional[Callable[[int, int, str], None]] = None,
 ) -> List[MapEntry]:
-    """開いた .bplist ファイルをロードし、service に応じてランク情報を付与する。
-
-    service: "scoresaber" | "beatleader" | "accsaber_rl" | "none"
-    on_progress: callable(done, total, label) — accsaber_rl 時のみ使用
-    """
-    try:
-        bplist = json.loads(bplist_path.read_text(encoding="utf-8"))
-    except Exception as e:
-        raise ValueError(f"bplist load error: {e}") from e
-
-    songs = bplist.get("songs") or bplist.get("Songs") or []
-
-    if service == "scoresaber":
-        ranked = load_ss_maps(steam_id)
-        idx = _build_ss_hash_index(ranked)
-    elif service == "beatleader":
-        ranked = load_bl_maps(steam_id)
-        idx = _build_bl_hash_index(ranked)
-    elif service == "accsaber_rl":
-        ranked = load_accsaber_reloaded_maps(steam_id, "all", on_progress=on_progress)
-        idx = _build_ss_hash_index(ranked)
-    elif service == "accsaber":
-        ranked = load_accsaber_maps(steam_id, "all", on_progress=on_progress)
-        idx = _build_ss_hash_index(ranked)
-    else:
-        idx = {}
-        ranked = []
-
-    entries: List[MapEntry] = []
-    for song in songs:
-        s_hash = (song.get("hash") or "").upper()
-        s_name = song.get("songName") or ""
-        diffs = song.get("difficulties") or []
-
-        if not diffs:
-            # 難易度指定なし → idx からハッシュで探す
-            for e in (ranked or []):
-                if e.song_hash == s_hash:
-                    entries.append(e)
-            if not ranked:
-                entries.append(MapEntry(
-                    song_name=s_name, song_author="", mapper="",
-                    song_hash=s_hash, difficulty="", mode="",
-                    stars=0.0, max_pp=0.0, player_pp=0.0,
-                    cleared=False, nf_clear=False,
-                    player_acc=0.0, player_rank=0,
-                    leaderboard_id="", source="open",
-                    duration_seconds=0,
-                ))
-        else:
-            for d in diffs:
-                char = d.get("characteristic") or "Standard"
-                diff_name = d.get("name") or "ExpertPlus"
-                key = (s_hash, char, diff_name)
-                if key in idx:
-                    entries.append(idx[key])
-                else:
-                    # ランク情報なし → 最低限の情報で登録
-                    entries.append(MapEntry(
-                        song_name=s_name, song_author="", mapper="",
-                        song_hash=s_hash, difficulty=diff_name, mode=char,
-                        stars=0.0, max_pp=0.0, player_pp=0.0,
-                        cleared=False, nf_clear=False,
-                        player_acc=0.0, player_rank=0,
-                        leaderboard_id="", source="open",
-                        duration_seconds=0,
-                    ))
-
-    return _enrich_entries_with_beatsaver_cache(entries)
+    return _maps_logic().load_bplist_maps(bplist_path, service, steam_id, on_progress=on_progress)
 
 
 def load_beatsaver_maps(
@@ -1864,222 +1174,20 @@ def load_beatsaver_maps(
     on_progress: Optional[Callable[[int, int, str], None]] = None,
     session: Optional[requests.Session] = None,
 ) -> List[MapEntry]:
-    """BeatSaver の検索 API から譜面を取得し、未プレイ判定付きで返す。
-
-    days=0 を指定すると日付フィルタなしで全期間を対象にする。
-    """
-    no_date_filter = (days == 0 and from_dt is None and to_dt is None)
-    now = datetime.now(timezone.utc)
-    if no_date_filter:
-        # 日付制限なし: 変数は必要ないが型アノテーションのため初期化しておく
-        from_dt_api: Optional[datetime] = None
-        to_dt_api: Optional[datetime] = None
-    else:
-        if to_dt is None:
-            to_dt = now
-        elif to_dt.tzinfo is None:
-            to_dt = to_dt.replace(tzinfo=timezone.utc)
-        else:
-            to_dt = to_dt.astimezone(timezone.utc)
-        if from_dt is None:
-            from_dt = to_dt - timedelta(days=max(1, days) - 1)
-        elif from_dt.tzinfo is None:
-            from_dt = from_dt.replace(tzinfo=timezone.utc)
-        else:
-            from_dt = from_dt.astimezone(timezone.utc)
-        if from_dt > to_dt:
-            from_dt, to_dt = to_dt, from_dt
-        from_dt_api = from_dt
-        to_dt_api = to_dt
-
-    ss_scores_raw: Dict[str, dict] = {}
-    bl_scores_raw: Dict[str, dict] = {}
-    if steam_id:
-        ss_path = _CACHE_DIR / f"scoresaber_player_scores_{steam_id}.json"
-        if ss_path.exists():
-            try:
-                ss_data = json.loads(ss_path.read_text(encoding="utf-8"))
-                ss_scores_raw = ss_data.get("scores", {})
-            except Exception:
-                pass
-        bl_path = _CACHE_DIR / f"beatleader_player_scores_{steam_id}.json"
-        if bl_path.exists():
-            try:
-                bl_data = json.loads(bl_path.read_text(encoding="utf-8"))
-                bl_scores_raw = bl_data.get("scores", {})
-            except Exception:
-                pass
-
-    ss_score_idx = _build_ss_score_hash_index(ss_scores_raw)
-    bl_score_idx = _build_bl_score_hash_index(bl_scores_raw)
-    bl_replay_idx = _build_bl_replay_hash_index(bl_scores_raw)
-    bl_leaderboard_idx = _build_bl_leaderboard_hash_index(bl_scores_raw)
-    bl_ranked_idx = _build_bl_hash_index(load_bl_maps())
-
-    session = session or requests.Session()
-    entries: List[MapEntry] = []
-    pages = 1
-    q = query.strip()
-    bl_api_hash_cache: Dict[str, Dict[Tuple[str, str], str]] = {}
-
-    for page in range(0, 20):
-        if max_maps is not None and len(entries) >= max_maps:
-            break
-        if on_progress:
-            on_progress(page, max(pages, 1), f"Searching BeatSaver... {page + 1}/{max(pages, 1)}")
-        _search_params: Dict[str, str] = {
-            "q": q,
-            "pageSize": str(100 if max_maps is None else min(100, max_maps)),
-            "minRating": str(min_rating),
-            "minVotes": str(min_votes),
-            "order": "Latest",
-            "ascending": "false",
-        }
-        if from_dt_api is not None and to_dt_api is not None:
-            _search_params["from"] = from_dt_api.isoformat().replace("+00:00", "Z")
-            _search_params["to"] = to_dt_api.isoformat().replace("+00:00", "Z")
-        resp = session.get(
-            f"https://api.beatsaver.com/search/text/{page}",
-            params=_search_params,
-            timeout=15,
-        )
-        resp.raise_for_status()
-        payload = resp.json()
-        docs = payload.get("docs") or []
-        info = payload.get("info") or {}
-        try:
-            pages = max(1, int(info.get("pages") or 1))
-        except (TypeError, ValueError):
-            pages = 1
-        if not docs:
-            break
-
-        for doc in docs:
-            if max_maps is not None and len(entries) >= max_maps:
-                break
-            if unranked_only and any(doc.get(flag) for flag in ("ranked", "qualified", "blRanked", "blQualified")):
-                continue
-            tags = [str(tag).lower() for tag in (doc.get("tags") or [])]
-            if exclude_ai and (
-                doc.get("automapper")
-                or str(doc.get("declaredAi") or "None") != "None"
-                or "ai" in tags
-            ):
-                continue
-
-            metadata = doc.get("metadata") or {}
-            stats = doc.get("stats") or {}
-            versions = doc.get("versions") or []
-            version = next((item for item in versions if item.get("hash") or item.get("key")), versions[0] if versions else {})
-            song_hash = (version.get("hash") or "").upper()
-            if not song_hash:
-                continue
-
-            rating_value = float(stats.get("score") or 0.0)
-            rating_percent = rating_value * 100.0 if rating_value <= 1.0 else rating_value
-            upvotes = int(stats.get("upvotes") or 0)
-            downvotes = int(stats.get("downvotes") or 0)
-            votes = upvotes + downvotes
-            uploaded_ts = _parse_iso_datetime_to_ts(doc.get("lastPublishedAt") or doc.get("uploaded") or doc.get("createdAt"))
-            description = str(doc.get("description") or "").replace("\r\n", "\n").strip()
-            cover_url = version.get("coverURL") or ""
-            preview_url = version.get("previewURL") or ""
-            download_url = version.get("downloadURL") or ""
-            beatsaver_key = str(doc.get("id") or doc.get("key") or version.get("key") or "")
-            page_url = f"https://beatsaver.com/maps/{beatsaver_key}" if beatsaver_key else ""
-            duration_seconds = _normalize_duration_seconds(metadata.get("duration"))
-            difficulties = version.get("diffs") or []
-            if not difficulties:
-                difficulties = [{"difficulty": "ExpertPlus", "characteristic": "Standard", "nps": 0.0, "stars": 0.0}]
-
-            for diff in difficulties:
-                characteristic = diff.get("characteristic") or "Standard"
-                if characteristic in ("Lightshow", "Legacy"):
-                    continue
-                difficulty = diff.get("difficulty") or diff.get("label") or "ExpertPlus"
-                nps_value = float(diff.get("nps") or 0.0)
-                star_value = float(diff.get("stars") or diff.get("blStars") or 0.0)
-                key = (song_hash, characteristic, difficulty)
-                ss_match = ss_score_idx.get(key)
-                bl_match = bl_score_idx.get(key)
-                bl_entry = bl_ranked_idx.get(key)
-                if song_hash not in bl_api_hash_cache:
-                    bl_api_hash_cache[song_hash] = _fetch_bl_leaderboards_by_hash(session, song_hash)
-                bl_leaderboard_id = (
-                    bl_leaderboard_idx.get(key)
-                    or (bl_entry.leaderboard_id if bl_entry else "")
-                    or bl_api_hash_cache[song_hash].get((characteristic, difficulty), "")
-                )
-                bl_page_url = (
-                    f"https://beatleader.com/leaderboard/global/{bl_leaderboard_id}"
-                    if bl_leaderboard_id
-                    else ""
-                )
-                bl_replay_url = bl_replay_idx.get(key, "")
-
-                cleared = False
-                nf_clear = False
-                score_source = ""
-                played_at_ts = 0
-                best_match: Optional[Tuple[float, bool, bool, float, int, str, int]] = None
-                if ss_match and bl_match:
-                    best_match = ss_match if (2 if ss_match[1] else 1 if ss_match[2] else 0, ss_match[3]) >= (2 if bl_match[1] else 1 if bl_match[2] else 0, bl_match[3]) else bl_match
-                    score_source = "SS" if best_match is ss_match else "BL"
-                elif ss_match:
-                    best_match = ss_match
-                    score_source = "SS"
-                elif bl_match:
-                    best_match = bl_match
-                    score_source = "BL"
-                if best_match is not None:
-                    _, cleared, nf_clear, _, _, _, played_at_ts = best_match
-
-                entries.append(MapEntry(
-                    song_name=metadata.get("songName") or doc.get("name") or "",
-                    song_author=metadata.get("songAuthorName") or "",
-                    mapper=metadata.get("levelAuthorName") or (doc.get("uploader") or {}).get("name") or "",
-                    song_hash=song_hash,
-                    difficulty=difficulty,
-                    mode=characteristic,
-                    stars=star_value,
-                    max_pp=0.0,
-                    player_pp=rating_percent,
-                    cleared=cleared,
-                    nf_clear=nf_clear,
-                    player_acc=nps_value,
-                    player_rank=votes,
-                    leaderboard_id=bl_leaderboard_id,
-                    source="beatsaver",
-                    score_source=score_source,
-                    duration_seconds=duration_seconds,
-                    played_at_ts=played_at_ts,
-                    source_date_ts=uploaded_ts,
-                    beatsaver_key=beatsaver_key,
-                    beatsaver_cover_url=cover_url,
-                    beatsaver_preview_url=preview_url,
-                    beatsaver_page_url=page_url,
-                    beatsaver_download_url=download_url or (f"https://beatsaver.com/api/download/key/{beatsaver_key}" if beatsaver_key else ""),
-                    beatsaver_rating=rating_value,
-                    beatsaver_votes=votes,
-                    beatsaver_upvotes=upvotes,
-                    beatsaver_downvotes=downvotes,
-                    beatsaver_uploaded_ts=uploaded_ts,
-                    beatsaver_description=description,
-                    beatsaver_curated=bool(doc.get("curatedAt")),
-                    beatsaver_verified_mapper=bool((doc.get("uploader") or {}).get("verifiedMapper")),
-                    beatleader_page_url=bl_page_url,
-                    beatleader_replay_url=bl_replay_url,
-                    beatleader_global1_replay_url="",
-                    beatleader_local1_replay_url="",
-                    beatleader_attempts=bl_entry.beatleader_attempts if bl_entry else 0,
-                    beatleader_plays=bl_entry.beatleader_plays if bl_entry else 0,
-                ))
-        if page + 1 >= pages:
-            break
-
-    if on_progress:
-        on_progress(1, 1, "Done")
-    return entries if max_maps is None else entries[:max_maps]
+    return _maps_logic().load_beatsaver_maps(
+        steam_id=steam_id,
+        query=query,
+        days=days,
+        min_rating=min_rating,
+        min_votes=min_votes,
+        max_maps=max_maps,
+        from_dt=from_dt,
+        to_dt=to_dt,
+        unranked_only=unranked_only,
+        exclude_ai=exclude_ai,
+        on_progress=on_progress,
+        session=session,
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────────────
