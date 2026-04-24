@@ -517,6 +517,7 @@ def _refresh_entries_from_cached_player_scores(entries: List[MapEntry], steam_id
                 new_score_source = ""
 
         new_played_at_ts = best_match[6] if best_match is not None else 0
+        new_bl_played_at_ts = bl_match[6] if bl_match is not None else 0
         new_bl_leaderboard_id = bl_leaderboard_idx.get(key) or (bl_ranked_entry.leaderboard_id if bl_ranked_entry else "")
         new_bl_page_url = f"https://beatleader.com/leaderboard/global/{new_bl_leaderboard_id}" if new_bl_leaderboard_id else ""
         new_bl_replay_url = bl_replay_idx.get(key, "")
@@ -525,6 +526,7 @@ def _refresh_entries_from_cached_player_scores(entries: List[MapEntry], steam_id
 
         old_state = (
             entry.played_at_ts,
+            entry.bl_played_at_ts,
             entry.score_source,
             entry.leaderboard_id,
             entry.beatleader_page_url,
@@ -534,6 +536,7 @@ def _refresh_entries_from_cached_player_scores(entries: List[MapEntry], steam_id
         )
 
         entry.played_at_ts = new_played_at_ts
+        entry.bl_played_at_ts = new_bl_played_at_ts
         entry.score_source = new_score_source
         if entry.source != "scoresaber":
             entry.leaderboard_id = new_bl_leaderboard_id
@@ -544,6 +547,7 @@ def _refresh_entries_from_cached_player_scores(entries: List[MapEntry], steam_id
 
         new_state = (
             entry.played_at_ts,
+            entry.bl_played_at_ts,
             entry.score_source,
             entry.leaderboard_id,
             entry.beatleader_page_url,
