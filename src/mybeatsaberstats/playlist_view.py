@@ -785,6 +785,30 @@ class MapEntry:
     beatleader_local1_replay_url: str = ""
     beatleader_attempts: int = 0
     beatleader_plays: int = 0
+    ss_stars: float = 0.0
+    ss_player_pp: float = 0.0
+    ss_player_acc: float = 0.0
+    ss_player_rank: int = 0
+    ss_played_at_ts: int = 0
+    ss_leaderboard_id: str = ""
+    bl_stars: float = 0.0
+    bl_player_pp: float = 0.0
+    bl_player_acc: float = 0.0
+    bl_player_rank: int = 0
+    bl_played_at_ts: int = 0
+    bl_leaderboard_id: str = ""
+    acc_category_value: str = ""
+    acc_complexity_value: float = 0.0
+    acc_player_acc: float = 0.0
+    acc_player_rank_value: int = 0
+    acc_ap_value: float = 0.0
+    acc_played_at_ts: int = 0
+    rl_category_value: str = ""
+    rl_complexity_value: float = 0.0
+    rl_player_acc: float = 0.0
+    rl_player_rank_value: int = 0
+    rl_ap_value: float = 0.0
+    rl_played_at_ts: int = 0
 
     @property
     def status_str(self) -> str:
@@ -1529,6 +1553,160 @@ def _refresh_entries_from_cached_player_scores(entries: List[MapEntry], steam_id
     return changed_hashes
 
 
+def _apply_entry_snapshot_service_field(entry: MapEntry, service_entry: MapEntry) -> None:
+    if service_entry.source == "scoresaber":
+        entry.ss_stars = service_entry.stars
+        entry.ss_player_pp = service_entry.player_pp
+        entry.ss_player_acc = service_entry.player_acc
+        entry.ss_player_rank = service_entry.player_rank
+        entry.ss_played_at_ts = service_entry.played_at_ts
+        entry.ss_leaderboard_id = service_entry.leaderboard_id
+        return
+    if service_entry.source == "beatleader":
+        entry.bl_stars = service_entry.stars
+        entry.bl_player_pp = service_entry.player_pp
+        entry.bl_player_acc = service_entry.player_acc
+        entry.bl_player_rank = service_entry.player_rank
+        entry.bl_played_at_ts = service_entry.played_at_ts
+        entry.bl_leaderboard_id = service_entry.leaderboard_id
+        entry.beatleader_attempts = service_entry.beatleader_attempts
+        entry.beatleader_plays = service_entry.beatleader_plays
+        if service_entry.beatleader_page_url:
+            entry.beatleader_page_url = service_entry.beatleader_page_url
+        if service_entry.beatleader_replay_url:
+            entry.beatleader_replay_url = service_entry.beatleader_replay_url
+        return
+    if service_entry.source == "accsaber":
+        entry.acc_category_value = service_entry.acc_category
+        entry.acc_complexity_value = service_entry.acc_complexity
+        entry.acc_player_acc = service_entry.player_acc
+        entry.acc_player_rank_value = service_entry.player_rank
+        entry.acc_ap_value = service_entry.acc_rl_ap
+        entry.acc_played_at_ts = service_entry.played_at_ts
+        return
+    if service_entry.source == "accsaber_reloaded":
+        entry.rl_category_value = service_entry.acc_category
+        entry.rl_complexity_value = service_entry.acc_complexity
+        entry.rl_player_acc = service_entry.player_acc
+        entry.rl_player_rank_value = service_entry.player_rank
+        entry.rl_ap_value = service_entry.acc_rl_ap
+        entry.rl_played_at_ts = service_entry.played_at_ts
+
+
+def _load_snapshot_service_entries_from_cache(steam_id: Optional[str]) -> Dict[str, List[MapEntry]]:
+    service_entries: Dict[str, List[MapEntry]] = {
+        "scoresaber": [],
+        "beatleader": [],
+        "accsaber": [],
+        "accsaber_reloaded": [],
+    }
+    try:
+        service_entries["scoresaber"] = load_ss_maps(steam_id)
+    except Exception:
+        service_entries["scoresaber"] = []
+    try:
+        service_entries["beatleader"] = load_bl_maps(steam_id)
+    except Exception:
+        service_entries["beatleader"] = []
+
+    acc_maps_cache = _CACHE_DIR / "accsaber_maps.json"
+    acc_score_cache = _CACHE_DIR / f"accsaber_player_scores_{steam_id}.json" if steam_id else Path()
+    if acc_maps_cache.exists():
+        acc_steam_id = steam_id if acc_score_cache.exists() else None
+        try:
+            service_entries["accsaber"] = load_accsaber_maps(acc_steam_id, "all")
+        except Exception:
+            service_entries["accsaber"] = []
+
+    rl_maps_cache = _CACHE_DIR / "accsaber_reloaded_maps.json"
+    rl_score_cache = _CACHE_DIR / f"accsaber_reloaded_player_scores_{steam_id}.json" if steam_id else Path()
+    if rl_maps_cache.exists():
+        rl_steam_id = steam_id if rl_score_cache.exists() else None
+        try:
+            service_entries["accsaber_reloaded"] = load_accsaber_reloaded_maps(rl_steam_id, "all")
+        except Exception:
+            service_entries["accsaber_reloaded"] = []
+
+    return service_entries
+
+
+def _refresh_snapshot_entries_service_columns(entries: List[MapEntry], steam_id: Optional[str]) -> None:
+    if not entries:
+        return
+
+    service_entries = _load_snapshot_service_entries_from_cache(steam_id)
+    ss_scores_raw, bl_scores_raw = _load_cached_player_score_dicts(steam_id)
+    service_indices = {
+        service: {
+            ((item.song_hash or "").upper(), item.mode or "Standard", item.difficulty or ""): item
+            for item in items
+            if item.song_hash and item.difficulty
+        }
+        for service, items in service_entries.items()
+    }
+    ss_score_idx = _build_ss_score_hash_index(ss_scores_raw) if ss_scores_raw else {}
+    bl_score_idx = _build_bl_score_hash_index(bl_scores_raw) if bl_scores_raw else {}
+    bl_replay_idx = _build_bl_replay_hash_index(bl_scores_raw) if bl_scores_raw else {}
+    bl_leaderboard_idx = _build_bl_leaderboard_hash_index(bl_scores_raw) if bl_scores_raw else {}
+
+    for entry in entries:
+        entry.ss_stars = 0.0
+        entry.ss_player_pp = 0.0
+        entry.ss_player_acc = 0.0
+        entry.ss_player_rank = 0
+        entry.ss_played_at_ts = 0
+        entry.ss_leaderboard_id = ""
+        entry.bl_stars = 0.0
+        entry.bl_player_pp = 0.0
+        entry.bl_player_acc = 0.0
+        entry.bl_player_rank = 0
+        entry.bl_played_at_ts = 0
+        entry.bl_leaderboard_id = ""
+        entry.acc_category_value = ""
+        entry.acc_complexity_value = 0.0
+        entry.acc_player_acc = 0.0
+        entry.acc_player_rank_value = 0
+        entry.acc_ap_value = 0.0
+        entry.acc_played_at_ts = 0
+        entry.rl_category_value = ""
+        entry.rl_complexity_value = 0.0
+        entry.rl_player_acc = 0.0
+        entry.rl_player_rank_value = 0
+        entry.rl_ap_value = 0.0
+        entry.rl_played_at_ts = 0
+
+        _apply_entry_snapshot_service_field(entry, entry)
+
+        key = ((entry.song_hash or "").upper(), entry.mode or "Standard", entry.difficulty or "")
+        if not key[0] or not key[2]:
+            continue
+        for service in ("scoresaber", "beatleader", "accsaber", "accsaber_reloaded"):
+            service_entry = service_indices.get(service, {}).get(key)
+            if service_entry is not None:
+                _apply_entry_snapshot_service_field(entry, service_entry)
+
+        ss_match = ss_score_idx.get(key)
+        if ss_match is not None:
+            entry.ss_player_pp = ss_match[0]
+            entry.ss_player_acc = ss_match[3]
+            entry.ss_player_rank = ss_match[4]
+            entry.ss_played_at_ts = ss_match[6]
+
+        bl_match = bl_score_idx.get(key)
+        if bl_match is not None:
+            entry.bl_player_pp = bl_match[0]
+            entry.bl_player_acc = bl_match[3]
+            entry.bl_player_rank = bl_match[4]
+            entry.bl_played_at_ts = bl_match[6]
+
+        if not entry.bl_leaderboard_id:
+            entry.bl_leaderboard_id = bl_leaderboard_idx.get(key, "")
+        if entry.bl_leaderboard_id and not entry.beatleader_page_url:
+            entry.beatleader_page_url = f"https://beatleader.com/leaderboard/global/{entry.bl_leaderboard_id}"
+        if not entry.beatleader_replay_url:
+            entry.beatleader_replay_url = bl_replay_idx.get(key, "")
+
+
 def _fetch_bl_leaderboards_by_hash(session: requests.Session, song_hash: str) -> Dict[Tuple[str, str], str]:
     if not song_hash:
         return {}
@@ -2033,6 +2211,10 @@ def _source_date_item(ts: int, *, include_time: bool = False) -> QTableWidgetIte
 def _sort_dir_from_mode(sort_mode: str) -> str:
     """sort_mode 文字列から 'asc'/'desc' を返す。"""
     return "desc" if sort_mode in (
+        "ss_pp_high", "ss_acc_high", "ss_rank_high", "ss_star_desc", "ss_played_desc",
+        "bl_pp_high", "bl_acc_high", "bl_rank_high", "bl_star_desc", "bl_played_desc",
+        "acc_ap_high", "accsvc_acc_high", "acc_rank_high", "acc_complexity_desc", "acc_cat_desc", "acc_played_desc",
+        "rl_ap_high", "rl_acc_high", "rl_rank_high", "rl_complexity_desc", "rl_cat_desc", "rl_played_desc",
         "pp_high", "ap_high", "acc_high", "rank_high", "star_desc", "fc_desc", "duration_desc",
         "bl_plays_desc", "bl_attempts_desc",
         "status_desc", "song_desc", "date_desc", "playtime_desc", "diff_desc", "mode_desc", "cat_desc",
@@ -2867,7 +3049,95 @@ _BATCH_PRESETS: List[_BatchPreset] = [
 def _sort_entries(entries: List[MapEntry], sort_mode: str) -> List[MapEntry]:
     """sort_mode に従って MapEntry をソートした新しいリストを返す。"""
     result = list(entries)
-    if sort_mode == "pp_high":
+    if sort_mode == "ss_pp_high":
+        result.sort(key=lambda e: (-e.ss_player_pp, e.ss_stars, e.song_name.lower()))
+    elif sort_mode == "ss_pp_low":
+        result.sort(key=lambda e: (e.ss_player_pp, e.ss_stars, e.song_name.lower()))
+    elif sort_mode == "ss_acc_high":
+        result.sort(key=lambda e: (-e.ss_player_acc, e.ss_stars, e.song_name.lower()))
+    elif sort_mode == "ss_acc_low":
+        result.sort(key=lambda e: (e.ss_player_acc, e.ss_stars, e.song_name.lower()))
+    elif sort_mode == "ss_rank_low":
+        result.sort(key=lambda e: (e.ss_player_rank or 999999, e.ss_stars, e.song_name.lower()))
+    elif sort_mode == "ss_rank_high":
+        result.sort(key=lambda e: (-(e.ss_player_rank or 0), e.ss_stars, e.song_name.lower()))
+    elif sort_mode == "ss_star_desc":
+        result.sort(key=lambda e: (-e.ss_stars, e.song_name.lower()))
+    elif sort_mode == "ss_star_asc":
+        result.sort(key=lambda e: (e.ss_stars, e.song_name.lower()))
+    elif sort_mode == "ss_played_desc":
+        result.sort(key=lambda e: (0 if e.ss_played_at_ts > 0 else 1, -e.ss_played_at_ts if e.ss_played_at_ts > 0 else 0, e.song_name.lower()))
+    elif sort_mode == "ss_played_asc":
+        result.sort(key=lambda e: (0 if e.ss_played_at_ts > 0 else 1, e.ss_played_at_ts if e.ss_played_at_ts > 0 else 0, e.song_name.lower()))
+    elif sort_mode == "bl_pp_high":
+        result.sort(key=lambda e: (-e.bl_player_pp, e.bl_stars, e.song_name.lower()))
+    elif sort_mode == "bl_pp_low":
+        result.sort(key=lambda e: (e.bl_player_pp, e.bl_stars, e.song_name.lower()))
+    elif sort_mode == "bl_acc_high":
+        result.sort(key=lambda e: (-e.bl_player_acc, e.bl_stars, e.song_name.lower()))
+    elif sort_mode == "bl_acc_low":
+        result.sort(key=lambda e: (e.bl_player_acc, e.bl_stars, e.song_name.lower()))
+    elif sort_mode == "bl_rank_low":
+        result.sort(key=lambda e: (e.bl_player_rank or 999999, e.bl_stars, e.song_name.lower()))
+    elif sort_mode == "bl_rank_high":
+        result.sort(key=lambda e: (-(e.bl_player_rank or 0), e.bl_stars, e.song_name.lower()))
+    elif sort_mode == "bl_star_desc":
+        result.sort(key=lambda e: (-e.bl_stars, e.song_name.lower()))
+    elif sort_mode == "bl_star_asc":
+        result.sort(key=lambda e: (e.bl_stars, e.song_name.lower()))
+    elif sort_mode == "bl_played_desc":
+        result.sort(key=lambda e: (0 if e.bl_played_at_ts > 0 else 1, -e.bl_played_at_ts if e.bl_played_at_ts > 0 else 0, e.song_name.lower()))
+    elif sort_mode == "bl_played_asc":
+        result.sort(key=lambda e: (0 if e.bl_played_at_ts > 0 else 1, e.bl_played_at_ts if e.bl_played_at_ts > 0 else 0, e.song_name.lower()))
+    elif sort_mode == "acc_ap_high":
+        result.sort(key=lambda e: (-e.acc_ap_value, e.acc_complexity_value, e.song_name.lower()))
+    elif sort_mode == "acc_ap_low":
+        result.sort(key=lambda e: (e.acc_ap_value, e.acc_complexity_value, e.song_name.lower()))
+    elif sort_mode == "accsvc_acc_high":
+        result.sort(key=lambda e: (-e.acc_player_acc, e.acc_complexity_value, e.song_name.lower()))
+    elif sort_mode == "accsvc_acc_low":
+        result.sort(key=lambda e: (e.acc_player_acc, e.acc_complexity_value, e.song_name.lower()))
+    elif sort_mode == "acc_rank_low":
+        result.sort(key=lambda e: (e.acc_player_rank_value or 999999, e.acc_complexity_value, e.song_name.lower()))
+    elif sort_mode == "acc_rank_high":
+        result.sort(key=lambda e: (-(e.acc_player_rank_value or 0), e.acc_complexity_value, e.song_name.lower()))
+    elif sort_mode == "acc_complexity_desc":
+        result.sort(key=lambda e: (-e.acc_complexity_value, e.song_name.lower()))
+    elif sort_mode == "acc_complexity_asc":
+        result.sort(key=lambda e: (e.acc_complexity_value, e.song_name.lower()))
+    elif sort_mode == "acc_cat_desc":
+        result.sort(key=lambda e: e.acc_category_value.lower(), reverse=True)
+    elif sort_mode == "acc_cat_asc":
+        result.sort(key=lambda e: e.acc_category_value.lower())
+    elif sort_mode == "acc_played_desc":
+        result.sort(key=lambda e: (0 if e.acc_played_at_ts > 0 else 1, -e.acc_played_at_ts if e.acc_played_at_ts > 0 else 0, e.song_name.lower()))
+    elif sort_mode == "acc_played_asc":
+        result.sort(key=lambda e: (0 if e.acc_played_at_ts > 0 else 1, e.acc_played_at_ts if e.acc_played_at_ts > 0 else 0, e.song_name.lower()))
+    elif sort_mode == "rl_ap_high":
+        result.sort(key=lambda e: (-e.rl_ap_value, e.rl_complexity_value, e.song_name.lower()))
+    elif sort_mode == "rl_ap_low":
+        result.sort(key=lambda e: (e.rl_ap_value, e.rl_complexity_value, e.song_name.lower()))
+    elif sort_mode == "rl_acc_high":
+        result.sort(key=lambda e: (-e.rl_player_acc, e.rl_complexity_value, e.song_name.lower()))
+    elif sort_mode == "rl_acc_low":
+        result.sort(key=lambda e: (e.rl_player_acc, e.rl_complexity_value, e.song_name.lower()))
+    elif sort_mode == "rl_rank_low":
+        result.sort(key=lambda e: (e.rl_player_rank_value or 999999, e.rl_complexity_value, e.song_name.lower()))
+    elif sort_mode == "rl_rank_high":
+        result.sort(key=lambda e: (-(e.rl_player_rank_value or 0), e.rl_complexity_value, e.song_name.lower()))
+    elif sort_mode == "rl_complexity_desc":
+        result.sort(key=lambda e: (-e.rl_complexity_value, e.song_name.lower()))
+    elif sort_mode == "rl_complexity_asc":
+        result.sort(key=lambda e: (e.rl_complexity_value, e.song_name.lower()))
+    elif sort_mode == "rl_cat_desc":
+        result.sort(key=lambda e: e.rl_category_value.lower(), reverse=True)
+    elif sort_mode == "rl_cat_asc":
+        result.sort(key=lambda e: e.rl_category_value.lower())
+    elif sort_mode == "rl_played_desc":
+        result.sort(key=lambda e: (0 if e.rl_played_at_ts > 0 else 1, -e.rl_played_at_ts if e.rl_played_at_ts > 0 else 0, e.song_name.lower()))
+    elif sort_mode == "rl_played_asc":
+        result.sort(key=lambda e: (0 if e.rl_played_at_ts > 0 else 1, e.rl_played_at_ts if e.rl_played_at_ts > 0 else 0, e.song_name.lower()))
+    elif sort_mode == "pp_high":
         result.sort(key=lambda e: (-e.player_pp, e.stars, e.song_name))
     elif sort_mode == "pp_low":
         result.sort(key=lambda e: (e.player_pp, e.stars, e.song_name))
@@ -3230,34 +3500,78 @@ def _sort_indicator_from_mode(sort_mode: str) -> Tuple[int, Qt.SortOrder]:
         "date_asc": (_COL_SOURCE_DATE, Qt.SortOrder.AscendingOrder),
         "duration_desc": (_COL_DURATION, Qt.SortOrder.DescendingOrder),
         "duration_asc": (_COL_DURATION, Qt.SortOrder.AscendingOrder),
+        "ss_played_desc": (_COL_SS_PLAYED, Qt.SortOrder.DescendingOrder),
+        "ss_played_asc": (_COL_SS_PLAYED, Qt.SortOrder.AscendingOrder),
+        "ss_rank_low": (_COL_SS_RANK, Qt.SortOrder.AscendingOrder),
+        "ss_rank_high": (_COL_SS_RANK, Qt.SortOrder.DescendingOrder),
+        "ss_star_asc": (_COL_SS_STARS, Qt.SortOrder.AscendingOrder),
+        "ss_star_desc": (_COL_SS_STARS, Qt.SortOrder.DescendingOrder),
+        "ss_acc_high": (_COL_SS_ACC, Qt.SortOrder.DescendingOrder),
+        "ss_acc_low": (_COL_SS_ACC, Qt.SortOrder.AscendingOrder),
+        "ss_pp_high": (_COL_SS_PP, Qt.SortOrder.DescendingOrder),
+        "ss_pp_low": (_COL_SS_PP, Qt.SortOrder.AscendingOrder),
+        "bl_played_desc": (_COL_BL_PLAYED, Qt.SortOrder.DescendingOrder),
+        "bl_played_asc": (_COL_BL_PLAYED, Qt.SortOrder.AscendingOrder),
+        "bl_rank_low": (_COL_BL_RANK, Qt.SortOrder.AscendingOrder),
+        "bl_rank_high": (_COL_BL_RANK, Qt.SortOrder.DescendingOrder),
+        "bl_star_asc": (_COL_BL_STARS, Qt.SortOrder.AscendingOrder),
+        "bl_star_desc": (_COL_BL_STARS, Qt.SortOrder.DescendingOrder),
+        "bl_acc_high": (_COL_BL_ACC, Qt.SortOrder.DescendingOrder),
+        "bl_acc_low": (_COL_BL_ACC, Qt.SortOrder.AscendingOrder),
+        "bl_pp_high": (_COL_BL_PP, Qt.SortOrder.DescendingOrder),
+        "bl_pp_low": (_COL_BL_PP, Qt.SortOrder.AscendingOrder),
         "bl_plays_desc": (_COL_BL_PLAYS, Qt.SortOrder.DescendingOrder),
         "bl_plays_asc": (_COL_BL_PLAYS, Qt.SortOrder.AscendingOrder),
         "bl_attempts_desc": (_COL_BL_ATTEMPTS, Qt.SortOrder.DescendingOrder),
         "bl_attempts_asc": (_COL_BL_ATTEMPTS, Qt.SortOrder.AscendingOrder),
-        "playtime_desc": (_COL_PLAY_TIME, Qt.SortOrder.DescendingOrder),
-        "playtime_asc": (_COL_PLAY_TIME, Qt.SortOrder.AscendingOrder),
+        "playtime_desc": (_COL_SS_PLAYED, Qt.SortOrder.DescendingOrder),
+        "playtime_asc": (_COL_SS_PLAYED, Qt.SortOrder.AscendingOrder),
         "diff_desc": (_COL_DIFF, Qt.SortOrder.DescendingOrder),
         "diff_asc": (_COL_DIFF, Qt.SortOrder.AscendingOrder),
         "mode_desc": (_COL_MODE, Qt.SortOrder.DescendingOrder),
         "mode_asc": (_COL_MODE, Qt.SortOrder.AscendingOrder),
         "cat_desc": (_COL_ACC_CAT, Qt.SortOrder.DescendingOrder),
         "cat_asc": (_COL_ACC_CAT, Qt.SortOrder.AscendingOrder),
-        "pp_high": (_COL_PLAYER_PP, Qt.SortOrder.DescendingOrder),
-        "pp_low": (_COL_PLAYER_PP, Qt.SortOrder.AscendingOrder),
-        "ap_high": (_COL_PLAYER_PP, Qt.SortOrder.DescendingOrder),
-        "ap_low": (_COL_PLAYER_PP, Qt.SortOrder.AscendingOrder),
-        "acc_high": (_COL_PLAYER_ACC, Qt.SortOrder.DescendingOrder),
-        "acc_low": (_COL_PLAYER_ACC, Qt.SortOrder.AscendingOrder),
-        "rank_low": (_COL_PLAYER_RANK, Qt.SortOrder.AscendingOrder),
-        "rank_high": (_COL_PLAYER_RANK, Qt.SortOrder.DescendingOrder),
+        "acc_played_desc": (_COL_ACC_PLAYED, Qt.SortOrder.DescendingOrder),
+        "acc_played_asc": (_COL_ACC_PLAYED, Qt.SortOrder.AscendingOrder),
+        "acc_cat_desc": (_COL_ACC_CAT, Qt.SortOrder.DescendingOrder),
+        "acc_cat_asc": (_COL_ACC_CAT, Qt.SortOrder.AscendingOrder),
+        "acc_complexity_desc": (_COL_ACC_COMPLEXITY, Qt.SortOrder.DescendingOrder),
+        "acc_complexity_asc": (_COL_ACC_COMPLEXITY, Qt.SortOrder.AscendingOrder),
+        "accsvc_acc_high": (_COL_ACC_ACC, Qt.SortOrder.DescendingOrder),
+        "accsvc_acc_low": (_COL_ACC_ACC, Qt.SortOrder.AscendingOrder),
+        "acc_ap_high": (_COL_ACC_AP, Qt.SortOrder.DescendingOrder),
+        "acc_ap_low": (_COL_ACC_AP, Qt.SortOrder.AscendingOrder),
+        "acc_rank_low": (_COL_ACC_RANK, Qt.SortOrder.AscendingOrder),
+        "acc_rank_high": (_COL_ACC_RANK, Qt.SortOrder.DescendingOrder),
+        "rl_played_desc": (_COL_RL_PLAYED, Qt.SortOrder.DescendingOrder),
+        "rl_played_asc": (_COL_RL_PLAYED, Qt.SortOrder.AscendingOrder),
+        "rl_cat_desc": (_COL_RL_CAT, Qt.SortOrder.DescendingOrder),
+        "rl_cat_asc": (_COL_RL_CAT, Qt.SortOrder.AscendingOrder),
+        "rl_complexity_desc": (_COL_RL_COMPLEXITY, Qt.SortOrder.DescendingOrder),
+        "rl_complexity_asc": (_COL_RL_COMPLEXITY, Qt.SortOrder.AscendingOrder),
+        "rl_acc_high": (_COL_RL_ACC, Qt.SortOrder.DescendingOrder),
+        "rl_acc_low": (_COL_RL_ACC, Qt.SortOrder.AscendingOrder),
+        "rl_ap_high": (_COL_RL_AP, Qt.SortOrder.DescendingOrder),
+        "rl_ap_low": (_COL_RL_AP, Qt.SortOrder.AscendingOrder),
+        "rl_rank_low": (_COL_RL_RANK, Qt.SortOrder.AscendingOrder),
+        "rl_rank_high": (_COL_RL_RANK, Qt.SortOrder.DescendingOrder),
+        "pp_high": (_COL_SS_PP, Qt.SortOrder.DescendingOrder),
+        "pp_low": (_COL_SS_PP, Qt.SortOrder.AscendingOrder),
+        "ap_high": (_COL_ACC_AP, Qt.SortOrder.DescendingOrder),
+        "ap_low": (_COL_ACC_AP, Qt.SortOrder.AscendingOrder),
+        "acc_high": (_COL_SS_ACC, Qt.SortOrder.DescendingOrder),
+        "acc_low": (_COL_SS_ACC, Qt.SortOrder.AscendingOrder),
+        "rank_low": (_COL_SS_RANK, Qt.SortOrder.AscendingOrder),
+        "rank_high": (_COL_SS_RANK, Qt.SortOrder.DescendingOrder),
         "bs_rate_high": (_COL_BS_RATE, Qt.SortOrder.DescendingOrder),
         "bs_rate_low": (_COL_BS_RATE, Qt.SortOrder.AscendingOrder),
         "bs_upvotes_high": (_COL_BS_UPVOTES, Qt.SortOrder.DescendingOrder),
         "bs_upvotes_low": (_COL_BS_UPVOTES, Qt.SortOrder.AscendingOrder),
         "bs_downvotes_high": (_COL_BS_DOWNVOTES, Qt.SortOrder.DescendingOrder),
         "bs_downvotes_low": (_COL_BS_DOWNVOTES, Qt.SortOrder.AscendingOrder),
-        "star_asc": (_COL_STARS, Qt.SortOrder.AscendingOrder),
-        "star_desc": (_COL_STARS, Qt.SortOrder.DescendingOrder),
+        "star_asc": (_COL_SS_STARS, Qt.SortOrder.AscendingOrder),
+        "star_desc": (_COL_SS_STARS, Qt.SortOrder.DescendingOrder),
         "fc_desc": (_COL_FC, Qt.SortOrder.DescendingOrder),
         "fc_asc": (_COL_FC, Qt.SortOrder.AscendingOrder),
         "mapper_desc": (_COL_MAPPER, Qt.SortOrder.DescendingOrder),
@@ -3460,29 +3774,48 @@ _COL_ONECLICK = 3
 _COL_DELETE = 4
 _COL_SOURCE_DATE = 5
 _COL_DURATION = 6
-_COL_PLAY_TIME = 7
-_COL_DIFF = 8
-_COL_MODE = 9
-_COL_ACC_CAT = 10
-_COL_SERVICE = 11     # スコア元サービス表示 (BL / SS / AS)
-_COL_PLAYER_RANK = 12
-_COL_STARS = 13
-_COL_PLAYER_ACC = 14
-_COL_PLAYER_PP = 15
-_COL_BS_RATE = 16
-_COL_BS_UPVOTES = 17
-_COL_BS_DOWNVOTES = 18
-_COL_FC = 19
-_COL_MOD = 20
-_COL_MAPPER = 21
-_COL_AUTHOR = 22
-_COL_BL_PLAYS = 23
-_COL_BL_ATTEMPTS = 24
-_COL_COUNT = 25
+_COL_DIFF = 7
+_COL_MODE = 8
+_COL_SS_PLAYED = 9
+_COL_SS_RANK = 10
+_COL_SS_STARS = 11
+_COL_SS_ACC = 12
+_COL_SS_PP = 13
+_COL_BL_PLAYED = 14
+_COL_BL_RANK = 15
+_COL_BL_STARS = 16
+_COL_BL_ACC = 17
+_COL_BL_PP = 18
+_COL_BL_PLAYS = 19
+_COL_BL_ATTEMPTS = 20
+_COL_ACC_PLAYED = 21
+_COL_ACC_CAT = 22
+_COL_ACC_COMPLEXITY = 23
+_COL_ACC_ACC = 24
+_COL_ACC_AP = 25
+_COL_ACC_RANK = 26
+_COL_RL_PLAYED = 27
+_COL_RL_CAT = 28
+_COL_RL_COMPLEXITY = 29
+_COL_RL_ACC = 30
+_COL_RL_AP = 31
+_COL_RL_RANK = 32
+_COL_BS_RATE = 33
+_COL_BS_UPVOTES = 34
+_COL_BS_DOWNVOTES = 35
+_COL_FC = 36
+_COL_MOD = 37
+_COL_MAPPER = 38
+_COL_AUTHOR = 39
+_COL_COUNT = 40
 
 _COL_LABELS = [
-    "Status", "Cover", "Song", "DL", "Del", "Date", "Length", "Played At", "Diff", "Mode", "Category", "Service", "Rank", "★", "Acc %", "PP",
-    "Rate %", "⇧", "⇩", "FC", "Mods", "Mapper", "Author", "BL Plays", "BL Attempts",
+    "Status", "Cover", "Song", "DL", "Del", "Date", "Length", "Diff", "Mode",
+    "Played", "Rank", "★", "Acc %", "PP",
+    "Played", "Rank", "★", "Acc %", "PP", "Plays", "Attempts",
+    "Played", "Category", "Cmplx", "Acc %", "AP", "Rank",
+    "Played", "Category", "Cmplx", "Acc %", "AP", "Rank",
+    "Rate %", "⇧", "⇩", "FC", "Mods", "Mapper", "Author",
 ]
 
 
@@ -4519,15 +4852,32 @@ class PlaylistWindow(QMainWindow):
         table.setColumnWidth(_COL_DELETE, 46)
         table.setColumnWidth(_COL_SOURCE_DATE, 112)
         table.setColumnWidth(_COL_DURATION, 40)
-        table.setColumnWidth(_COL_PLAY_TIME, 110)
         table.setColumnWidth(_COL_DIFF, 26)
         table.setColumnWidth(_COL_MODE, 42)
-        table.setColumnWidth(_COL_ACC_CAT, 60)
-        table.setColumnWidth(_COL_SERVICE, 48)
-        table.setColumnWidth(_COL_PLAYER_RANK, 60)
-        table.setColumnWidth(_COL_STARS, 40)
-        table.setColumnWidth(_COL_PLAYER_ACC, 60)
-        table.setColumnWidth(_COL_PLAYER_PP, 45)
+        table.setColumnWidth(_COL_SS_PLAYED, 110)
+        table.setColumnWidth(_COL_SS_RANK, 60)
+        table.setColumnWidth(_COL_SS_STARS, 52)
+        table.setColumnWidth(_COL_SS_ACC, 64)
+        table.setColumnWidth(_COL_SS_PP, 52)
+        table.setColumnWidth(_COL_BL_PLAYED, 110)
+        table.setColumnWidth(_COL_BL_RANK, 60)
+        table.setColumnWidth(_COL_BL_STARS, 52)
+        table.setColumnWidth(_COL_BL_ACC, 64)
+        table.setColumnWidth(_COL_BL_PP, 52)
+        table.setColumnWidth(_COL_BL_PLAYS, 78)
+        table.setColumnWidth(_COL_BL_ATTEMPTS, 88)
+        table.setColumnWidth(_COL_ACC_PLAYED, 110)
+        table.setColumnWidth(_COL_ACC_CAT, 70)
+        table.setColumnWidth(_COL_ACC_COMPLEXITY, 58)
+        table.setColumnWidth(_COL_ACC_ACC, 64)
+        table.setColumnWidth(_COL_ACC_AP, 52)
+        table.setColumnWidth(_COL_ACC_RANK, 60)
+        table.setColumnWidth(_COL_RL_PLAYED, 110)
+        table.setColumnWidth(_COL_RL_CAT, 70)
+        table.setColumnWidth(_COL_RL_COMPLEXITY, 58)
+        table.setColumnWidth(_COL_RL_ACC, 64)
+        table.setColumnWidth(_COL_RL_AP, 52)
+        table.setColumnWidth(_COL_RL_RANK, 60)
         table.setColumnWidth(_COL_BS_RATE, 60)
         table.setColumnWidth(_COL_BS_UPVOTES, 50)
         table.setColumnWidth(_COL_BS_DOWNVOTES, 50)
@@ -4543,6 +4893,42 @@ class PlaylistWindow(QMainWindow):
         table.itemSelectionChanged.connect(table.viewport().update)
         table.verticalScrollBar().valueChanged.connect(lambda _value, current_table=table: self._hydrate_visible_row_widgets(current_table))
         return table
+
+    def _visible_snapshot_service_columns(self) -> Dict[str, Tuple[int, ...]]:
+        return {
+            "scoresaber": (_COL_SS_PLAYED, _COL_SS_RANK, _COL_SS_STARS, _COL_SS_ACC, _COL_SS_PP),
+            "beatleader": (_COL_BL_PLAYED, _COL_BL_RANK, _COL_BL_STARS, _COL_BL_ACC, _COL_BL_PP, _COL_BL_PLAYS, _COL_BL_ATTEMPTS),
+            "accsaber": (_COL_ACC_PLAYED, _COL_ACC_CAT, _COL_ACC_COMPLEXITY, _COL_ACC_ACC, _COL_ACC_AP, _COL_ACC_RANK),
+            "accsaber_reloaded": (_COL_RL_PLAYED, _COL_RL_CAT, _COL_RL_COMPLEXITY, _COL_RL_ACC, _COL_RL_AP, _COL_RL_RANK),
+        }
+
+    def _current_snapshot_service_name(self) -> str:
+        if self._rb_ss.isChecked():
+            return "scoresaber"
+        if self._rb_bl.isChecked():
+            return "beatleader"
+        if self._rb_acc.isChecked():
+            return "accsaber"
+        if self._rb_acc_rl.isChecked():
+            return "accsaber_reloaded"
+        svc = str(self._svc_combo.currentData() or "none")
+        return {
+            "scoresaber": "scoresaber",
+            "beatleader": "beatleader",
+            "accsaber": "accsaber",
+            "accsaber_rl": "accsaber_reloaded",
+        }.get(svc, "scoresaber")
+
+    def _set_table_header_item(self, col: int, text: str, icon_path: Optional[Path] = None) -> None:
+        item = self._table.horizontalHeaderItem(col)
+        if item is None:
+            item = QTableWidgetItem()
+            self._table.setHorizontalHeaderItem(col, item)
+        item.setText(text)
+        if icon_path is not None and icon_path.exists():
+            item.setIcon(QIcon(str(icon_path)))
+        else:
+            item.setIcon(QIcon())
 
     def _is_maps_tab(self, index: Optional[int] = None) -> bool:
         tab_index = self._source_tabs.currentIndex() if index is None else index
@@ -5126,6 +5512,7 @@ class PlaylistWindow(QMainWindow):
             return
 
         self._snapshot_all_entries = _enrich_entries_with_beatsaver_cache(restored_entries)
+        _refresh_snapshot_entries_service_columns(self._snapshot_all_entries, self._steam_id)
         self._snapshot_filtered = list(self._snapshot_all_entries)
         self._snapshot_loaded_source_key = self._snapshot_source_key
         self._snapshot_loaded_steam_id = self._steam_id
@@ -5481,17 +5868,17 @@ class PlaylistWindow(QMainWindow):
     def _update_table_visual_mode(self) -> None:
         is_bs = self._rb_bs.isChecked()
         show_cover = is_bs or not self._is_maps_tab()
-        for col in (_COL_ACC_CAT, _COL_STARS, _COL_FC, _COL_MOD):
-            self._table.setColumnHidden(col, is_bs)
-        for col in (_COL_PLAYER_RANK, _COL_PLAYER_ACC, _COL_PLAYER_PP):
-            self._table.setColumnHidden(col, is_bs)
+        snapshot_groups = self._visible_snapshot_service_columns()
+        active_snapshot_service = self._current_snapshot_service_name()
+        for service_name, cols in snapshot_groups.items():
+            hide_group = is_bs or service_name != active_snapshot_service
+            for col in cols:
+                self._table.setColumnHidden(col, hide_group)
         for col in (_COL_BS_RATE, _COL_BS_UPVOTES, _COL_BS_DOWNVOTES):
             self._table.setColumnHidden(col, not is_bs)
         self._table.setColumnHidden(_COL_COVER, not show_cover)
         self._table.setColumnHidden(_COL_ONECLICK, not is_bs)
         self._table.setColumnHidden(_COL_DELETE, not is_bs)
-        self._table.setColumnHidden(_COL_BL_PLAYS, True)
-        self._table.setColumnHidden(_COL_BL_ATTEMPTS, True)
         self._table.setItemDelegateForColumn(
             _COL_BS_RATE,
             self._maps_rate_delegate if is_bs else self._default_numeric_delegate,
@@ -5503,45 +5890,45 @@ class PlaylistWindow(QMainWindow):
         self._update_score_headers()
 
     def _update_score_headers(self) -> None:
-        """ソースに応じて Date / PP / Acc % / Rank 列のヘッダを切り替える。"""
+        """ソースに応じて Date 列とサービス別ヘッダの表示を更新する。"""
+        if not hasattr(self, "_table"):
+            return
         if self._is_maps_tab():
             date_label = "Published"
-            pp_label, acc_label, rank_label = "PP", "Acc %", "Rank"
         elif self._rb_ss.isChecked():
-            date_label, pp_label, acc_label, rank_label = "Ranked", "PP", "Acc %", "Rank"
+            date_label = "Ranked"
         elif self._rb_bl.isChecked():
-            date_label, pp_label, acc_label, rank_label = "Ranked", "PP", "Acc %", "Rank"
+            date_label = "Ranked"
         elif self._rb_acc.isChecked() or self._rb_acc_rl.isChecked():
-            date_label, pp_label, acc_label, rank_label = "Ranked", "AP", "Acc %", "Rank"
+            date_label = "Ranked"
         elif self._rb_bs.isChecked():
-            date_label, pp_label, acc_label, rank_label = "Published", "PP", "Acc %", "Rank"
+            date_label = "Published"
         else:
-            # open モード: service コンボで決まる
-            svc = self._svc_combo.currentData() or "none"
-            if svc == "scoresaber":
-                date_label, pp_label, acc_label, rank_label = "Ranked", "PP", "Acc %", "Rank"
-            elif svc == "beatleader":
-                date_label, pp_label, acc_label, rank_label = "Ranked", "PP", "Acc %", "Rank"
-            elif svc in ("accsaber", "accsaber_rl"):
-                date_label, pp_label, acc_label, rank_label = "Ranked", "AP", "Acc %", "Rank"
-            else:
-                date_label, pp_label, acc_label, rank_label = "Date", "PP", "Acc %", "Rank"
-        for col, label in [
-            (_COL_SOURCE_DATE, date_label),
-            (_COL_PLAYER_PP, pp_label),
-            (_COL_PLAYER_ACC, acc_label),
-            (_COL_PLAYER_RANK, rank_label),
+            date_label = "Date"
+
+        self._set_table_header_item(_COL_SOURCE_DATE, date_label)
+
+        ss_icon = RESOURCES_DIR / "scoresaber_logo.svg"
+        bl_icon = RESOURCES_DIR / "beatleader_logo.webp"
+        acc_icon = RESOURCES_DIR / "asssaber_logo.webp"
+        rl_icon = RESOURCES_DIR / "accsaberreloaded_logo.png"
+        for col, text in [
+            (_COL_SS_PLAYED, "Played"), (_COL_SS_RANK, "Rank"), (_COL_SS_STARS, "★"), (_COL_SS_ACC, "Acc %"), (_COL_SS_PP, "PP"),
         ]:
-            item = self._table.horizontalHeaderItem(col)
-            if item is not None:
-                item.setText(label)
-        # AccSaber / AccSaber RL 時は★列を Category に切り替え
-        is_acc_mode = self._rb_acc.isChecked() or self._rb_acc_rl.isChecked() or (
-            self._rb_open.isChecked() and self._svc_combo.currentData() in ("accsaber_rl", "accsaber")
-        )
-        star_hdr = self._table.horizontalHeaderItem(_COL_STARS)
-        if star_hdr is not None:
-            star_hdr.setText("Cmplx" if is_acc_mode else "★")
+            self._set_table_header_item(col, text, ss_icon)
+        for col, text in [
+            (_COL_BL_PLAYED, "Played"), (_COL_BL_RANK, "Rank"), (_COL_BL_STARS, "★"), (_COL_BL_ACC, "Acc %"), (_COL_BL_PP, "PP"),
+            (_COL_BL_PLAYS, "Plays"), (_COL_BL_ATTEMPTS, "Attempts"),
+        ]:
+            self._set_table_header_item(col, text, bl_icon)
+        for col, text in [
+            (_COL_ACC_PLAYED, "Played"), (_COL_ACC_CAT, "Category"), (_COL_ACC_COMPLEXITY, "Cmplx"), (_COL_ACC_ACC, "Acc %"), (_COL_ACC_AP, "AP"), (_COL_ACC_RANK, "Rank"),
+        ]:
+            self._set_table_header_item(col, text, acc_icon)
+        for col, text in [
+            (_COL_RL_PLAYED, "Played"), (_COL_RL_CAT, "Category"), (_COL_RL_COMPLEXITY, "Cmplx"), (_COL_RL_ACC, "Acc %"), (_COL_RL_AP, "AP"), (_COL_RL_RANK, "Rank"),
+        ]:
+            self._set_table_header_item(col, text, rl_icon)
 
     def _current_sort_mode(self) -> str:
         """テーブルヘッダの現在のソート状態から sort_mode を返す。"""
@@ -5556,43 +5943,71 @@ class PlaylistWindow(QMainWindow):
             return "date_desc" if is_desc else "date_asc"
         if col == _COL_DURATION:
             return "duration_desc" if is_desc else "duration_asc"
+        if col == _COL_SS_PLAYED:
+            return "ss_played_desc" if is_desc else "ss_played_asc"
+        if col == _COL_SS_RANK:
+            return "ss_rank_high" if is_desc else "ss_rank_low"
+        if col == _COL_SS_STARS:
+            return "ss_star_desc" if is_desc else "ss_star_asc"
+        if col == _COL_SS_ACC:
+            return "ss_acc_high" if is_desc else "ss_acc_low"
+        if col == _COL_SS_PP:
+            return "ss_pp_high" if is_desc else "ss_pp_low"
+        if col == _COL_BL_PLAYED:
+            return "bl_played_desc" if is_desc else "bl_played_asc"
+        if col == _COL_BL_RANK:
+            return "bl_rank_high" if is_desc else "bl_rank_low"
+        if col == _COL_BL_STARS:
+            return "bl_star_desc" if is_desc else "bl_star_asc"
+        if col == _COL_BL_ACC:
+            return "bl_acc_high" if is_desc else "bl_acc_low"
+        if col == _COL_BL_PP:
+            return "bl_pp_high" if is_desc else "bl_pp_low"
         if col == _COL_BL_PLAYS:
             return "bl_plays_desc" if is_desc else "bl_plays_asc"
         if col == _COL_BL_ATTEMPTS:
             return "bl_attempts_desc" if is_desc else "bl_attempts_asc"
-        if col == _COL_PLAY_TIME:
-            return "playtime_desc" if is_desc else "playtime_asc"
+        if col == _COL_ACC_PLAYED:
+            return "acc_played_desc" if is_desc else "acc_played_asc"
         if col == _COL_DIFF:
             return "diff_desc" if is_desc else "diff_asc"
         if col == _COL_MODE:
             return "mode_desc" if is_desc else "mode_asc"
         if col == _COL_ACC_CAT:
-            return "cat_desc" if is_desc else "cat_asc"
-        if col == _COL_PLAYER_PP:
-            # AccSaber/RL モードでは AP 表示のため ap ソートモードを返す
-            hdr = self._table.horizontalHeaderItem(_COL_PLAYER_PP)
-            if hdr and hdr.text() == "AP":
-                return "ap_high" if is_desc else "ap_low"
-            return "pp_high" if is_desc else "pp_low"
+            return "acc_cat_desc" if is_desc else "acc_cat_asc"
+        if col == _COL_ACC_COMPLEXITY:
+            return "acc_complexity_desc" if is_desc else "acc_complexity_asc"
+        if col == _COL_ACC_ACC:
+            return "accsvc_acc_high" if is_desc else "accsvc_acc_low"
+        if col == _COL_ACC_AP:
+            return "acc_ap_high" if is_desc else "acc_ap_low"
+        if col == _COL_ACC_RANK:
+            return "acc_rank_high" if is_desc else "acc_rank_low"
+        if col == _COL_RL_PLAYED:
+            return "rl_played_desc" if is_desc else "rl_played_asc"
+        if col == _COL_RL_CAT:
+            return "rl_cat_desc" if is_desc else "rl_cat_asc"
+        if col == _COL_RL_COMPLEXITY:
+            return "rl_complexity_desc" if is_desc else "rl_complexity_asc"
+        if col == _COL_RL_ACC:
+            return "rl_acc_high" if is_desc else "rl_acc_low"
+        if col == _COL_RL_AP:
+            return "rl_ap_high" if is_desc else "rl_ap_low"
+        if col == _COL_RL_RANK:
+            return "rl_rank_high" if is_desc else "rl_rank_low"
         if col == _COL_BS_RATE:
             return "bs_rate_high" if is_desc else "bs_rate_low"
         if col == _COL_BS_UPVOTES:
             return "bs_upvotes_high" if is_desc else "bs_upvotes_low"
         if col == _COL_BS_DOWNVOTES:
             return "bs_downvotes_high" if is_desc else "bs_downvotes_low"
-        if col == _COL_PLAYER_ACC:
-            return "acc_high" if is_desc else "acc_low"
-        if col == _COL_PLAYER_RANK:
-            return "rank_high" if is_desc else "rank_low"
-        if col == _COL_STARS:
-            return "star_desc" if is_desc else "star_asc"
         if col == _COL_FC:
             return "fc_desc" if is_desc else "fc_asc"
         if col == _COL_MAPPER:
             return "mapper_desc" if is_desc else "mapper_asc"
         if col == _COL_AUTHOR:
             return "author_desc" if is_desc else "author_asc"
-        return "star_asc"
+        return "ss_star_asc"
 
     def _make_export_tag(self) -> str:
         """現在のフィルタ・ソート・検索状態を反映したファイル名タグを返す。
@@ -6034,6 +6449,8 @@ class PlaylistWindow(QMainWindow):
     def _on_load_finished(self, entries: List[MapEntry]) -> None:
         self._close_load_progress_dialog()
         self._btn_load.setEnabled(True)
+        if not self._pending_load_maps_tab:
+            _refresh_snapshot_entries_service_columns(entries, self._steam_id)
         self._all_entries = entries
         if self._pending_load_maps_tab:
             self._maps_loaded_steam_id = self._steam_id
@@ -7345,10 +7762,11 @@ class PlaylistWindow(QMainWindow):
                     delete_item.setToolTip("Installed" if delete_sort_val > 0 else "Not installed")
                     table.setItem(row, _COL_DELETE, delete_item)
                     table.setCellWidget(row, _COL_DELETE, self._make_delete_button(entry))
-                played_at_item = _played_at_item(entry.played_at_ts)
-                played_at_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-                table.setItem(row, _COL_PLAY_TIME, played_at_item)
-                has_bl_stats_source = bool(entry.leaderboard_id and entry.source in ("beatleader", "beatsaver"))
+                table.setItem(row, _COL_SS_PLAYED, _played_at_item(entry.ss_played_at_ts))
+                table.setItem(row, _COL_BL_PLAYED, _played_at_item(entry.bl_played_at_ts))
+                table.setItem(row, _COL_ACC_PLAYED, _played_at_item(entry.acc_played_at_ts))
+                table.setItem(row, _COL_RL_PLAYED, _played_at_item(entry.rl_played_at_ts))
+                has_bl_stats_source = bool(entry.bl_leaderboard_id or entry.beatleader_page_url)
                 bl_plays_item = _NumItem(
                     str(entry.beatleader_plays) if has_bl_stats_source else "-",
                     float(entry.beatleader_plays if has_bl_stats_source else -1.0),
@@ -7533,44 +7951,73 @@ class PlaylistWindow(QMainWindow):
         delete_item = _NumItem("", delete_sort_val)
         delete_item.setToolTip("Installed" if delete_sort_val > 0 else "Not installed")
         table.setItem(row, _COL_DELETE, delete_item)
-        has_bl_stats_source = bool(e.leaderboard_id and e.source in ("beatleader", "beatsaver"))
+        has_bl_stats_source = bool(e.bl_leaderboard_id or e.beatleader_page_url)
         table.setItem(
             row,
             _COL_SOURCE_DATE,
             _source_date_item(e.source_date_ts, include_time=(e.source == "beatsaver")),
         )
         table.setItem(row, _COL_DURATION, _duration_item(e.duration_seconds))
-
-        played_at_item = _played_at_item(e.played_at_ts)
-        played_at_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        table.setItem(row, _COL_PLAY_TIME, played_at_item)
         table.setItem(row, _COL_DIFF, _diff_item(e.difficulty))
         table.setItem(row, _COL_MODE, _mode_item(e.mode))
 
-        if is_acc_mode:
-            star_item = _NumItem(f"{e.acc_complexity:.1f}" if e.acc_complexity > 0 else "-", e.acc_complexity)
-            star_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            table.setItem(row, _COL_STARS, star_item)
-        else:
-            star_text = f"{e.stars:.2f}" if e.stars > 0 else "-"
-            star_item = _NumItem(star_text, e.stars)
-            star_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            table.setItem(row, _COL_STARS, star_item)
+        table.setItem(row, _COL_SS_PLAYED, _played_at_item(e.ss_played_at_ts))
+        ss_rank_item = _NumItem(str(e.ss_player_rank) if e.ss_player_rank > 0 else "-", e.ss_player_rank if e.ss_player_rank > 0 else 999_999_999)
+        ss_rank_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        table.setItem(row, _COL_SS_RANK, ss_rank_item)
+        ss_star_item = _NumItem(f"{e.ss_stars:.2f}" if e.ss_stars > 0 else "-", e.ss_stars)
+        ss_star_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        table.setItem(row, _COL_SS_STARS, ss_star_item)
+        ss_acc_item = _NumItem(f"{e.ss_player_acc:.2f}%" if e.ss_player_acc > 0 else "-", e.ss_player_acc)
+        ss_acc_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        table.setItem(row, _COL_SS_ACC, ss_acc_item)
+        ss_pp_item = _NumItem(f"{e.ss_player_pp:.1f}" if e.ss_player_pp > 0 else "-", e.ss_player_pp)
+        ss_pp_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        table.setItem(row, _COL_SS_PP, ss_pp_item)
 
-        if is_acc_mode:
-            pp_item = _NumItem(
-                f"{e.acc_rl_ap:.2f}" if e.acc_rl_ap > 0 else "-",
-                e.acc_rl_ap,
-            )
-        elif is_bs_mode:
-            pp_item = _NumItem("-", 0.0)
-        else:
-            pp_item = _NumItem(
-                f"{e.player_pp:.1f}" if e.player_pp > 0 else "-",
-                e.player_pp,
-            )
-        pp_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        table.setItem(row, _COL_PLAYER_PP, pp_item)
+        table.setItem(row, _COL_BL_PLAYED, _played_at_item(e.bl_played_at_ts))
+        bl_rank_item = _NumItem(str(e.bl_player_rank) if e.bl_player_rank > 0 else "-", e.bl_player_rank if e.bl_player_rank > 0 else 999_999_999)
+        bl_rank_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        table.setItem(row, _COL_BL_RANK, bl_rank_item)
+        bl_star_item = _NumItem(f"{e.bl_stars:.2f}" if e.bl_stars > 0 else "-", e.bl_stars)
+        bl_star_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        table.setItem(row, _COL_BL_STARS, bl_star_item)
+        bl_acc_item = _NumItem(f"{e.bl_player_acc:.2f}%" if e.bl_player_acc > 0 else "-", e.bl_player_acc)
+        bl_acc_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        table.setItem(row, _COL_BL_ACC, bl_acc_item)
+        bl_pp_item = _NumItem(f"{e.bl_player_pp:.1f}" if e.bl_player_pp > 0 else "-", e.bl_player_pp)
+        bl_pp_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        table.setItem(row, _COL_BL_PP, bl_pp_item)
+
+        table.setItem(row, _COL_ACC_PLAYED, _played_at_item(e.acc_played_at_ts))
+        table.setItem(row, _COL_ACC_CAT, QTableWidgetItem(self._format_acc_category_text(e.acc_category_value)))
+        acc_complexity_item = _NumItem(f"{e.acc_complexity_value:.1f}" if e.acc_complexity_value > 0 else "-", e.acc_complexity_value)
+        acc_complexity_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        table.setItem(row, _COL_ACC_COMPLEXITY, acc_complexity_item)
+        acc_acc_item = _NumItem(f"{e.acc_player_acc:.2f}%" if e.acc_player_acc > 0 else "-", e.acc_player_acc)
+        acc_acc_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        table.setItem(row, _COL_ACC_ACC, acc_acc_item)
+        acc_ap_item = _NumItem(f"{e.acc_ap_value:.2f}" if e.acc_ap_value > 0 else "-", e.acc_ap_value)
+        acc_ap_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        table.setItem(row, _COL_ACC_AP, acc_ap_item)
+        acc_rank_item = _NumItem(str(e.acc_player_rank_value) if e.acc_player_rank_value > 0 else "-", e.acc_player_rank_value if e.acc_player_rank_value > 0 else 999_999_999)
+        acc_rank_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        table.setItem(row, _COL_ACC_RANK, acc_rank_item)
+
+        table.setItem(row, _COL_RL_PLAYED, _played_at_item(e.rl_played_at_ts))
+        table.setItem(row, _COL_RL_CAT, QTableWidgetItem(self._format_acc_category_text(e.rl_category_value)))
+        rl_complexity_item = _NumItem(f"{e.rl_complexity_value:.1f}" if e.rl_complexity_value > 0 else "-", e.rl_complexity_value)
+        rl_complexity_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        table.setItem(row, _COL_RL_COMPLEXITY, rl_complexity_item)
+        rl_acc_item = _NumItem(f"{e.rl_player_acc:.2f}%" if e.rl_player_acc > 0 else "-", e.rl_player_acc)
+        rl_acc_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        table.setItem(row, _COL_RL_ACC, rl_acc_item)
+        rl_ap_item = _NumItem(f"{e.rl_ap_value:.2f}" if e.rl_ap_value > 0 else "-", e.rl_ap_value)
+        rl_ap_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        table.setItem(row, _COL_RL_AP, rl_ap_item)
+        rl_rank_item = _NumItem(str(e.rl_player_rank_value) if e.rl_player_rank_value > 0 else "-", e.rl_player_rank_value if e.rl_player_rank_value > 0 else 999_999_999)
+        rl_rank_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        table.setItem(row, _COL_RL_RANK, rl_rank_item)
 
         if is_bs_mode:
             bs_rate_item = _NumItem(
@@ -7583,36 +8030,12 @@ class PlaylistWindow(QMainWindow):
         bs_rate_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         table.setItem(row, _COL_BS_RATE, bs_rate_item)
 
-        svc_item = QTableWidgetItem(e.score_source if e.score_source else "-")
-        svc_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-        table.setItem(row, _COL_SERVICE, svc_item)
-
-        if is_bs_mode:
-            acc_item = _NumItem("-", 0.0)
-        else:
-            acc_item = _NumItem(
-                f"{e.player_acc:.2f}%" if e.player_acc > 0 else "-",
-                e.player_acc,
-            )
-        acc_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        table.setItem(row, _COL_PLAYER_ACC, acc_item)
-
         bs_upvotes_item = _NumItem(
             str(e.beatsaver_upvotes) if is_bs_mode else "-",
             float(e.beatsaver_upvotes if is_bs_mode else 0.0),
         )
         bs_upvotes_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         table.setItem(row, _COL_BS_UPVOTES, bs_upvotes_item)
-
-        if is_bs_mode:
-            rank_item = _NumItem("-", 999_999_999)
-        else:
-            rank_item = _NumItem(
-                str(e.player_rank) if e.player_rank > 0 else "-",
-                e.player_rank if e.player_rank > 0 else 999_999_999,
-            )
-        rank_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        table.setItem(row, _COL_PLAYER_RANK, rank_item)
 
         bs_downvotes_item = _NumItem(
             str(e.beatsaver_downvotes) if is_bs_mode else "-",
@@ -7643,19 +8066,12 @@ class PlaylistWindow(QMainWindow):
         mod_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
         table.setItem(row, _COL_MOD, mod_item)
 
+    def _format_acc_category_text(self, raw_cat: str) -> str:
         cat_display = {"true": "True", "standard": "Standard", "tech": "Tech"}
-        if self._rb_open.isChecked():
-            svc_disp = {"scoresaber": "SS", "beatleader": "BL", "accsaber_reloaded": "RL"}.get(e.source, e.source)
-            cat_text = svc_disp
-        elif e.source == "beatsaver":
-            cat_text = "-"
-        elif e.source in ("scoresaber", "beatleader"):
-            cat_text = "-"
-        else:
-            raw_cat = e.acc_category or ""
-            cats = raw_cat.split("/")
-            cat_text = "/".join(cat_display.get(c, c.capitalize()) for c in cats) if raw_cat else ""
-        table.setItem(row, _COL_ACC_CAT, QTableWidgetItem(cat_text))
+        if not raw_cat:
+            return ""
+        cats = raw_cat.split("/")
+        return "/".join(cat_display.get(c, c.capitalize()) for c in cats)
 
     def _finish_table_render(self, table: QTableWidget, render_token: int) -> None:
         if render_token != self._table_render_token:
