@@ -3748,7 +3748,7 @@ class PlaylistWindow(QMainWindow):
         _preview_link_row2.addWidget(self._btn_preview_replay)
 
         self._btn_preview_global1_replay = QPushButton("")
-        self._btn_preview_global1_replay.setIcon(QIcon(str(RESOURCES_DIR / "global#1_replay_btn.png")))
+        self._btn_preview_global1_replay.setIcon(QIcon(str(RESOURCES_DIR / "global_no1_replay_btn.png")))
         self._btn_preview_global1_replay.setIconSize(QSize(18, 18))
         self._btn_preview_global1_replay.setEnabled(False)
         self._btn_preview_global1_replay.setToolTip("Global #1 Replay on BeatLeader")
@@ -3758,7 +3758,7 @@ class PlaylistWindow(QMainWindow):
         _preview_link_row2.addWidget(self._btn_preview_global1_replay)
 
         self._btn_preview_local1_replay = QPushButton("")
-        self._btn_preview_local1_replay.setIcon(QIcon(str(RESOURCES_DIR / "local#1_replay_btn.png")))
+        self._btn_preview_local1_replay.setIcon(QIcon(str(RESOURCES_DIR / "local_no1_replay_btn.png")))
         self._btn_preview_local1_replay.setIconSize(QSize(18, 18))
         self._btn_preview_local1_replay.setEnabled(False)
         self._btn_preview_local1_replay.setToolTip("Local #1 Replay on BeatLeader")
