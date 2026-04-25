@@ -46,7 +46,7 @@ import zipfile
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, NamedTuple
-from urllib.parse import urlparse
+from urllib.parse import urlparse, quote
 
 import requests
 from PySide6.QtCore import QObject, QThread, Signal, Qt
@@ -406,7 +406,7 @@ def apply_update(
         if progress:
             progress(f"ダウンロード中: {repo_path}", i + 1, total)
 
-        raw_url = f"{raw_base}/{repo_path}"
+        raw_url = f"{raw_base}/{quote(repo_path, safe='/')}"
         content = _read_update_source_bytes(raw_url, timeout=30)
         if repo_path.startswith(_SOURCE_PREFIX):
             # .py ファイルのみ: UTF-8 BOM 除去・改行コード CRLF 統一
