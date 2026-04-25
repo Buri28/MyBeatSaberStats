@@ -543,6 +543,8 @@ sealed class UpdateDialog : Form
     {
         string requestedTag = (string)e.Argument;
         ReleaseInfo release = GitHubReleaseClient.ResolveRelease(_options, requestedTag, _releases);
+        if (string.IsNullOrEmpty(release.ZipUrl))
+            throw new InvalidOperationException("このリリースにはダウンロード可能な zip アセットがありません: " + release.TagName + "\n\nGitHub リリースページで zip アセットが添付されているか確認してください。");
         string stageDir = UpdateInstaller.CreateStageDirectory();
         string zipPath = Path.Combine(stageDir, "release.zip");
         GitHubReleaseClient.DownloadFile(release.ZipUrl, zipPath);
@@ -600,7 +602,6 @@ static class GitHubReleaseClient
         return releases
             .Where(dto => dto != null && !dto.draft && !string.IsNullOrEmpty(dto.tag_name))
             .Select(dto => ToReleaseInfo(dto, options))
-            .Where(info => !string.IsNullOrEmpty(info.ZipUrl))
             .ToList();
     }
 
