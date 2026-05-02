@@ -3910,7 +3910,7 @@ class PlayerWindow(QMainWindow):
             if self._playlist_window is None:
                 return
             if not self._playlist_window.isVisible() and not self._playlist_window._initial_restore_started:
-                self._playlist_window._initial_restore_started = True
+                self._playlist_window._skip_initial_snapshot_restore = True
             progress.close()
             self._playlist_window.show()
             self._playlist_window.raise_()
