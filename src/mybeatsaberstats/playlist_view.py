@@ -849,9 +849,12 @@ def show_bl_mapper_top_dialog(parent: Optional[QWidget], cache_data: dict, limit
     result = {"action": "close"}
     button_row = QHBoxLayout()
     button_row.addStretch()
-    btn_refresh_since = QPushButton("Refresh Since Cache Date")
-    btn_full = QPushButton("Full Rebuild")
+    btn_refresh_since = QPushButton("Load New")
+    btn_refresh_since.setToolTip("前回キャッシュ日時以降の BeatLeader データだけを追加で読み込みます")
+    btn_full = QPushButton("Load All")
+    btn_full.setToolTip("BeatLeader データを先頭からすべて読み込み直して集計を作り直します")
     btn_close = QPushButton("Close")
+    btn_close.setToolTip("Mapper List ダイアログを閉じます")
     btn_close.setDefault(True)
 
     def _set_action(action: str) -> None:
