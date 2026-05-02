@@ -812,6 +812,8 @@ def show_bl_mapper_top_dialog(parent: Optional[QWidget], cache_data: dict, limit
         ((str(mapper), int(count)) for mapper, count in (cache_data.get("counts") or {}).items()),
         key=lambda kv: (-kv[1], kv[0].lower()),
     )
+    played_total_label = QLabel(dlg)
+    played_total_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
 
     def _apply_mapper_rows() -> None:
         keyword = filter_edit.text().strip().lower()
@@ -833,10 +835,12 @@ def show_bl_mapper_top_dialog(parent: Optional[QWidget], cache_data: dict, limit
             table.setItem(row - 1, 1, mapper_item)
             table.setItem(row - 1, 2, played_item)
         summary_count = len(visible_rows)
+        played_total = sum(count_value for _mapper_name, count_value in visible_rows)
         title_label.setText(
             f"Showing {summary_count:,} / {unique_mappers:,} mappers from BeatLeader best-score cache\n"
             f"Fetched: {fetched_at}   Unique mappers: {unique_mappers:,}   Played maps: {total_maps:,}   Unknown: {unknown_maps:,}"
         )
+        played_total_label.setText(f"Played Total: {played_total:,}")
 
     filter_edit.textChanged.connect(lambda _text: _apply_mapper_rows())
     _apply_mapper_rows()
@@ -844,6 +848,7 @@ def show_bl_mapper_top_dialog(parent: Optional[QWidget], cache_data: dict, limit
 
     result = {"action": "close"}
     button_row = QHBoxLayout()
+    button_row.addWidget(played_total_label)
     button_row.addStretch()
     btn_refresh_since = QPushButton("Load New")
     btn_refresh_since.setToolTip("前回キャッシュ日時以降の BeatLeader データだけを追加で読み込みます")
