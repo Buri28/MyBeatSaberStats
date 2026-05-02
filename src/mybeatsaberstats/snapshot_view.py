@@ -2042,6 +2042,24 @@ class SnapshotCompareDialog(QDialog):
 
         # BeatLeader
         _bl_grp_start = row_main
+
+        def _format_bl_prestige_value(prestige: "Optional[int]", level: "Optional[int]") -> "tuple[int, str] | None":
+            if prestige is None:
+                return None
+            text = f"{prestige:,}"
+            if level is not None:
+                text += f" (Lv.{level:,})"
+            return (prestige, text)
+
+        self._set_row(
+            self.table,
+            row_main,
+            "[BL] Prestige",
+            _format_bl_prestige_value(snap_a.beatleader_prestige, snap_a.beatleader_level),
+            _format_bl_prestige_value(snap_b.beatleader_prestige, snap_b.beatleader_level),
+        )
+        row_main += 1
+
         self._set_row(self.table, row_main, "[BL] PP", snap_a.beatleader_pp, snap_b.beatleader_pp)
         row_main += 1
 
