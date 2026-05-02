@@ -1695,21 +1695,24 @@ class SnapshotCompareDialog(QDialog):
         table.setItem(row, 1, item0)
 
         def _extract(value):
-            # (numeric_value, display_text) 形式を解釈する
-            if isinstance(value, tuple) and len(value) == 2:
-                numeric, display = value
+            # (numeric_value, display_text[, extra_numeric, extra_label]) 形式を解釈する
+            if isinstance(value, tuple) and len(value) >= 2:
+                numeric = value[0]
+                display = value[1]
+                extra_numeric = value[2] if len(value) >= 3 else None
+                extra_label = value[3] if len(value) >= 4 else ""
                 text = "" if display is None else str(display)
-                return numeric, text
+                return numeric, text, extra_numeric, str(extra_label or "")
             if value is None:
-                return None, ""
+                return None, "", None, ""
             if isinstance(value, int):
-                return value, f"{value:,}"
+                return value, f"{value:,}", None, ""
             if isinstance(value, float):
-                return value, f"{value:,.2f}"
-            return value, str(value)
+                return value, f"{value:,.2f}", None, ""
+            return value, str(value), None, ""
 
-        a_numeric, text_a = _extract(a)
-        b_numeric, text_b = _extract(b)
+        a_numeric, text_a, a_extra_numeric, a_extra_label = _extract(a)
+        b_numeric, text_b, b_extra_numeric, b_extra_label = _extract(b)
 
         table.setItem(row, 2, QTableWidgetItem(text_a))
         table.setItem(row, 3, QTableWidgetItem(text_b))
@@ -1724,14 +1727,27 @@ class SnapshotCompareDialog(QDialog):
             diff = b_numeric - a_numeric
             if is_rank_metric:
                 diff = -diff
+            extra_diff = None
             if isinstance(a_numeric, float) or isinstance(b_numeric, float):
                 diff_item.setText(f"{diff:+,.2f}")
             else:
                 diff_item.setText(f"{diff:+,d}")
 
-            if diff > 0:
+            if isinstance(a_extra_numeric, (int, float)) and isinstance(b_extra_numeric, (int, float)):
+                extra_diff = b_extra_numeric - a_extra_numeric
+                extra_label = b_extra_label or a_extra_label
+                if extra_label:
+                    diff_item.setText(f"{diff_item.text()} ({extra_label}{extra_diff:+,d})")
+                else:
+                    diff_item.setText(f"{diff_item.text()} ({extra_diff:+,d})")
+
+            color_metric = diff
+            if color_metric == 0 and isinstance(extra_diff, (int, float)):
+                color_metric = extra_diff
+
+            if color_metric > 0:
                 color = diff_positive_bg()
-            elif diff < 0:
+            elif color_metric < 0:
                 color = diff_negative_bg()
             else:
                 color = diff_neutral_bg()
@@ -2043,13 +2059,13 @@ class SnapshotCompareDialog(QDialog):
         # BeatLeader
         _bl_grp_start = row_main
 
-        def _format_bl_prestige_value(prestige: "Optional[int]", level: "Optional[int]") -> "tuple[int, str] | None":
+        def _format_bl_prestige_value(prestige: "Optional[int]", level: "Optional[int]") -> "tuple[int, str, Optional[int], str] | None":
             if prestige is None:
                 return None
             text = f"{prestige:,}"
             if level is not None:
                 text += f" (Lv.{level:,})"
-            return (prestige, text)
+            return (prestige, text, level, "LV")
 
         self._set_row(
             self.table,
