@@ -72,6 +72,17 @@ from PySide6.QtWidgets import (
 
 from .snapshot import BASE_DIR, RESOURCES_DIR
 from .accsaber_reloaded import is_pending_difficulty as _is_rl_pending_difficulty
+from .playlist.batch_config import (
+    BatchConfig as _BatchConfig,
+    load_enabled_playlist_batch_configs as _load_enabled_playlist_batch_configs,
+    load_playlist_batch_configs as _load_playlist_batch_configs,
+    save_playlist_batch_configs as _save_playlist_batch_configs,
+)
+from .playlist.window_state import (
+    has_saved_playlist_window_state,
+    load_playlist_window_payload,
+    save_playlist_window_payload,
+)
 from .beatleader_mapper_cache import build_bl_mapper_played_cache_from_local, load_bl_mapper_played_cache, refresh_bl_mapper_played_cache
 from .beatsaver_cache import load_beatsaver_meta_cache, update_beatsaver_meta_cache, upsert_beatsaver_meta_cache, _has_full_beatsaver_meta
 from .settings_store import (
@@ -444,8 +455,12 @@ _MODE_ORDER: Dict[str, int] = {
 
 _CACHE_DIR = BASE_DIR / "cache"
 _COVER_CACHE_DIR = _CACHE_DIR / "covers"
-_BATCH_CONFIG_PATH = _CACHE_DIR / "batch_configs.json"
-_PLAYLIST_WINDOW_PATH = _CACHE_DIR / "playlist_window.json"
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# ローカルキャッシュ / 永続設定ヘルパ
+# 画面の即応性を保つため、軽量な設定とサムネイルをここで扱う。
+# ──────────────────────────────────────────────────────────────────────────
 
 
 def _cover_cache_path(url: str) -> Path:
@@ -501,18 +516,18 @@ def save_beatsaber_dir(folder: str) -> None:
 
 def load_playlist_batch_configs() -> List["_BatchConfig"]:
     """保存済みの Batch Export 設定を読み込む。"""
-    try:
-        if _BATCH_CONFIG_PATH.exists():
-            data = json.loads(_BATCH_CONFIG_PATH.read_text(encoding="utf-8"))
-            return [_BatchConfig.from_dict(item) for item in data]
-    except Exception:
-        pass
-    return []
+    return list(_load_playlist_batch_configs())
 
 
 def load_enabled_playlist_batch_configs() -> List["_BatchConfig"]:
     """有効化されている Batch Export 設定だけを返す。"""
-    return [config for config in load_playlist_batch_configs() if config.enabled]
+    return list(_load_enabled_playlist_batch_configs())
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# バッチエクスポート実行
+# 複数ソースのロード、フィルタ適用、bplist 書き出しを一括で担当する。
+# ──────────────────────────────────────────────────────────────────────────
 
 
 def export_playlist_configs(
@@ -2181,114 +2196,10 @@ class _BatchPreset:
     split_by_star: bool # True = ★ごとに分割出力
 
 
-@dataclass
-class _BatchConfig:
-    """バッチエクスポートの1設定（フィルタ条件として保存）。
-    マップデータは保持せず、Export 時に毎回新鮮なデータをロードして適用する。
-    """
-    label: str
-    filename_base: str
-    source: str            # "ss" | "bl" | "rl" | "acc" | "bs"
-    # Status filter
-    show_cleared: bool = True
-    show_nf: bool = True
-    show_unplayed: bool = True
-    show_queued: bool = False
-    # Category filter (RL only)
-    cat_true: bool = True
-    cat_standard: bool = True
-    cat_tech: bool = True
-    # Star range
-    star_min: float = 0.0
-    star_max: float = 20.0
-    highest_diff_only: bool = False
-    # Export style
-    split_mode: str = "star"   # "single" | "star" | "category" | "week" | "month"
-    # Sort
-    sort_mode: str = "star_asc"  # "star_asc"|"star_desc"|"pp_high"|"pp_low"|"ap_high"|"ap_low"|"acc_high"|"acc_low"|"rank_low"|"rank_high"
-    # Song filter
-    song_filter: str = ""
-    # BeatSaver source filters
-    bs_query: str = ""
-    bs_date_mode: str = "days"
-    bs_from_date: str = ""
-    bs_to_date: str = ""
-    bs_days: int = 7
-    bs_max_maps: int = 1000
-    bs_min_rating: int = 50
-    bs_min_votes: int = 0
-    mapper_played_min: int = 0
-    bs_unranked_only: bool = True
-    bs_exclude_ai: bool = True
-    # Enabled
-    enabled: bool = True
-
-    def to_dict(self) -> dict:
-        return asdict(self)
-
-    @classmethod
-    def from_dict(cls, d: dict) -> "_BatchConfig":
-        known = {f.name for f in cls.__dataclass_fields__.values()}  # type: ignore[attr-defined]
-        return cls(**{k: v for k, v in d.items() if k in known})
-
-    def display_text(self) -> str:
-        src = self.source.upper()
-        if self.source == "rl":
-            cats = [n for flag, n in [(self.cat_true, "Tr"), (self.cat_standard, "Std"), (self.cat_tech, "Tch")] if flag]
-            src = f"RL[{'+'.join(cats) or 'none'}]"
-        elif self.source == "acc":
-            cats = [n for flag, n in [(self.cat_true, "Tr"), (self.cat_standard, "Std"), (self.cat_tech, "Tch")] if flag]
-            src = f"Acc[{'+'.join(cats) or 'none'}]"
-        elif self.source == "bs":
-            parts = [f"R{self.bs_min_rating}", f"V{self.bs_min_votes}", f"Max{self.bs_max_maps}"]
-            if self.mapper_played_min > 0:
-                parts.append(f"MP{self.mapper_played_min}")
-            src = f"BS[{','.join(parts)}]"
-        sts = "".join([s for flag, s in [(self.show_cleared, "✓"), (self.show_nf, "⚠"), (self.show_unplayed, "✗"), (self.show_queued, "Q")] if flag])
-        filter_parts = [sts] if sts else []
-        if self.highest_diff_only:
-            filter_parts.append("TopDiff")
-        filter_label = "+".join(filter_parts) if filter_parts else "none"
-        sort_label = {
-            "star_asc": "Star↑", "star_desc": "Star↓",
-            "pp_high": "PP↓", "pp_low": "PP↑",
-            "ap_high": "AP↓", "ap_low": "AP↑",
-            "acc_high": "Acc↓", "acc_low": "Acc↑",
-            "rank_low": "Rank↑", "rank_high": "Rank↓",
-            "bs_rate_high": "Rate↓", "bs_rate_low": "Rate↑",
-            "bs_upvotes_high": "⇧Votes↓", "bs_upvotes_low": "⇧Votes↑",
-            "bs_downvotes_high": "⇩Votes↓", "bs_downvotes_low": "⇩Votes↑",
-            "fc_desc": "FC↓", "fc_asc": "FC↑",
-            "status_desc": "Sts↓", "status_asc": "Sts↑",
-            "song_desc": "Song↓", "song_asc": "Song↑",
-            "date_desc": "Date↓", "date_asc": "Date↑",
-            "duration_desc": "Len↓", "duration_asc": "Len↑",
-            "bl_watched_desc": "BLWatched↓", "bl_watched_asc": "BLWatched↑",
-            "bl_mapper_played_desc": "MapperPlayed↓", "bl_mapper_played_asc": "MapperPlayed↑",
-            "bl_maps_played_desc": "BLPlayed↓", "bl_maps_played_asc": "BLPlayed↑",
-            "bl_maps_watched_desc": "BLWatched↓", "bl_maps_watched_asc": "BLWatched↑",
-            "diff_desc": "Diff↓", "diff_asc": "Diff↑",
-            "mode_desc": "Mode↓", "mode_asc": "Mode↑",
-            "cat_desc": "Cat↓", "cat_asc": "Cat↑",
-            "mapper_desc": "Mapper↓", "mapper_asc": "Mapper↑",
-            "author_desc": "Author↓", "author_asc": "Author↑",
-            "playtime_desc": "Played↓", "playtime_asc": "Played↑",
-        }.get(self.sort_mode, self.sort_mode)
-        q_tag = f" \U0001f50d\"{self.song_filter}\"" if self.song_filter else ""
-        if self.source in ("rl", "acc"):
-            return f"{self.label}  [{src} / {filter_label} / {self.split_mode} / {sort_label}]{q_tag}"
-        if self.source == "bs":
-            if self.bs_date_mode == "none":
-                date_tag = "All dates"
-            elif self.bs_date_mode == "dates" and self.bs_from_date and self.bs_to_date:
-                date_tag = f"{self.bs_from_date}..{self.bs_to_date}"
-            else:
-                date_tag = f"Last {max(1, self.bs_days)} days"
-            return f"{self.label}  [{src} / {filter_label} / {date_tag} / {self.split_mode} / {sort_label}]{q_tag}"
-        if self.split_mode in ("week", "month"):
-            return f"{self.label}  [{src} / {filter_label} / {self.split_mode} / {sort_label}]{q_tag}"
-        star = f"★{self.star_min:g}-{self.star_max:g}"
-        return f"{self.label}  [{src} / {filter_label} / {star} / {self.split_mode} / {sort_label}]{q_tag}"
+# ──────────────────────────────────────────────────────────────────────────
+# ソート / 集計ルール
+# 画面表示とバッチ出力の両方から使うため、UI から分離しておく。
+# ──────────────────────────────────────────────────────────────────────────
 
 
 _BATCH_PRESETS: List[_BatchPreset] = [
@@ -2555,6 +2466,8 @@ def _load_bl_mapper_played_counts_from_cache(steam_id: Optional[str]) -> Dict[st
     return normalized
 
 
+# BeatLeader の played 判定は複数ソース由来の値を跨いで使うため、
+# UI 側ではこの helper 経由で揃えて扱う。
 def _bl_effective_played_at_ts(entry: MapEntry) -> int:
     if entry.bl_played_at_ts > 0:
         return entry.bl_played_at_ts
@@ -2602,6 +2515,9 @@ def _filter_highest_difficulty_only(entries: List[MapEntry]) -> List[MapEntry]:
         ]).lower()][3] is entry
     ]
 
+
+# BatchConfig は「ロード条件」と「表示後フィルタ」の両方を保持する。
+# ここで UI と同じ条件に揃えておくことで、Export 結果のズレを防ぐ。
 def _apply_config_filter(
     maps: List[MapEntry],
     cfg: "_BatchConfig",
@@ -3196,10 +3112,434 @@ class PlaylistWindow(QMainWindow):
         super().__init__(parent)
         self.setWindowTitle("Playlist / Maps")
         self.resize(1300, 800)
+        self._initialize_window_state(steam_id, initial_source_tab)
+        root = self._build_base_layout()
 
+        self._build_source_group(root)
+
+        self._build_filter_group(root)
+
+        self._build_export_group(root)
+
+        # ─ テーブル ─────────────────────────────────────────────────
+        self._table_stack = QStackedWidget(self)
+        self._default_numeric_delegate = QStyledItemDelegate(self)
+        self._transparent_selection_delegate = _TransparentSelectionItemDelegate(self)
+        self._maps_rate_delegate = _PercentageBarDelegate(self, max_value=100.0, gradient_min=0.0)
+        self._snapshot_table = self._create_playlist_table()
+        self._maps_table = self._create_playlist_table()
+        self._table_stack.addWidget(self._snapshot_table)
+        self._table_stack.addWidget(self._maps_table)
+        self._table = self._snapshot_table
+        self._apply_row_height(refresh_table=False)
+
+        root.addWidget(self._table_stack, 1)
+
+        self._selection_status_row = QWidget()
+        self._selection_status_row.setStyleSheet("background: transparent;")
+        _selection_status_layout = QHBoxLayout(self._selection_status_row)
+        _selection_status_layout.setContentsMargins(4, 0, 0, 0)
+        _selection_status_layout.setSpacing(0)
+        self._selection_status_label = QLabel("0 rows selected")
+        self._selection_status_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        self._selection_status_label.setMinimumHeight(18)
+        _selection_status_layout.addWidget(self._selection_status_label)
+        self._btn_download_selected = QPushButton("")
+        self._btn_download_selected.setIcon(QIcon(str(RESOURCES_DIR / "onclick_download.png")))
+        self._btn_download_selected.setIconSize(QSize(18, 18))
+        self._btn_download_selected.setFixedWidth(34)
+        self._btn_download_selected.setToolTip("選択中の譜面をまとめてダウンロードします")
+        self._btn_download_selected.setEnabled(False)
+        self._btn_download_selected.clicked.connect(self._download_selected_entries)
+        self._register_secondary_buttons(self._btn_download_selected)
+        _selection_status_layout.addSpacing(8)
+        _selection_status_layout.addWidget(self._btn_download_selected)
+        self._beatsaver_cache_status_label = QLabel("BeatSaver cache: idle")
+        self._beatsaver_cache_status_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        self._beatsaver_cache_status_label.setMinimumHeight(18)
+        self._beatsaver_cache_status_label.setStyleSheet("color: #aaa;")
+        _selection_status_layout.addSpacing(12)
+        _selection_status_layout.addWidget(self._beatsaver_cache_status_label)
+        self._bl_mapper_cache_status_label = QLabel("Mapper cache: idle")
+        self._bl_mapper_cache_status_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        self._bl_mapper_cache_status_label.setMinimumHeight(18)
+        self._bl_mapper_cache_status_label.setStyleSheet("color: #aaa;")
+        _selection_status_layout.addSpacing(12)
+        _selection_status_layout.addWidget(self._bl_mapper_cache_status_label)
+        self._btn_mapper_top = QPushButton("Mapper List")
+        self._btn_mapper_top.setToolTip("Show BeatLeader mapper counts from cached data")
+        self._btn_mapper_top.clicked.connect(self._on_mapper_top_clicked)
+        self._register_secondary_buttons(self._btn_mapper_top)
+        _selection_status_layout.addSpacing(8)
+        _selection_status_layout.addWidget(self._btn_mapper_top)
+        _selection_status_layout.addStretch()
+
+        self._btn_row_height_up = QPushButton("▲")
+        self._btn_row_height_up.setToolTip("行の高さを大きくする")
+        self._btn_row_height_up.setFixedWidth(28)
+        self._btn_row_height_up.clicked.connect(self._on_row_height_up)
+        self._btn_row_height_dn = QPushButton("▼")
+        self._btn_row_height_dn.setToolTip("行の高さを小さくする")
+        self._btn_row_height_dn.setFixedWidth(28)
+        self._btn_row_height_dn.clicked.connect(self._on_row_height_dn)
+
+        self._btn_scroll_top = QPushButton("↑")
+        self._btn_scroll_top.setToolTip("一覧を一番上までスクロール")
+        self._btn_scroll_top.clicked.connect(self._scroll_table_to_top)
+        self._btn_scroll_bottom = QPushButton("↓")
+        self._btn_scroll_bottom.setToolTip("一覧を一番下までスクロール")
+        self._btn_scroll_bottom.clicked.connect(self._scroll_table_to_bottom)
+        self._register_secondary_buttons(
+            self._btn_row_height_up,
+            self._btn_row_height_dn,
+            self._btn_scroll_top,
+            self._btn_scroll_bottom,
+        )
+        self._btn_row_height_up.setFixedHeight(20)
+        self._btn_row_height_dn.setFixedHeight(20)
+        self._btn_scroll_top.setFixedHeight(20)
+        self._btn_scroll_bottom.setFixedHeight(20)
+        self._btn_row_height_up.setStyleSheet("QPushButton { padding: 0px; }")
+        self._btn_row_height_dn.setStyleSheet("QPushButton { padding: 0px; }")
+        self._btn_scroll_top.setFixedWidth(28)
+        self._btn_scroll_bottom.setFixedWidth(28)
+        self._btn_scroll_top.setStyleSheet("QPushButton { padding: 0px; }")
+        self._btn_scroll_bottom.setStyleSheet("QPushButton { padding: 0px; }")
+        _selection_status_layout.addWidget(self._btn_row_height_up)
+        _selection_status_layout.addSpacing(4)
+        _selection_status_layout.addWidget(self._btn_row_height_dn)
+        _selection_status_layout.addSpacing(8)
+        _selection_status_layout.addWidget(self._btn_scroll_top)
+        _selection_status_layout.addSpacing(4)
+        _selection_status_layout.addWidget(self._btn_scroll_bottom)
+        root.addWidget(self._selection_status_row, 0)
+
+        self.statusBar().hide()
+        self._update_selection_status()
+        self._update_bl_mapper_cache_status()
+
+        # ─ Right panel: Batch Export ────────────────────────────────────
+        _right_w = QWidget()
+        _right_w.setMinimumWidth(180)
+        _rl = QVBoxLayout(_right_w)
+        _rl.setSpacing(4)
+        _rl.setContentsMargins(4, 4, 4, 4)
+        self.__cols.addWidget(_right_w)
+
+        # 右パネル内を縦スプリッタで分割 (上: Preview / 中: Batch Queue / 下: Quick Presets)
+        _right_splitter = QSplitter(Qt.Orientation.Vertical)
+        _right_splitter.setChildrenCollapsible(False)
+        _rl.addWidget(_right_splitter)
+
+        self._preview_pane = QWidget()
+        self._preview_pane.setObjectName("previewPane")
+        _preview_layout = QVBoxLayout(self._preview_pane)
+        _preview_layout.setSpacing(6)
+        _preview_layout.setContentsMargins(6, 6, 6, 6)
+        _right_splitter.addWidget(self._preview_pane)
+
+        self._preview_title_widget = QWidget()
+        _preview_title_row = QHBoxLayout(self._preview_title_widget)
+        _preview_title_row.setSpacing(6)
+        _preview_title_row.setContentsMargins(0, 0, 0, 0)
+        _preview_layout.addWidget(self._preview_title_widget, 0)
+
+        self._preview_title_label = QLabel("No map selected")
+        self._preview_title_label.setWordWrap(False)
+        self._preview_title_label.setStyleSheet("font-weight: 600;")
+        _preview_title_row.addWidget(self._preview_title_label, 1)
+
+        self._preview_translate_button = QPushButton("Translate")
+        self._preview_translate_button.setVisible(True)
+        self._preview_translate_button.setEnabled(False)
+        self._preview_translate_button.setToolTip("Translate BeatSaver description with Google")
+        self._preview_translate_button.clicked.connect(self._translate_preview_description)
+        self._register_secondary_buttons(self._preview_translate_button)
+        _preview_title_row.addWidget(self._preview_translate_button, 0)
+
+        self._preview_bsr_button = QPushButton("")
+        self._preview_bsr_button.setVisible(False)
+        self._preview_bsr_button.setToolTip("Copy BSR")
+        self._preview_bsr_button.setProperty("copy_text", "")
+        self._preview_bsr_button.clicked.connect(self._copy_preview_bsr)
+        self._register_secondary_buttons(self._preview_bsr_button)
+        _preview_title_row.addWidget(self._preview_bsr_button, 0)
+
+        _preview_content = QWidget()
+        _preview_content_layout = QHBoxLayout(_preview_content)
+        _preview_content_layout.setSpacing(6)
+        _preview_content_layout.setContentsMargins(0, 0, 0, 0)
+
+        _preview_media_col = QWidget()
+        _preview_media_layout = QVBoxLayout(_preview_media_col)
+        _preview_media_layout.setSpacing(6)
+        _preview_media_layout.setContentsMargins(0, 0, 0, 0)
+        _preview_content_layout.addWidget(_preview_media_col, 0)
+
+        self._preview_image = QLabel("(no cover)")
+        self._preview_image.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._preview_image.setFixedSize(160, 160)
+        self._preview_image.setStyleSheet("border: 1px solid #555; background: #1a1a1a;")
+        _preview_media_layout.addWidget(self._preview_image, 0, Qt.AlignmentFlag.AlignTop)
+
+        _preview_link_rows = QVBoxLayout()
+        _preview_link_rows.setSpacing(2)
+        _preview_link_rows.setContentsMargins(0, 0, 0, 0)
+        _preview_media_layout.addLayout(_preview_link_rows)
+
+        # ── 1行目: BeatSaver / OneClickDownload ──
+        _preview_link_row1 = QHBoxLayout()
+        _preview_link_row1.setSpacing(4)
+        _preview_link_row1.setContentsMargins(0, 0, 0, 0)
+        _preview_link_rows.addLayout(_preview_link_row1)
+
+        # ── 2行目: BeatLeader / Replay / Global#1 / Local#1 ──
+        _preview_link_row2 = QHBoxLayout()
+        _preview_link_row2.setSpacing(4)
+        _preview_link_row2.setContentsMargins(0, 0, 0, 0)
+        _preview_link_rows.addLayout(_preview_link_row2)
+
+        self._preview_text_col = QWidget()
+        _preview_text_layout = QVBoxLayout(self._preview_text_col)
+        _preview_text_layout.setSpacing(4)
+        _preview_text_layout.setContentsMargins(0, 0, 0, 0)
+        _preview_content_layout.addWidget(self._preview_text_col, 1)
+
+        self._preview_meta_text = QTextBrowser()
+        self._preview_meta_text.setReadOnly(True)
+        self._preview_meta_text.setOpenExternalLinks(True)
+        self._preview_meta_text.setOpenLinks(True)
+        self._preview_meta_text.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._preview_meta_text.customContextMenuRequested.connect(self._show_preview_meta_context_menu)
+        self._preview_meta_text.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._preview_meta_text.setMinimumHeight(140)
+        self._apply_preview_meta_frame_theme()
+        _preview_text_layout.addWidget(self._preview_meta_text, 1)
+
+        self._btn_preview_open = QPushButton("")
+        self._btn_preview_open.setEnabled(False)
+        self._btn_preview_open.setToolTip("Open on BeatSaver")
+        self._btn_preview_open.setIcon(QIcon(str(RESOURCES_DIR / "beatsaver_logo.png")))
+        self._btn_preview_open.setIconSize(QSize(18, 18))
+        self._btn_preview_open.setFixedWidth(34)
+        self._btn_preview_open.clicked.connect(self._open_selected_preview_url)
+        self._register_secondary_buttons(self._btn_preview_open)
+        _preview_link_row1.addWidget(self._btn_preview_open)
+
+        self._btn_preview_download = QPushButton("")
+        self._btn_preview_download.setEnabled(False)
+        self._btn_preview_download.setToolTip("OneClickDownload")
+        self._btn_preview_download.setIcon(QIcon(str(RESOURCES_DIR / "onclick_download.png")))
+        self._btn_preview_download.setIconSize(QSize(18, 18))
+        self._btn_preview_download.setFixedWidth(34)
+        self._btn_preview_download.clicked.connect(self._download_selected_preview_entry)
+        self._register_secondary_buttons(self._btn_preview_download)
+        _preview_link_row1.addWidget(self._btn_preview_download)
+
+        self._btn_preview_bl = QPushButton("")
+        self._btn_preview_bl.setEnabled(False)
+        self._btn_preview_bl.setToolTip("Open on BeatLeader")
+        self._btn_preview_bl.setIcon(QIcon(str(RESOURCES_DIR / "beatleader_logo.webp")))
+        self._btn_preview_bl.setIconSize(QSize(18, 18))
+        self._btn_preview_bl.setFixedWidth(34)
+        self._btn_preview_bl.clicked.connect(self._open_selected_preview_url)
+        self._register_secondary_buttons(self._btn_preview_bl)
+        _preview_link_row2.addWidget(self._btn_preview_bl)
+
+        self._btn_preview_replay = QPushButton("")
+        self._btn_preview_replay.setIcon(QIcon(str(RESOURCES_DIR / "replay_btn.png")))
+        self._btn_preview_replay.setIconSize(QSize(18, 18))
+        self._btn_preview_replay.setEnabled(False)
+        self._btn_preview_replay.setToolTip("Open replay")
+        self._btn_preview_replay.setFixedWidth(34)
+        self._btn_preview_replay.clicked.connect(self._open_selected_preview_url)
+        self._register_secondary_buttons(self._btn_preview_replay)
+        _preview_link_row2.addWidget(self._btn_preview_replay)
+
+        self._btn_preview_global1_replay = QPushButton("")
+        self._btn_preview_global1_replay.setIcon(QIcon(str(RESOURCES_DIR / "global_no1_replay_btn.png")))
+        self._btn_preview_global1_replay.setIconSize(QSize(18, 18))
+        self._btn_preview_global1_replay.setEnabled(False)
+        self._btn_preview_global1_replay.setToolTip("Global #1 Replay on BeatLeader")
+        self._btn_preview_global1_replay.setFixedWidth(34)
+        self._btn_preview_global1_replay.clicked.connect(self._open_selected_preview_url)
+        self._register_secondary_buttons(self._btn_preview_global1_replay)
+        _preview_link_row2.addWidget(self._btn_preview_global1_replay)
+
+        self._btn_preview_local1_replay = QPushButton("")
+        self._btn_preview_local1_replay.setIcon(QIcon(str(RESOURCES_DIR / "local_no1_replay_btn.png")))
+        self._btn_preview_local1_replay.setIconSize(QSize(18, 18))
+        self._btn_preview_local1_replay.setEnabled(False)
+        self._btn_preview_local1_replay.setToolTip("Local #1 Replay on BeatLeader")
+        self._btn_preview_local1_replay.setFixedWidth(34)
+        self._btn_preview_local1_replay.clicked.connect(self._open_selected_preview_url)
+        self._register_secondary_buttons(self._btn_preview_local1_replay)
+        _preview_link_row2.addWidget(self._btn_preview_local1_replay)
+
+        _preview_media_layout.addStretch(1)
+        _preview_layout.addWidget(_preview_content, 1)
+
+        # ── 上ペイン: Batch Export ──
+        _top_pane = QWidget()
+        _top_layout = QVBoxLayout(_top_pane)
+        _top_layout.setSpacing(6)
+        _top_layout.setContentsMargins(0, 0, 0, 0)
+        _right_splitter.addWidget(_top_pane)
+
+        _batch_title_row = QHBoxLayout()
+        _batch_title = QLabel("Batch Export")
+        _batch_title.setStyleSheet("font-weight: bold; font-size: 13px;")
+        _batch_title_row.addWidget(_batch_title)
+        _batch_title_row.addStretch()
+        self._btn_bq_load = QPushButton("⏴ Load")
+        self._btn_bq_load.setToolTip("選択中の1件から Source / Filter / Export Style を復元")
+        self._btn_bq_load.setEnabled(False)
+        self._btn_bq_load.clicked.connect(self._batch_restore_selected)
+        self._register_secondary_buttons(self._btn_bq_load)
+        _batch_title_row.addWidget(self._btn_bq_load)
+        self._btn_preview_cover = QPushButton("🖼️ Playlist Covers")
+        self._register_secondary_buttons(self._btn_preview_cover)
+        self._btn_preview_cover.setToolTip("出力フォルダを選んで .bplist のカバー画像を一覧表示します")
+        self._btn_preview_cover.clicked.connect(self._show_cover_preview)
+        _batch_title_row.addWidget(self._btn_preview_cover)
+        _top_layout.addLayout(_batch_title_row)
+
+        self._batch_queue_list = QListWidget()
+        self._batch_queue_list.setAlternatingRowColors(True)
+        self._batch_queue_list.setWordWrap(True)
+        self._batch_queue_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self._batch_queue_list.setToolTip("チェックした項目のみ出力されます（行選択でRemove対象）")
+        _top_layout.addWidget(self._batch_queue_list, 1)
+
+        _queue_btn_row = QHBoxLayout()
+        _btn_bq_all = QPushButton("All")
+        _btn_bq_all.setToolTip("すべてを有効化")
+        _btn_bq_all.clicked.connect(lambda: self._batch_set_all_enabled(True))
+        _queue_btn_row.addWidget(_btn_bq_all)
+        _btn_bq_none = QPushButton("None")
+        _btn_bq_none.setToolTip("すべてを無効化")
+        _btn_bq_none.clicked.connect(lambda: self._batch_set_all_enabled(False))
+        _queue_btn_row.addWidget(_btn_bq_none)
+        self._batch_count_label = QLabel("0 items")
+        _queue_btn_row.addWidget(self._batch_count_label)
+        _queue_btn_row.addStretch()
+        self._btn_bq_remove = QPushButton("Remove")
+        self._btn_bq_remove.setToolTip("選択行を削除")
+        self._btn_bq_remove.setEnabled(False)
+        self._btn_bq_remove.clicked.connect(self._batch_remove_selected)
+        _queue_btn_row.addWidget(self._btn_bq_remove)
+        _btn_bq_clear = QPushButton("Clear")
+        _btn_bq_clear.setToolTip("すべてを削除")
+        _btn_bq_clear.clicked.connect(self._batch_clear)
+        _queue_btn_row.addWidget(_btn_bq_clear)
+        self._register_secondary_buttons(_btn_bq_all, _btn_bq_none, self._btn_bq_remove, _btn_bq_clear)
+        self._set_nonshrinking_button_width(_btn_bq_all, _btn_bq_none, self._btn_bq_load, self._btn_bq_remove, _btn_bq_clear)
+        _top_layout.addLayout(_queue_btn_row)
+
+        _export_all_btn_row = QHBoxLayout()
+        self._btn_batch_export_all = QPushButton("📤 Export All")
+        self._btn_batch_export_all.clicked.connect(self._batch_export_all)
+        self._btn_batch_export_all.setFixedHeight(26)
+        self._btn_batch_export_all.setStyleSheet(
+            "QPushButton { background-color: #1a6b3a; color: white; font-weight: bold; font-size: 12px; border-radius: 4px; }"
+            "QPushButton:hover { background-color: #1e8046; }"
+            "QPushButton:disabled { background-color: #444; color: #888; }"
+        )
+        _export_all_btn_row.addWidget(self._btn_batch_export_all)
+        _top_layout.addLayout(_export_all_btn_row)
+
+        # ── 下ペイン: Quick Presets ──
+        _bot_pane = QWidget()
+        _bot_layout = QVBoxLayout(_bot_pane)
+        _bot_layout.setSpacing(6)
+        _bot_layout.setContentsMargins(0, 0, 0, 0)
+        _right_splitter.addWidget(_bot_pane)
+
+        _bot_layout.addWidget(QLabel("Quick Presets:"))
+
+        self._preset_list_w = _PresetListWidget()
+        self._preset_list_w.setAlternatingRowColors(True)
+        for _p in _BATCH_PRESETS:
+            _pi = QListWidgetItem(_p.label)
+            _pi.setFlags(_pi.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            _pi.setCheckState(Qt.CheckState.Unchecked)
+            _pi.setData(Qt.ItemDataRole.UserRole, _p)
+            self._preset_list_w.addItem(_pi)
+        _bot_layout.addWidget(self._preset_list_w, 1)
+
+        _preset_btn_row = QHBoxLayout()
+        _btn_pa = QPushButton("All")
+        _btn_pa.clicked.connect(
+            lambda: [self._preset_list_w.item(i).setCheckState(Qt.CheckState.Checked)
+                     for i in range(self._preset_list_w.count())]
+        )
+        _btn_pn = QPushButton("None")
+        _btn_pn.clicked.connect(
+            lambda: [self._preset_list_w.item(i).setCheckState(Qt.CheckState.Unchecked)
+                     for i in range(self._preset_list_w.count())]
+        )
+        _preset_btn_row.addWidget(_btn_pa)
+        _preset_btn_row.addWidget(_btn_pn)
+        _preset_btn_row.addStretch()
+        self._btn_add_presets = QPushButton("➕ Add to Batch")
+        self._register_secondary_buttons(_btn_pa, _btn_pn, self._btn_add_presets)
+        self._set_nonshrinking_button_width(_btn_pa, _btn_pn, self._btn_add_presets)
+        self._btn_add_presets.clicked.connect(self._batch_add_presets)
+        _preset_btn_row.addWidget(self._btn_add_presets)
+        _bot_layout.addLayout(_preset_btn_row)
+
+        self._btn_quick_export = QPushButton("📤 Quick Export")
+        self._btn_quick_export.clicked.connect(self._quick_export_presets)
+        self._btn_quick_export.setFixedHeight(26)
+        self._btn_quick_export.setStyleSheet(
+            "QPushButton { background-color: #1a4a6b; color: white; font-weight: bold; font-size: 12px; border-radius: 4px; }"
+            "QPushButton:hover { background-color: #1e5a80; }"
+            "QPushButton:disabled { background-color: #444; color: #888; }"
+        )
+        _bot_layout.addWidget(self._btn_quick_export)
+
+        _right_w.setMinimumWidth(max(
+            180,
+            _batch_title.sizeHint().width() + self._btn_bq_load.minimumWidth() + self._btn_preview_cover.sizeHint().width() + 64,
+            self._batch_count_label.sizeHint().width()
+            + _btn_bq_all.minimumWidth()
+            + _btn_bq_none.minimumWidth()
+            + self._btn_bq_remove.minimumWidth()
+            + _btn_bq_clear.minimumWidth()
+            + 72,
+            _btn_pa.minimumWidth() + _btn_pn.minimumWidth() + self._btn_add_presets.minimumWidth() + 56,
+            self._btn_batch_export_all.sizeHint().width() + 24,
+            self._btn_quick_export.sizeHint().width() + 24,
+        ))
+
+        _right_splitter.setSizes([280, 280, 220])
+
+        # ── バッチ状態 ──
+        self._export_dir: str = load_playlist_export_dir()
+        self._batch_configs: List[_BatchConfig] = load_playlist_batch_configs()
+        self._export_sigs = _LoadSignals()
+        self._export_sigs.finished.connect(self._on_export_finished)
+        self._export_sigs.error.connect(self._on_export_error)
+        self._apply_secondary_button_theme()
+        self._export_sigs.progress.connect(self._on_export_progress)
+        self._batch_progress_dlg: Optional[QProgressDialog] = None
+        self._batch_queue_list.itemChanged.connect(self._on_batch_item_changed)
+        self._batch_queue_list.itemSelectionChanged.connect(self._update_batch_queue_actions)
+        self._batch_refresh_queue()
+
+        # スプリッタ初期サイズ: 左を広く、右パネルを 252px
+        self._splitter.setSizes([940, 350])
+        self._update_filter_export_ui()
+        self._update_table_visual_mode()
+        self._clear_preview()
+
+    def _initialize_window_state(self, steam_id: Optional[str], initial_source_tab: str) -> None:
+        """UI 構築前に必要な保持状態と非同期周辺オブジェクトを初期化する。"""
+        # 現在表示中のエントリと、Snapshot / Maps 各タブの保持状態。
+        # 将来的には view-state と data-state を別クラスへ分離したい。
         self._steam_id = steam_id
-        self._all_entries: List[MapEntry] = []   # ロード済み全データ
-        self._filtered: List[MapEntry] = []       # フィルタ後データ
+        self._all_entries: List[MapEntry] = []
+        self._filtered: List[MapEntry] = []
         self._snapshot_all_entries: List[MapEntry] = []
         self._snapshot_filtered: List[MapEntry] = []
         self._maps_all_entries: List[MapEntry] = []
@@ -3208,14 +3548,16 @@ class PlaylistWindow(QMainWindow):
         self._maps_source_key = "bs"
         self._snapshot_loaded_source_key = ""
         self._maps_loaded_source_key = ""
-        self._snapshot_loaded_steam_id: Optional[str] = None
-        self._maps_loaded_steam_id: Optional[str] = None
+        self._snapshot_loaded_steam_id = None
+        self._maps_loaded_steam_id = None
         self._pending_load_source_key = ""
         self._pending_load_maps_tab = False
         self._snapshot_last_load_text = "Last Loaded: -"
         self._maps_last_load_text = "Last Searched: -"
         self._snapshot_sort_mode = "status_desc"
         self._maps_sort_mode = "date_desc"
+
+        # 非同期ロード / サムネイル / metadata 更新の通知口をまとめる。
         self._load_signals = _LoadSignals()
         self._load_signals.finished.connect(self._on_load_finished)
         self._load_signals.error.connect(self._on_load_error)
@@ -3233,17 +3575,18 @@ class PlaylistWindow(QMainWindow):
         self._bl_mapper_stats_signals.finished.connect(self._on_bl_mapper_stats_finished)
         self._bl_mapper_stats_signals.error.connect(self._on_bl_mapper_stats_error)
         self._bl_mapper_stats_signals.progress.connect(self._on_bl_mapper_stats_progress)
-        self._preview_cache: Dict[str, bytes] = {}
-        self._thumbnail_cache: Dict[str, QPixmap] = {}
-        self._thumbnail_queue: List[str] = []
-        self._thumbnail_pending: set[str] = set()
+
+        self._preview_cache = {}
+        self._thumbnail_cache = {}
+        self._thumbnail_queue = []
+        self._thumbnail_pending = set()
         self._thumbnail_active_url = ""
         self._installed_beatsaber_dir = ""
-        self._installed_level_keys: set[str] = set()
-        self._installed_level_dirs: Dict[str, Path] = {}
+        self._installed_level_keys = set()
+        self._installed_level_dirs = {}
         self._row_height = 34
-        self._restored_snapshot_state: Optional[dict] = None
-        self._restored_maps_state: Optional[dict] = None
+        self._restored_snapshot_state = None
+        self._restored_maps_state = None
         self._highest_diff_only_snapshot = False
         self._highest_diff_only_maps = True
         self._bs_rating_sync = False
@@ -3251,42 +3594,64 @@ class PlaylistWindow(QMainWindow):
         self._bs_date_sync = False
         self._preview_token = 0
         self._current_preview_url = ""
-        self._progress_dlg: Optional[QProgressDialog] = None
-        self._bl_mapper_stats_progress_dlg: Optional[QProgressDialog] = None
+        self._progress_dlg = None
+        self._bl_mapper_stats_progress_dlg = None
         self._deferred_maps_restore_scheduled = False
         self._bl_api_session = requests.Session()
-        self._bl_top_replay_cache: Dict[Tuple[str, str], str] = {}
-        self._bl_preview_replay_index: Optional[Dict[Tuple[str, str, str], str]] = None
-        self._bl_preview_leaderboard_index: Optional[Dict[Tuple[str, str, str], str]] = None
-        self._beatsaver_meta_pending_hashes: List[str] = []
-        self._beatsaver_meta_pending_set: set[str] = set()
-        self._beatsaver_meta_pending_seed_map: Dict[str, str] = {}
-        self._beatsaver_meta_inflight_hashes: set[str] = set()
-        self._beatsaver_meta_total_hashes: set[str] = set()
-        self._beatsaver_meta_completed_hashes: set[str] = set()
+        self._bl_top_replay_cache = {}
+        self._bl_preview_replay_index = None
+        self._bl_preview_leaderboard_index = None
+        self._beatsaver_meta_pending_hashes = []
+        self._beatsaver_meta_pending_set = set()
+        self._beatsaver_meta_pending_seed_map = {}
+        self._beatsaver_meta_inflight_hashes = set()
+        self._beatsaver_meta_total_hashes = set()
+        self._beatsaver_meta_completed_hashes = set()
         self._beatsaver_meta_active_hash = ""
         self._preview_description_text = ""
         self._preview_title_full_text = "No map selected"
         self._table_render_token = 0
         self._table_render_active = False
-        self._pending_restore_entry: Optional[MapEntry] = None
+        self._pending_restore_entry = None
+        self._initial_source_tab = initial_source_tab
+        self._initial_restore_started = False
 
+    def _build_base_layout(self) -> QVBoxLayout:
+        """左右 split のベースレイアウトを作り、左ペイン root を返す。"""
         central = QWidget(self)
         self.setCentralWidget(central)
-        _main_layout = QHBoxLayout(central)
-        _main_layout.setSpacing(0)
-        _main_layout.setContentsMargins(4, 4, 4, 4)
+        main_layout = QHBoxLayout(central)
+        main_layout.setSpacing(0)
+        main_layout.setContentsMargins(4, 4, 4, 4)
         self._splitter = QSplitter(Qt.Orientation.Horizontal)
         self._splitter.setChildrenCollapsible(False)
-        _main_layout.addWidget(self._splitter)
-        self.__cols = self._splitter  # right panel を後で追加するため保持
-        _left_w = QWidget()
-        root = QVBoxLayout(_left_w)
+        main_layout.addWidget(self._splitter)
+        self.__cols = self._splitter
+        left_widget = QWidget()
+        root = QVBoxLayout(left_widget)
         root.setSpacing(4)
         root.setContentsMargins(2, 2, 2, 2)
-        self._splitter.addWidget(_left_w)
+        self._splitter.addWidget(left_widget)
+        return root
 
-        # ─ Source ───────────────────────────────────────────────────
+    def _set_standard_button_height(self, *buttons: QPushButton, height: int = 26) -> None:
+        """補助ボタン群の高さを揃える。"""
+        for button in buttons:
+            button.setMinimumHeight(height)
+
+    def _set_nonshrinking_button_width(self, *buttons: QPushButton) -> None:
+        """補助ボタンがレイアウト圧縮で潰れないように最小幅を固定する。"""
+        for button in buttons:
+            button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+            button.setMinimumWidth(max(button.minimumWidth(), button.sizeHint().width()))
+
+    def _register_secondary_buttons(self, *buttons: QPushButton) -> None:
+        """テーマ適用対象の補助ボタンとして登録する。"""
+        self._set_standard_button_height(*buttons)
+        self._secondary_buttons.extend(buttons)
+
+    def _build_source_group(self, root: QVBoxLayout) -> None:
+        """Source セクションと Maps 用の BeatSaver load 条件 UI を構築する。"""
         src_group = QGroupBox("Source")
         src_vbox = QVBoxLayout(src_group)
         src_vbox.setSpacing(4)
@@ -3297,18 +3662,18 @@ class PlaylistWindow(QMainWindow):
         self._source_tabs.setStyleSheet(self._source_tabs_stylesheet())
         src_vbox.addWidget(self._source_tabs)
 
-        _snapshot_tab = QWidget()
-        _snapshot_layout = QVBoxLayout(_snapshot_tab)
-        _snapshot_layout.setSpacing(4)
-        _snapshot_layout.setContentsMargins(0, 0, 0, 0)
+        snapshot_tab = QWidget()
+        snapshot_layout = QVBoxLayout(snapshot_tab)
+        snapshot_layout.setSpacing(4)
+        snapshot_layout.setContentsMargins(0, 0, 0, 0)
 
-        _maps_tab = QWidget()
-        _maps_layout = QVBoxLayout(_maps_tab)
-        _maps_layout.setSpacing(4)
-        _maps_layout.setContentsMargins(0, 0, 0, 0)
+        maps_tab = QWidget()
+        maps_layout = QVBoxLayout(maps_tab)
+        maps_layout.setSpacing(4)
+        maps_layout.setContentsMargins(0, 0, 0, 0)
 
-        self._source_tab_snapshot_idx = self._source_tabs.addTab(_snapshot_tab, "Snapshot")
-        self._source_tab_maps_idx = self._source_tabs.addTab(_maps_tab, "Maps")
+        self._source_tab_snapshot_idx = self._source_tabs.addTab(snapshot_tab, "Snapshot")
+        self._source_tab_maps_idx = self._source_tabs.addTab(maps_tab, "Maps")
 
         self._src_group = QButtonGroup(self)
         self._rb_ss = QRadioButton(SOURCE_SS)
@@ -3318,44 +3683,28 @@ class PlaylistWindow(QMainWindow):
         self._rb_bs = QRadioButton(SOURCE_BS)
         self._rb_open = QRadioButton(SOURCE_OPEN)
         self._rb_ss.setChecked(True)
+        self._secondary_buttons = []
+        self._last_snapshot_source_button = self._rb_ss
 
-        # 1行目: ScoreSaber / BeatLeader / AccSaber / AccSaber RL / BeatSaver
         src_row1 = QHBoxLayout()
         src_row1.setSpacing(8)
-        for i, rb in enumerate([self._rb_ss, self._rb_bl, self._rb_acc, self._rb_acc_rl]):
-            self._src_group.addButton(rb, i)
-            src_row1.addWidget(rb)
+        for index, radio in enumerate([self._rb_ss, self._rb_bl, self._rb_acc, self._rb_acc_rl]):
+            self._src_group.addButton(radio, index)
+            src_row1.addWidget(radio)
         src_row1.addStretch()
-        _snapshot_layout.addLayout(src_row1)
-        self._secondary_buttons: List[QPushButton] = []
-        self._last_snapshot_source_button: QRadioButton = self._rb_ss
+        snapshot_layout.addLayout(src_row1)
 
-        def _set_standard_button_height(*buttons: QPushButton, height: int = 26) -> None:
-            for button in buttons:
-                button.setMinimumHeight(height)
-
-        def _set_nonshrinking_button_width(*buttons: QPushButton) -> None:
-            for button in buttons:
-                button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-                button.setMinimumWidth(max(button.minimumWidth(), button.sizeHint().width()))
-
-        def _register_secondary_buttons(*buttons: QPushButton) -> None:
-            _set_standard_button_height(*buttons)
-            self._secondary_buttons.extend(buttons)
-
-        # 2行目: Open File + ファイル操作 + Load ボタン
         src_row2 = QHBoxLayout()
         src_row2.setSpacing(8)
         self._src_group.addButton(self._rb_open, 5)
         src_row2.addWidget(self._rb_open)
 
-        # Open file
         self._open_edit = QLineEdit()
         self._open_edit.setPlaceholderText(".bplist / .json file path...")
         self._open_edit.setEnabled(False)
         self._open_edit.setMinimumWidth(240)
         self._btn_browse = QPushButton("Browse...")
-        _register_secondary_buttons(self._btn_browse)
+        self._register_secondary_buttons(self._btn_browse)
         self._btn_browse.setEnabled(False)
         self._btn_browse.clicked.connect(self._browse_bplist)
         self._svc_label = QLabel("Service:")
@@ -3373,8 +3722,7 @@ class PlaylistWindow(QMainWindow):
         src_row2.addWidget(self._svc_label)
         src_row2.addWidget(self._svc_combo)
         src_row2.addStretch()
-
-        _snapshot_layout.addLayout(src_row2)
+        snapshot_layout.addLayout(src_row2)
 
         self._src_group.addButton(self._rb_bs, 4)
 
@@ -3393,12 +3741,12 @@ class PlaylistWindow(QMainWindow):
         self._last_load_label.setStyleSheet("color: #aaa;")
 
         self._load_footer_widget = QWidget()
-        _load_footer_row = QHBoxLayout(self._load_footer_widget)
-        _load_footer_row.setContentsMargins(0, 0, 0, 0)
-        _load_footer_row.setSpacing(8)
-        _load_footer_row.addStretch()
-        _load_footer_row.addWidget(self._last_load_label)
-        _load_footer_row.addWidget(self._btn_load)
+        load_footer_row = QHBoxLayout(self._load_footer_widget)
+        load_footer_row.setContentsMargins(0, 0, 0, 0)
+        load_footer_row.setSpacing(8)
+        load_footer_row.addStretch()
+        load_footer_row.addWidget(self._last_load_label)
+        load_footer_row.addWidget(self._btn_load)
 
         self._snapshot_load_host = QWidget()
         self._snapshot_load_host.setContentsMargins(0, 0, 0, 0)
@@ -3409,18 +3757,18 @@ class PlaylistWindow(QMainWindow):
         src_vbox.addWidget(self._snapshot_load_host)
 
         self._bs_filter_row_widget = QWidget()
-        _bs_filter_rows = QVBoxLayout(self._bs_filter_row_widget)
-        _bs_filter_rows.setContentsMargins(0, 0, 0, 0)
-        _bs_filter_rows.setSpacing(4)
-        _bs_filter_row_top = QHBoxLayout()
-        _bs_filter_row_top.setContentsMargins(0, 0, 0, 0)
-        _bs_filter_row_top.setSpacing(8)
-        _bs_filter_row_middle = QHBoxLayout()
-        _bs_filter_row_middle.setContentsMargins(0, 0, 0, 0)
-        _bs_filter_row_middle.setSpacing(8)
-        _bs_filter_row_bottom = QHBoxLayout()
-        _bs_filter_row_bottom.setContentsMargins(0, 0, 0, 0)
-        _bs_filter_row_bottom.setSpacing(8)
+        bs_filter_rows = QVBoxLayout(self._bs_filter_row_widget)
+        bs_filter_rows.setContentsMargins(0, 0, 0, 0)
+        bs_filter_rows.setSpacing(4)
+        bs_filter_row_top = QHBoxLayout()
+        bs_filter_row_top.setContentsMargins(0, 0, 0, 0)
+        bs_filter_row_top.setSpacing(8)
+        bs_filter_row_middle = QHBoxLayout()
+        bs_filter_row_middle.setContentsMargins(0, 0, 0, 0)
+        bs_filter_row_middle.setSpacing(8)
+        bs_filter_row_bottom = QHBoxLayout()
+        bs_filter_row_bottom.setContentsMargins(0, 0, 0, 0)
+        bs_filter_row_bottom.setSpacing(8)
         self._bs_filter_label = QLabel("BeatSaver Load:")
         self._bs_query_label = QLabel("Query:")
         self._bs_query_edit = QLineEdit()
@@ -3484,41 +3832,41 @@ class PlaylistWindow(QMainWindow):
         self._cb_bs_unranked.setChecked(True)
         self._cb_bs_no_ai = QCheckBox("Exclude AI")
         self._cb_bs_no_ai.setChecked(True)
-        _bs_filter_row_top.addWidget(self._bs_query_label)
-        _bs_filter_row_top.addWidget(self._bs_query_edit)
-        _bs_filter_row_top.addWidget(self._bs_max_label)
-        _bs_filter_row_top.addWidget(self._bs_max_maps)
-        _bs_filter_row_top.addWidget(self._cb_bs_unranked)
-        _bs_filter_row_top.addWidget(self._cb_bs_no_ai)
-        _bs_filter_row_top.addStretch()
-        _bs_filter_row_middle.addSpacing(6)
-        _bs_filter_row_middle.addWidget(self._bs_all_label)
-        _bs_filter_row_middle.addWidget(self._bs_window_label)
-        _bs_filter_row_middle.addWidget(self._bs_days)
-        _bs_filter_row_middle.addWidget(self._bs_from_label)
-        _bs_filter_row_middle.addWidget(self._bs_from_date)
-        _bs_filter_row_middle.addWidget(self._bs_to_label)
-        _bs_filter_row_middle.addWidget(self._bs_to_date)
-        _bs_filter_row_middle.addWidget(self._bs_to_latest_btn)
-        _bs_filter_row_middle.addStretch()
-        _bs_filter_row_bottom.addSpacing(6)
-        _bs_filter_row_bottom.addWidget(self._bs_rating_label)
-        _bs_filter_row_bottom.addWidget(self._bs_min_rating)
-        _bs_filter_row_bottom.addWidget(self._bs_rating_value_label)
-        _bs_filter_row_bottom.addWidget(self._bs_votes_label)
-        _bs_filter_row_bottom.addWidget(self._bs_min_votes)
-        _bs_filter_row_bottom.addWidget(self._bs_votes_value_label)
-        _bs_filter_row_bottom.addStretch()
+        bs_filter_row_top.addWidget(self._bs_query_label)
+        bs_filter_row_top.addWidget(self._bs_query_edit)
+        bs_filter_row_top.addWidget(self._bs_max_label)
+        bs_filter_row_top.addWidget(self._bs_max_maps)
+        bs_filter_row_top.addWidget(self._cb_bs_unranked)
+        bs_filter_row_top.addWidget(self._cb_bs_no_ai)
+        bs_filter_row_top.addStretch()
+        bs_filter_row_middle.addSpacing(6)
+        bs_filter_row_middle.addWidget(self._bs_all_label)
+        bs_filter_row_middle.addWidget(self._bs_window_label)
+        bs_filter_row_middle.addWidget(self._bs_days)
+        bs_filter_row_middle.addWidget(self._bs_from_label)
+        bs_filter_row_middle.addWidget(self._bs_from_date)
+        bs_filter_row_middle.addWidget(self._bs_to_label)
+        bs_filter_row_middle.addWidget(self._bs_to_date)
+        bs_filter_row_middle.addWidget(self._bs_to_latest_btn)
+        bs_filter_row_middle.addStretch()
+        bs_filter_row_bottom.addSpacing(6)
+        bs_filter_row_bottom.addWidget(self._bs_rating_label)
+        bs_filter_row_bottom.addWidget(self._bs_min_rating)
+        bs_filter_row_bottom.addWidget(self._bs_rating_value_label)
+        bs_filter_row_bottom.addWidget(self._bs_votes_label)
+        bs_filter_row_bottom.addWidget(self._bs_min_votes)
+        bs_filter_row_bottom.addWidget(self._bs_votes_value_label)
+        bs_filter_row_bottom.addStretch()
         self._maps_load_host = QWidget()
         self._maps_load_host.setContentsMargins(0, 0, 0, 0)
         self._maps_load_host_layout = QHBoxLayout()
         self._maps_load_host_layout.setContentsMargins(0, 0, 0, 0)
         self._maps_load_host_layout.setSpacing(0)
         self._maps_load_host.setLayout(self._maps_load_host_layout)
-        _bs_filter_row_bottom.addWidget(self._maps_load_host)
-        _bs_filter_rows.addLayout(_bs_filter_row_top)
-        _bs_filter_rows.addLayout(_bs_filter_row_middle)
-        _bs_filter_rows.addLayout(_bs_filter_row_bottom)
+        bs_filter_row_bottom.addWidget(self._maps_load_host)
+        bs_filter_rows.addLayout(bs_filter_row_top)
+        bs_filter_rows.addLayout(bs_filter_row_middle)
+        bs_filter_rows.addLayout(bs_filter_row_bottom)
         self._bs_days.valueChanged.connect(self._sync_bs_dates_from_days)
         self._bs_from_date.dateChanged.connect(self._sync_bs_days_from_dates)
         self._bs_to_date.dateChanged.connect(self._sync_bs_days_from_dates)
@@ -3530,15 +3878,16 @@ class PlaylistWindow(QMainWindow):
         self._bs_min_votes.valueChanged.connect(self._on_bs_source_votes_changed)
         self._bs_rating_value_label.valueChanged.connect(self._on_bs_source_rating_changed)
         self._bs_votes_value_label.valueChanged.connect(self._on_bs_source_votes_changed)
-        _register_secondary_buttons(self._bs_to_latest_btn)
-        _maps_layout.addWidget(self._bs_filter_row_widget)
+        self._register_secondary_buttons(self._bs_to_latest_btn)
+        maps_layout.addWidget(self._bs_filter_row_widget)
         self._set_load_footer_host(self._snapshot_load_host)
 
         self._src_group.buttonToggled.connect(self._on_source_changed)
         self._source_tabs.currentChanged.connect(self._on_source_tab_changed)
         root.addWidget(src_group)
 
-        # ─ Filter ───────────────────────────────────────────────────
+    def _build_filter_group(self, root: QVBoxLayout) -> None:
+        """Loaded List Filter セクションを構築する。"""
         filter_group = QGroupBox("Loaded List Filter")
         filter_layout = QVBoxLayout(filter_group)
         filter_layout.setSpacing(6)
@@ -3570,7 +3919,6 @@ class PlaylistWindow(QMainWindow):
         self._star_max.valueChanged.connect(self._apply_filter)
         filter_row1.addWidget(self._star_max)
 
-        #filter_row1.addSpacing(8)
         self._cat_filter_label = QLabel("Category:")
         self._cat_filter_label.setVisible(False)
         filter_row1.addWidget(self._cat_filter_label)
@@ -3589,6 +3937,7 @@ class PlaylistWindow(QMainWindow):
         filter_row1.addWidget(self._cb_cat_true)
         filter_row1.addWidget(self._cb_cat_standard)
         filter_row1.addWidget(self._cb_cat_tech)
+
         self._bs_post_filter_widget = QWidget()
         filter_row3 = QHBoxLayout(self._bs_post_filter_widget)
         filter_row3.setContentsMargins(0, 0, 0, 0)
@@ -3693,26 +4042,24 @@ class PlaylistWindow(QMainWindow):
         filter_row2.addWidget(self._cb_top_diff_only)
         filter_row2.addStretch()
         self._btn_filter_reset = QPushButton("Reset")
-        _register_secondary_buttons(self._btn_filter_reset)
+        self._register_secondary_buttons(self._btn_filter_reset)
         self._btn_filter_reset.clicked.connect(self._on_reset_filters_clicked)
         filter_row2.addWidget(self._btn_filter_reset)
 
         filter_layout.addLayout(filter_row1)
         filter_layout.addLayout(filter_row2)
-
         root.addWidget(filter_group)
 
-        # ─ Export ───────────────────────────────────────────────────
+    def _build_export_group(self, root: QVBoxLayout) -> None:
+        """Export セクションを構築する。"""
         export_group = QGroupBox("Export")
         export_row = QHBoxLayout(export_group)
         export_row.setSpacing(12)
 
-        # Split 条件
         export_row.addWidget(QLabel("Style:  "))
         self._export_style_grp = QButtonGroup(self)
         self._rb_exp_single = QRadioButton("Single file")
         self._rb_exp_single.setToolTip("単一ファイルとして出力します")
-
         self._rb_exp_split = QRadioButton("Split by ★")
         self._rb_exp_split.setToolTip("★ごとにファイルを分割して出力します")
         self._rb_exp_split_alt = QRadioButton("Split by Month")
@@ -3736,7 +4083,6 @@ class PlaylistWindow(QMainWindow):
 
         self._export_info_label = QLabel("")
         export_row.addWidget(self._export_info_label)
-
         export_row.addStretch()
 
         self._btn_export = QPushButton("📤 Export")
@@ -3750,7 +4096,7 @@ class PlaylistWindow(QMainWindow):
         export_row.addWidget(self._btn_export)
 
         self._btn_add_to_batch = QPushButton("➕ Add to Batch")
-        _register_secondary_buttons(self._btn_add_to_batch)
+        self._register_secondary_buttons(self._btn_add_to_batch)
         self._btn_add_to_batch.setToolTip(
             "フィルタ中のマップを Batch Export キューに追加します。\n"
             "Content / Style の設定が反映されます。"
@@ -3760,420 +4106,6 @@ class PlaylistWindow(QMainWindow):
 
         root.addWidget(export_group)
 
-        # ─ テーブル ─────────────────────────────────────────────────
-        self._table_stack = QStackedWidget(self)
-        self._default_numeric_delegate = QStyledItemDelegate(self)
-        self._transparent_selection_delegate = _TransparentSelectionItemDelegate(self)
-        self._maps_rate_delegate = _PercentageBarDelegate(self, max_value=100.0, gradient_min=0.0)
-        self._snapshot_table = self._create_playlist_table()
-        self._maps_table = self._create_playlist_table()
-        self._table_stack.addWidget(self._snapshot_table)
-        self._table_stack.addWidget(self._maps_table)
-        self._table = self._snapshot_table
-        self._apply_row_height(refresh_table=False)
-
-        root.addWidget(self._table_stack, 1)
-
-        self._selection_status_row = QWidget()
-        self._selection_status_row.setStyleSheet("background: transparent;")
-        _selection_status_layout = QHBoxLayout(self._selection_status_row)
-        _selection_status_layout.setContentsMargins(4, 0, 0, 0)
-        _selection_status_layout.setSpacing(0)
-        self._selection_status_label = QLabel("0 rows selected")
-        self._selection_status_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        self._selection_status_label.setMinimumHeight(18)
-        _selection_status_layout.addWidget(self._selection_status_label)
-        self._btn_download_selected = QPushButton("")
-        self._btn_download_selected.setIcon(QIcon(str(RESOURCES_DIR / "onclick_download.png")))
-        self._btn_download_selected.setIconSize(QSize(18, 18))
-        self._btn_download_selected.setFixedWidth(34)
-        self._btn_download_selected.setToolTip("選択中の譜面をまとめてダウンロードします")
-        self._btn_download_selected.setEnabled(False)
-        self._btn_download_selected.clicked.connect(self._download_selected_entries)
-        _register_secondary_buttons(self._btn_download_selected)
-        _selection_status_layout.addSpacing(8)
-        _selection_status_layout.addWidget(self._btn_download_selected)
-        self._beatsaver_cache_status_label = QLabel("BeatSaver cache: idle")
-        self._beatsaver_cache_status_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        self._beatsaver_cache_status_label.setMinimumHeight(18)
-        self._beatsaver_cache_status_label.setStyleSheet("color: #aaa;")
-        _selection_status_layout.addSpacing(12)
-        _selection_status_layout.addWidget(self._beatsaver_cache_status_label)
-        self._bl_mapper_cache_status_label = QLabel("Mapper cache: idle")
-        self._bl_mapper_cache_status_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        self._bl_mapper_cache_status_label.setMinimumHeight(18)
-        self._bl_mapper_cache_status_label.setStyleSheet("color: #aaa;")
-        _selection_status_layout.addSpacing(12)
-        _selection_status_layout.addWidget(self._bl_mapper_cache_status_label)
-        self._btn_mapper_top = QPushButton("Mapper List")
-        self._btn_mapper_top.setToolTip("Show BeatLeader mapper counts from cached data")
-        self._btn_mapper_top.clicked.connect(self._on_mapper_top_clicked)
-        _register_secondary_buttons(self._btn_mapper_top)
-        _selection_status_layout.addSpacing(8)
-        _selection_status_layout.addWidget(self._btn_mapper_top)
-        _selection_status_layout.addStretch()
-
-        self._btn_row_height_up = QPushButton("▲")
-        self._btn_row_height_up.setToolTip("行の高さを大きくする")
-        self._btn_row_height_up.setFixedWidth(28)
-        self._btn_row_height_up.clicked.connect(self._on_row_height_up)
-        self._btn_row_height_dn = QPushButton("▼")
-        self._btn_row_height_dn.setToolTip("行の高さを小さくする")
-        self._btn_row_height_dn.setFixedWidth(28)
-        self._btn_row_height_dn.clicked.connect(self._on_row_height_dn)
-
-        self._btn_scroll_top = QPushButton("↑")
-        self._btn_scroll_top.setToolTip("一覧を一番上までスクロール")
-        self._btn_scroll_top.clicked.connect(self._scroll_table_to_top)
-        self._btn_scroll_bottom = QPushButton("↓")
-        self._btn_scroll_bottom.setToolTip("一覧を一番下までスクロール")
-        self._btn_scroll_bottom.clicked.connect(self._scroll_table_to_bottom)
-        _register_secondary_buttons(
-            self._btn_row_height_up,
-            self._btn_row_height_dn,
-            self._btn_scroll_top,
-            self._btn_scroll_bottom,
-        )
-        self._btn_row_height_up.setFixedHeight(20)
-        self._btn_row_height_dn.setFixedHeight(20)
-        self._btn_scroll_top.setFixedHeight(20)
-        self._btn_scroll_bottom.setFixedHeight(20)
-        self._btn_row_height_up.setStyleSheet("QPushButton { padding: 0px; }")
-        self._btn_row_height_dn.setStyleSheet("QPushButton { padding: 0px; }")
-        self._btn_scroll_top.setFixedWidth(28)
-        self._btn_scroll_bottom.setFixedWidth(28)
-        self._btn_scroll_top.setStyleSheet("QPushButton { padding: 0px; }")
-        self._btn_scroll_bottom.setStyleSheet("QPushButton { padding: 0px; }")
-        _selection_status_layout.addWidget(self._btn_row_height_up)
-        _selection_status_layout.addSpacing(4)
-        _selection_status_layout.addWidget(self._btn_row_height_dn)
-        _selection_status_layout.addSpacing(8)
-        _selection_status_layout.addWidget(self._btn_scroll_top)
-        _selection_status_layout.addSpacing(4)
-        _selection_status_layout.addWidget(self._btn_scroll_bottom)
-        root.addWidget(self._selection_status_row, 0)
-
-        self.statusBar().hide()
-        self._update_selection_status()
-        self._update_bl_mapper_cache_status()
-
-        # ─ Right panel: Batch Export ────────────────────────────────────
-        _right_w = QWidget()
-        _right_w.setMinimumWidth(180)
-        _rl = QVBoxLayout(_right_w)
-        _rl.setSpacing(4)
-        _rl.setContentsMargins(4, 4, 4, 4)
-        self.__cols.addWidget(_right_w)
-
-        # 右パネル内を縦スプリッタで分割 (上: Preview / 中: Batch Queue / 下: Quick Presets)
-        _right_splitter = QSplitter(Qt.Orientation.Vertical)
-        _right_splitter.setChildrenCollapsible(False)
-        _rl.addWidget(_right_splitter)
-
-        self._preview_pane = QWidget()
-        self._preview_pane.setObjectName("previewPane")
-        _preview_layout = QVBoxLayout(self._preview_pane)
-        _preview_layout.setSpacing(6)
-        _preview_layout.setContentsMargins(6, 6, 6, 6)
-        _right_splitter.addWidget(self._preview_pane)
-
-        self._preview_title_widget = QWidget()
-        _preview_title_row = QHBoxLayout(self._preview_title_widget)
-        _preview_title_row.setSpacing(6)
-        _preview_title_row.setContentsMargins(0, 0, 0, 0)
-        _preview_layout.addWidget(self._preview_title_widget, 0)
-
-        self._preview_title_label = QLabel("No map selected")
-        self._preview_title_label.setWordWrap(False)
-        self._preview_title_label.setStyleSheet("font-weight: 600;")
-        _preview_title_row.addWidget(self._preview_title_label, 1)
-
-        self._preview_translate_button = QPushButton("Translate")
-        self._preview_translate_button.setVisible(True)
-        self._preview_translate_button.setEnabled(False)
-        self._preview_translate_button.setToolTip("Translate BeatSaver description with Google")
-        self._preview_translate_button.clicked.connect(self._translate_preview_description)
-        _register_secondary_buttons(self._preview_translate_button)
-        _preview_title_row.addWidget(self._preview_translate_button, 0)
-
-        self._preview_bsr_button = QPushButton("")
-        self._preview_bsr_button.setVisible(False)
-        self._preview_bsr_button.setToolTip("Copy BSR")
-        self._preview_bsr_button.setProperty("copy_text", "")
-        self._preview_bsr_button.clicked.connect(self._copy_preview_bsr)
-        _register_secondary_buttons(self._preview_bsr_button)
-        _preview_title_row.addWidget(self._preview_bsr_button, 0)
-
-        _preview_content = QWidget()
-        _preview_content_layout = QHBoxLayout(_preview_content)
-        _preview_content_layout.setSpacing(6)
-        _preview_content_layout.setContentsMargins(0, 0, 0, 0)
-
-        _preview_media_col = QWidget()
-        _preview_media_layout = QVBoxLayout(_preview_media_col)
-        _preview_media_layout.setSpacing(6)
-        _preview_media_layout.setContentsMargins(0, 0, 0, 0)
-        _preview_content_layout.addWidget(_preview_media_col, 0)
-
-        self._preview_image = QLabel("(no cover)")
-        self._preview_image.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._preview_image.setFixedSize(160, 160)
-        self._preview_image.setStyleSheet("border: 1px solid #555; background: #1a1a1a;")
-        _preview_media_layout.addWidget(self._preview_image, 0, Qt.AlignmentFlag.AlignTop)
-
-        _preview_link_rows = QVBoxLayout()
-        _preview_link_rows.setSpacing(2)
-        _preview_link_rows.setContentsMargins(0, 0, 0, 0)
-        _preview_media_layout.addLayout(_preview_link_rows)
-
-        # ── 1行目: BeatSaver / OneClickDownload ──
-        _preview_link_row1 = QHBoxLayout()
-        _preview_link_row1.setSpacing(4)
-        _preview_link_row1.setContentsMargins(0, 0, 0, 0)
-        _preview_link_rows.addLayout(_preview_link_row1)
-
-        # ── 2行目: BeatLeader / Replay / Global#1 / Local#1 ──
-        _preview_link_row2 = QHBoxLayout()
-        _preview_link_row2.setSpacing(4)
-        _preview_link_row2.setContentsMargins(0, 0, 0, 0)
-        _preview_link_rows.addLayout(_preview_link_row2)
-
-        self._preview_text_col = QWidget()
-        _preview_text_layout = QVBoxLayout(self._preview_text_col)
-        _preview_text_layout.setSpacing(4)
-        _preview_text_layout.setContentsMargins(0, 0, 0, 0)
-        _preview_content_layout.addWidget(self._preview_text_col, 1)
-
-        self._preview_meta_text = QTextBrowser()
-        self._preview_meta_text.setReadOnly(True)
-        self._preview_meta_text.setOpenExternalLinks(True)
-        self._preview_meta_text.setOpenLinks(True)
-        self._preview_meta_text.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self._preview_meta_text.customContextMenuRequested.connect(self._show_preview_meta_context_menu)
-        self._preview_meta_text.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self._preview_meta_text.setMinimumHeight(140)
-        self._apply_preview_meta_frame_theme()
-        _preview_text_layout.addWidget(self._preview_meta_text, 1)
-
-        self._btn_preview_open = QPushButton("")
-        self._btn_preview_open.setEnabled(False)
-        self._btn_preview_open.setToolTip("Open on BeatSaver")
-        self._btn_preview_open.setIcon(QIcon(str(RESOURCES_DIR / "beatsaver_logo.png")))
-        self._btn_preview_open.setIconSize(QSize(18, 18))
-        self._btn_preview_open.setFixedWidth(34)
-        self._btn_preview_open.clicked.connect(self._open_selected_preview_url)
-        _register_secondary_buttons(self._btn_preview_open)
-        _preview_link_row1.addWidget(self._btn_preview_open)
-
-        self._btn_preview_download = QPushButton("")
-        self._btn_preview_download.setEnabled(False)
-        self._btn_preview_download.setToolTip("OneClickDownload")
-        self._btn_preview_download.setIcon(QIcon(str(RESOURCES_DIR / "onclick_download.png")))
-        self._btn_preview_download.setIconSize(QSize(18, 18))
-        self._btn_preview_download.setFixedWidth(34)
-        self._btn_preview_download.clicked.connect(self._download_selected_preview_entry)
-        _register_secondary_buttons(self._btn_preview_download)
-        _preview_link_row1.addWidget(self._btn_preview_download)
-
-        self._btn_preview_bl = QPushButton("")
-        self._btn_preview_bl.setEnabled(False)
-        self._btn_preview_bl.setToolTip("Open on BeatLeader")
-        self._btn_preview_bl.setIcon(QIcon(str(RESOURCES_DIR / "beatleader_logo.webp")))
-        self._btn_preview_bl.setIconSize(QSize(18, 18))
-        self._btn_preview_bl.setFixedWidth(34)
-        self._btn_preview_bl.clicked.connect(self._open_selected_preview_url)
-        _register_secondary_buttons(self._btn_preview_bl)
-        _preview_link_row2.addWidget(self._btn_preview_bl)
-
-        self._btn_preview_replay = QPushButton("")
-        self._btn_preview_replay.setIcon(QIcon(str(RESOURCES_DIR / "replay_btn.png")))
-        self._btn_preview_replay.setIconSize(QSize(18, 18))
-        self._btn_preview_replay.setEnabled(False)
-        self._btn_preview_replay.setToolTip("Open replay")
-        self._btn_preview_replay.setFixedWidth(34)
-        self._btn_preview_replay.clicked.connect(self._open_selected_preview_url)
-        _register_secondary_buttons(self._btn_preview_replay)
-        _preview_link_row2.addWidget(self._btn_preview_replay)
-
-        self._btn_preview_global1_replay = QPushButton("")
-        self._btn_preview_global1_replay.setIcon(QIcon(str(RESOURCES_DIR / "global_no1_replay_btn.png")))
-        self._btn_preview_global1_replay.setIconSize(QSize(18, 18))
-        self._btn_preview_global1_replay.setEnabled(False)
-        self._btn_preview_global1_replay.setToolTip("Global #1 Replay on BeatLeader")
-        self._btn_preview_global1_replay.setFixedWidth(34)
-        self._btn_preview_global1_replay.clicked.connect(self._open_selected_preview_url)
-        _register_secondary_buttons(self._btn_preview_global1_replay)
-        _preview_link_row2.addWidget(self._btn_preview_global1_replay)
-
-        self._btn_preview_local1_replay = QPushButton("")
-        self._btn_preview_local1_replay.setIcon(QIcon(str(RESOURCES_DIR / "local_no1_replay_btn.png")))
-        self._btn_preview_local1_replay.setIconSize(QSize(18, 18))
-        self._btn_preview_local1_replay.setEnabled(False)
-        self._btn_preview_local1_replay.setToolTip("Local #1 Replay on BeatLeader")
-        self._btn_preview_local1_replay.setFixedWidth(34)
-        self._btn_preview_local1_replay.clicked.connect(self._open_selected_preview_url)
-        _register_secondary_buttons(self._btn_preview_local1_replay)
-        _preview_link_row2.addWidget(self._btn_preview_local1_replay)
-
-        _preview_media_layout.addStretch(1)
-        _preview_layout.addWidget(_preview_content, 1)
-
-        # ── 上ペイン: Batch Export ──
-        _top_pane = QWidget()
-        _top_layout = QVBoxLayout(_top_pane)
-        _top_layout.setSpacing(6)
-        _top_layout.setContentsMargins(0, 0, 0, 0)
-        _right_splitter.addWidget(_top_pane)
-
-        _batch_title_row = QHBoxLayout()
-        _batch_title = QLabel("Batch Export")
-        _batch_title.setStyleSheet("font-weight: bold; font-size: 13px;")
-        _batch_title_row.addWidget(_batch_title)
-        _batch_title_row.addStretch()
-        self._btn_bq_load = QPushButton("⏴ Load")
-        self._btn_bq_load.setToolTip("選択中の1件から Source / Filter / Export Style を復元")
-        self._btn_bq_load.setEnabled(False)
-        self._btn_bq_load.clicked.connect(self._batch_restore_selected)
-        _register_secondary_buttons(self._btn_bq_load)
-        _batch_title_row.addWidget(self._btn_bq_load)
-        self._btn_preview_cover = QPushButton("🖼️ Playlist Covers")
-        _register_secondary_buttons(self._btn_preview_cover)
-        self._btn_preview_cover.setToolTip("出力フォルダを選んで .bplist のカバー画像を一覧表示します")
-        self._btn_preview_cover.clicked.connect(self._show_cover_preview)
-        _batch_title_row.addWidget(self._btn_preview_cover)
-        _top_layout.addLayout(_batch_title_row)
-
-        self._batch_queue_list = QListWidget()
-        self._batch_queue_list.setAlternatingRowColors(True)
-        self._batch_queue_list.setWordWrap(True)
-        self._batch_queue_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-        self._batch_queue_list.setToolTip("チェックした項目のみ出力されます（行選択でRemove対象）")
-        _top_layout.addWidget(self._batch_queue_list, 1)
-
-        _queue_btn_row = QHBoxLayout()
-        _btn_bq_all = QPushButton("All")
-        _btn_bq_all.setToolTip("すべてを有効化")
-        _btn_bq_all.clicked.connect(lambda: self._batch_set_all_enabled(True))
-        _queue_btn_row.addWidget(_btn_bq_all)
-        _btn_bq_none = QPushButton("None")
-        _btn_bq_none.setToolTip("すべてを無効化")
-        _btn_bq_none.clicked.connect(lambda: self._batch_set_all_enabled(False))
-        _queue_btn_row.addWidget(_btn_bq_none)
-        self._batch_count_label = QLabel("0 items")
-        _queue_btn_row.addWidget(self._batch_count_label)
-        _queue_btn_row.addStretch()
-        self._btn_bq_remove = QPushButton("Remove")
-        self._btn_bq_remove.setToolTip("選択行を削除")
-        self._btn_bq_remove.setEnabled(False)
-        self._btn_bq_remove.clicked.connect(self._batch_remove_selected)
-        _queue_btn_row.addWidget(self._btn_bq_remove)
-        _btn_bq_clear = QPushButton("Clear")
-        _btn_bq_clear.setToolTip("すべてを削除")
-        _btn_bq_clear.clicked.connect(self._batch_clear)
-        _queue_btn_row.addWidget(_btn_bq_clear)
-        _register_secondary_buttons(_btn_bq_all, _btn_bq_none, self._btn_bq_remove, _btn_bq_clear)
-        _set_nonshrinking_button_width(_btn_bq_all, _btn_bq_none, self._btn_bq_load, self._btn_bq_remove, _btn_bq_clear)
-        _top_layout.addLayout(_queue_btn_row)
-
-        _export_all_btn_row = QHBoxLayout()
-        self._btn_batch_export_all = QPushButton("📤 Export All")
-        self._btn_batch_export_all.clicked.connect(self._batch_export_all)
-        self._btn_batch_export_all.setFixedHeight(26)
-        self._btn_batch_export_all.setStyleSheet(
-            "QPushButton { background-color: #1a6b3a; color: white; font-weight: bold; font-size: 12px; border-radius: 4px; }"
-            "QPushButton:hover { background-color: #1e8046; }"
-            "QPushButton:disabled { background-color: #444; color: #888; }"
-        )
-        _export_all_btn_row.addWidget(self._btn_batch_export_all)
-        _top_layout.addLayout(_export_all_btn_row)
-
-        # ── 下ペイン: Quick Presets ──
-        _bot_pane = QWidget()
-        _bot_layout = QVBoxLayout(_bot_pane)
-        _bot_layout.setSpacing(6)
-        _bot_layout.setContentsMargins(0, 0, 0, 0)
-        _right_splitter.addWidget(_bot_pane)
-
-        _bot_layout.addWidget(QLabel("Quick Presets:"))
-
-        self._preset_list_w = _PresetListWidget()
-        self._preset_list_w.setAlternatingRowColors(True)
-        for _p in _BATCH_PRESETS:
-            _pi = QListWidgetItem(_p.label)
-            _pi.setFlags(_pi.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            _pi.setCheckState(Qt.CheckState.Unchecked)
-            _pi.setData(Qt.ItemDataRole.UserRole, _p)
-            self._preset_list_w.addItem(_pi)
-        _bot_layout.addWidget(self._preset_list_w, 1)
-
-        _preset_btn_row = QHBoxLayout()
-        _btn_pa = QPushButton("All")
-        _btn_pa.clicked.connect(
-            lambda: [self._preset_list_w.item(i).setCheckState(Qt.CheckState.Checked)
-                     for i in range(self._preset_list_w.count())]
-        )
-        _btn_pn = QPushButton("None")
-        _btn_pn.clicked.connect(
-            lambda: [self._preset_list_w.item(i).setCheckState(Qt.CheckState.Unchecked)
-                     for i in range(self._preset_list_w.count())]
-        )
-        _preset_btn_row.addWidget(_btn_pa)
-        _preset_btn_row.addWidget(_btn_pn)
-        _preset_btn_row.addStretch()
-        self._btn_add_presets = QPushButton("➕ Add to Batch")
-        _register_secondary_buttons(_btn_pa, _btn_pn, self._btn_add_presets)
-        _set_nonshrinking_button_width(_btn_pa, _btn_pn, self._btn_add_presets)
-        self._btn_add_presets.clicked.connect(self._batch_add_presets)
-        _preset_btn_row.addWidget(self._btn_add_presets)
-        _bot_layout.addLayout(_preset_btn_row)
-
-        self._btn_quick_export = QPushButton("📤 Quick Export")
-        self._btn_quick_export.clicked.connect(self._quick_export_presets)
-        self._btn_quick_export.setFixedHeight(26)
-        self._btn_quick_export.setStyleSheet(
-            "QPushButton { background-color: #1a4a6b; color: white; font-weight: bold; font-size: 12px; border-radius: 4px; }"
-            "QPushButton:hover { background-color: #1e5a80; }"
-            "QPushButton:disabled { background-color: #444; color: #888; }"
-        )
-        _bot_layout.addWidget(self._btn_quick_export)
-
-        _right_w.setMinimumWidth(max(
-            180,
-            _batch_title.sizeHint().width() + self._btn_bq_load.minimumWidth() + self._btn_preview_cover.sizeHint().width() + 64,
-            self._batch_count_label.sizeHint().width()
-            + _btn_bq_all.minimumWidth()
-            + _btn_bq_none.minimumWidth()
-            + self._btn_bq_remove.minimumWidth()
-            + _btn_bq_clear.minimumWidth()
-            + 72,
-            _btn_pa.minimumWidth() + _btn_pn.minimumWidth() + self._btn_add_presets.minimumWidth() + 56,
-            self._btn_batch_export_all.sizeHint().width() + 24,
-            self._btn_quick_export.sizeHint().width() + 24,
-        ))
-
-        _right_splitter.setSizes([280, 280, 220])
-
-        # ── バッチ状態 ──
-        self._export_dir: str = load_playlist_export_dir()
-        self._batch_configs: List[_BatchConfig] = load_playlist_batch_configs()
-        self._export_sigs = _LoadSignals()
-        self._export_sigs.finished.connect(self._on_export_finished)
-        self._export_sigs.error.connect(self._on_export_error)
-        self._apply_secondary_button_theme()
-        self._export_sigs.progress.connect(self._on_export_progress)
-        self._batch_progress_dlg: Optional[QProgressDialog] = None
-        self._batch_queue_list.itemChanged.connect(self._on_batch_item_changed)
-        self._batch_queue_list.itemSelectionChanged.connect(self._update_batch_queue_actions)
-        self._batch_refresh_queue()
-        self._initial_source_tab = initial_source_tab
-        self._initial_restore_started = False
-
-        # スプリッタ初期サイズ: 左を広く、右パネルを 252px
-        self._splitter.setSizes([940, 350])
-        self._update_filter_export_ui()
-        self._update_table_visual_mode()
-        self._clear_preview()
-
     def showEvent(self, event) -> None:  # type: ignore[override]
         super().showEvent(event)
         if self._initial_restore_started:
@@ -4182,8 +4114,10 @@ class PlaylistWindow(QMainWindow):
         QTimer.singleShot(0, self._finish_initial_restore)
 
     def _finish_initial_restore(self) -> None:
+        # 初回表示時は「前回の画面状態の復元」と「Maps 側の保存済み一覧の復元」が
+        # 別経路になっているため、ここでダイアログ表示の起点をまとめる。
         close_progress = False
-        if _PLAYLIST_WINDOW_PATH.exists():
+        if has_saved_playlist_window_state():
             self._show_load_progress_dialog("Loading saved view...")
             close_progress = True
         try:
@@ -4554,13 +4488,9 @@ class PlaylistWindow(QMainWindow):
         self._start_next_beatsaver_meta_batch()
 
     def _save_window_state(self) -> None:
+        """現在のウィンドウ状態と各タブの表示状態を保存する。"""
         try:
-            payload: dict = {}
-            if _PLAYLIST_WINDOW_PATH.exists():
-                try:
-                    payload = json.loads(_PLAYLIST_WINDOW_PATH.read_text(encoding="utf-8"))
-                except Exception:
-                    payload = {}
+            payload = load_playlist_window_payload()
             payload["splitter_sizes"] = self._splitter.sizes()
             payload["window_width"] = self.width()
             payload["window_height"] = self.height()
@@ -4589,18 +4519,14 @@ class PlaylistWindow(QMainWindow):
                 payload["maps_state"] = maps_state
             else:
                 payload.pop("maps_state", None)
-            _PLAYLIST_WINDOW_PATH.write_text(
-                json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
-            )
+            save_playlist_window_payload(payload)
         except Exception:
             pass
 
     def _load_window_state(self) -> None:
-        if not _PLAYLIST_WINDOW_PATH.exists():
-            return
-        try:
-            data = json.loads(_PLAYLIST_WINDOW_PATH.read_text(encoding="utf-8"))
-        except Exception:
+        """保存済みのウィンドウ状態を読み込んで復元用バッファへ展開する。"""
+        data = load_playlist_window_payload()
+        if not data:
             return
         w = data.get("window_width")
         h = data.get("window_height")
@@ -4872,6 +4798,8 @@ class PlaylistWindow(QMainWindow):
         )
 
     def _build_list_state_payload(self, entries: List[MapEntry], source_key: str, sort_mode: str, last_load_text: str) -> Optional[dict]:
+        # 再起動後に「最後に見ていた画面」を戻すための最小 state。
+        # entries が空でも filter 状態は保存したいので payload 自体は常に返す。
         return {
             "source": source_key,
             "sort_mode": sort_mode,
@@ -6705,10 +6633,7 @@ class PlaylistWindow(QMainWindow):
     def _batch_save_configs(self) -> None:
         """バッチ設定をファイルに保存する。"""
         try:
-            _BATCH_CONFIG_PATH.write_text(
-                json.dumps([c.to_dict() for c in self._batch_configs], ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
+            _save_playlist_batch_configs(self._batch_configs)
         except Exception:
             pass
 
