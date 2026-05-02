@@ -3616,6 +3616,7 @@ class PlaylistWindow(QMainWindow):
         self._initial_source_tab = initial_source_tab
         self._initial_restore_started = False
         self._skip_initial_snapshot_restore = False
+        self._initial_center_pending = True
 
     def _build_base_layout(self) -> QVBoxLayout:
         """左右 split のベースレイアウトを作り、左ペイン root を返す。"""
@@ -4125,6 +4126,9 @@ class PlaylistWindow(QMainWindow):
             close_progress = True
         try:
             self._load_window_state()
+            if self._initial_center_pending:
+                self._center_on_screen()
+                self._initial_center_pending = False
             self.select_source_tab(self._initial_source_tab)
             if not skip_snapshot_restore:
                 self._restore_saved_snapshot_state()
@@ -4138,6 +4142,14 @@ class PlaylistWindow(QMainWindow):
         finally:
             if close_progress:
                 self._close_load_progress_dialog()
+
+    def _center_on_screen(self) -> None:
+        screen = self.screen() or QApplication.primaryScreen()
+        if screen is None:
+            return
+        frame = self.frameGeometry()
+        frame.moveCenter(screen.availableGeometry().center())
+        self.move(frame.topLeft())
 
     def _schedule_deferred_maps_restore(self) -> None:
         if self._deferred_maps_restore_scheduled or not self._restored_maps_state:
@@ -4285,6 +4297,8 @@ class PlaylistWindow(QMainWindow):
             self._filtered = self._snapshot_filtered
             self._table_stack.setCurrentWidget(self._snapshot_table)
             self._last_load_label.setText(self._snapshot_last_load_text)
+        if self._table.rowCount() != len(self._filtered):
+            self._refresh_table(self._filtered)
         self._count_label.setText(f"{len(self._filtered):,} maps")
         self._update_sort_label()
         self._update_selection_status()
