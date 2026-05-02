@@ -87,6 +87,7 @@ from .beatleader_mapper_cache import build_bl_mapper_played_cache_from_local, lo
 from .beatsaver_cache import load_beatsaver_meta_cache, update_beatsaver_meta_cache, upsert_beatsaver_meta_cache, _has_full_beatsaver_meta
 from .settings_store import (
     load_beatsaber_dir as _load_beatsaber_dir_setting,
+    load_mapper_load_new_after_maps as _load_mapper_load_new_after_maps_setting,
     load_playlist_export_dir as _load_playlist_export_dir_setting,
     save_beatsaber_dir as _save_beatsaber_dir_setting,
     save_playlist_export_dir as _save_playlist_export_dir_setting,
@@ -3599,6 +3600,7 @@ class PlaylistWindow(QMainWindow):
         self._current_preview_url = ""
         self._progress_dlg = None
         self._bl_mapper_stats_progress_dlg = None
+        self._bl_mapper_stats_silent = False
         self._deferred_maps_restore_scheduled = False
         self._bl_api_session = requests.Session()
         self._bl_top_replay_cache = {}
@@ -4167,6 +4169,20 @@ class PlaylistWindow(QMainWindow):
             self._restore_saved_maps_state()
         finally:
             self._close_load_progress_dialog()
+        self._maybe_start_auto_mapper_load_new()
+
+    def _maybe_start_auto_mapper_load_new(self) -> None:
+        if not self._steam_id:
+            return
+        if not self._is_maps_tab():
+            return
+        if not self._maps_all_entries:
+            return
+        if not _load_mapper_load_new_after_maps_setting():
+            return
+        if not self._btn_mapper_top.isEnabled():
+            return
+        self._start_bl_mapper_stats_task("since", silent=True)
 
     def _create_playlist_table(self) -> QTableWidget:
         table = _PlaylistTableWidget(0, _COL_COUNT, self)
@@ -5793,7 +5809,7 @@ class PlaylistWindow(QMainWindow):
         if action in ("since", "full"):
             self._start_bl_mapper_stats_task(action)
 
-    def _start_bl_mapper_stats_task(self, mode: str) -> None:
+    def _start_bl_mapper_stats_task(self, mode: str, *, silent: bool = False) -> None:
         if not self._steam_id:
             return
         labels = {
@@ -5801,15 +5817,19 @@ class PlaylistWindow(QMainWindow):
             "since": "Refreshing mapper stats since cache date...",
             "full": "Running full mapper stats rebuild...",
         }
+        self._bl_mapper_stats_silent = silent
         self._btn_mapper_top.setEnabled(False)
-        self._show_bl_mapper_progress_dialog(labels.get(mode, "Updating mapper stats..."))
-        dlg = self._bl_mapper_stats_progress_dlg
-        if dlg is not None:
-            def _on_cancel() -> None:
-                self._close_bl_mapper_progress_dialog()
-                self._btn_mapper_top.setEnabled(True)
+        if silent:
+            self._update_bl_mapper_cache_status(labels.get(mode, "Updating mapper stats..."))
+        else:
+            self._show_bl_mapper_progress_dialog(labels.get(mode, "Updating mapper stats..."))
+            dlg = self._bl_mapper_stats_progress_dlg
+            if dlg is not None:
+                def _on_cancel() -> None:
+                    self._close_bl_mapper_progress_dialog()
+                    self._btn_mapper_top.setEnabled(True)
 
-            dlg.canceled.connect(_on_cancel)
+                dlg.canceled.connect(_on_cancel)
 
         sigs = self._bl_mapper_stats_signals
         steam_id = self._steam_id
@@ -5830,24 +5850,35 @@ class PlaylistWindow(QMainWindow):
         threading.Thread(target=_task, daemon=True).start()
 
     def _on_bl_mapper_stats_progress(self, done: int, total: int, label: str) -> None:
+        if self._bl_mapper_stats_silent:
+            self._update_bl_mapper_cache_status(label)
+            return
         self._update_bl_mapper_progress_dialog(done, total, label)
 
     def _on_bl_mapper_stats_finished(self, payload: object, mode: str) -> None:
+        silent = self._bl_mapper_stats_silent
+        self._bl_mapper_stats_silent = False
         self._close_bl_mapper_progress_dialog()
         self._btn_mapper_top.setEnabled(bool(self._steam_id))
         if not isinstance(payload, dict):
             self._update_bl_mapper_cache_status("invalid payload")
             return
         self._update_bl_mapper_cache_status()
+        if silent:
+            return
         action = show_bl_mapper_top_dialog(self, payload)
         if action in ("since", "full"):
             self._start_bl_mapper_stats_task(action)
 
     def _on_bl_mapper_stats_error(self, message: str) -> None:
+        silent = self._bl_mapper_stats_silent
+        self._bl_mapper_stats_silent = False
         self._close_bl_mapper_progress_dialog()
         self._btn_mapper_top.setEnabled(bool(self._steam_id))
         short_message = message.strip() or "unknown error"
         self._update_bl_mapper_cache_status(short_message)
+        if silent:
+            return
         QMessageBox.warning(self, "BeatLeader Mapper Top", short_message)
 
     def _run_load_open_rl(self, sigs: _LoadSignals, bplist_path: Path, steam_id: Optional[str]) -> None:
@@ -5965,6 +5996,11 @@ class PlaylistWindow(QMainWindow):
             dlg.setLabelText(label)
 
     def _on_load_finished(self, entries: List[MapEntry]) -> None:
+        should_auto_mapper_load_new = bool(
+            self._pending_load_maps_tab
+            and self._steam_id
+            and _load_mapper_load_new_after_maps_setting()
+        )
         self._update_load_progress_dialog(0, 3, "Applying loaded data...")
         self._btn_load.setEnabled(True)
         if not self._pending_load_maps_tab:
@@ -6039,6 +6075,8 @@ class PlaylistWindow(QMainWindow):
         self._update_load_progress_dialog(3, 3, "Finalizing view...")
         self._save_window_state()
         self._close_load_progress_dialog()
+        if should_auto_mapper_load_new and self._btn_mapper_top.isEnabled():
+            self._start_bl_mapper_stats_task("since", silent=True)
 
     def _on_load_error(self, msg: str) -> None:
         self._close_load_progress_dialog()

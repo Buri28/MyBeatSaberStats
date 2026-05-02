@@ -54,7 +54,9 @@ from .snapshot_graph import SnapshotGraphDialog
 from .app import MainWindow as RankingWindow
 from .settings_store import (
     load_export_all_after_snapshot as _load_export_all_after_snapshot_setting,
+    load_mapper_load_new_after_maps as _load_mapper_load_new_after_maps_setting,
     save_export_all_after_snapshot as _save_export_all_after_snapshot_setting,
+    save_mapper_load_new_after_maps as _save_mapper_load_new_after_maps_setting,
 )
 from .collector.collector import (
     collect_beatleader_star_stats,
@@ -178,6 +180,14 @@ def _load_export_all_after_snapshot() -> bool:
 
 def _save_export_all_after_snapshot(enabled: bool) -> None:
     _save_export_all_after_snapshot_setting(enabled)
+
+
+def _load_mapper_load_new_after_maps() -> bool:
+    return _load_mapper_load_new_after_maps_setting()
+
+
+def _save_mapper_load_new_after_maps(enabled: bool) -> None:
+    _save_mapper_load_new_after_maps_setting(enabled)
 
 
 class TakeSnapshotDialog(QDialog):
@@ -640,6 +650,13 @@ class SettingsDialog(QDialog):
         self._cb_playlist_export_all.setChecked(_load_export_all_after_snapshot())
         playlist_export_layout.addWidget(self._cb_playlist_export_all)
 
+        self._cb_mapper_load_new_after_maps = QCheckBox("Mapper Load New after Maps load", self)
+        self._cb_mapper_load_new_after_maps.setChecked(_load_mapper_load_new_after_maps())
+        self._cb_mapper_load_new_after_maps.setToolTip(
+            "Maps を読み込んだあとに Mapper List の Load New を自動で実行します"
+        )
+        playlist_export_layout.addWidget(self._cb_mapper_load_new_after_maps)
+
         playlist_dir_row = QHBoxLayout()
         playlist_dir_row.setSpacing(8)
         playlist_dir_row.addWidget(QLabel("Folder:", self))
@@ -688,6 +705,7 @@ class SettingsDialog(QDialog):
 
         playlist_export_dir = self._playlist_export_dir_edit.text().strip()
         _save_export_all_after_snapshot(self._cb_playlist_export_all.isChecked())
+        _save_mapper_load_new_after_maps(self._cb_mapper_load_new_after_maps.isChecked())
         if playlist_export_dir:
             _save_playlist_export_dir(playlist_export_dir)
 

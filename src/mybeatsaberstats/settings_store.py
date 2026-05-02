@@ -108,3 +108,12 @@ def load_export_all_after_snapshot() -> bool:
 
 def save_export_all_after_snapshot(enabled: bool) -> None:
     save_settings({"export_all_after_snapshot": bool(enabled)})
+
+
+def load_mapper_load_new_after_maps() -> bool:
+    settings = load_settings()
+    return bool(settings.get("mapper_load_new_after_maps", True))
+
+
+def save_mapper_load_new_after_maps(enabled: bool) -> None:
+    save_settings({"mapper_load_new_after_maps": bool(enabled)})
