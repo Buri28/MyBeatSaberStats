@@ -3829,36 +3829,53 @@ class PlayerWindow(QMainWindow):
         except Exception as exc:  # noqa: BLE001
             QMessageBox.warning(self, "Snapshot Graph", f"Failed to open snapshot graph:\n{exc}")
 
-    def _show_playlist_window(self, initial_source_tab: str = "snapshot", *, show_window: bool = True) -> None:
+    def _show_playlist_open_progress(self, label: str, parent: Optional[QWidget] = None) -> QProgressDialog:
+        """Playlist / Maps 画面を表示する前後の待機ダイアログを作成する。"""
+        dialog_parent = parent
+        progress = QProgressDialog(label, "", 0, 0, dialog_parent)
+        progress.setWindowTitle("Opening Playlist / Maps")
+        progress.setWindowModality(Qt.WindowModality.ApplicationModal)
+        progress.setAutoClose(False)
+        progress.setAutoReset(False)
+        progress.setCancelButton(None)
+        progress.setMinimumWidth(360)
+        progress.setMinimumDuration(0)
+        progress.show()
+        QApplication.processEvents()
+        return progress
+
+    def _show_playlist_window(
+        self,
+        initial_source_tab: str = "snapshot",
+        *,
+        show_window: bool = True,
+        show_progress: bool = True,
+    ) -> None:
         steam_id = self._current_player_id()
-        if not hasattr(self, "_playlist_window") or self._playlist_window is None:
-            progress = QProgressDialog("Opening Playlist / Maps...", "", 0, 0, self)
-            progress.setWindowTitle("Opening Playlist / Maps")
-            progress.setWindowModality(Qt.WindowModality.ApplicationModal)
-            progress.setAutoClose(False)
-            progress.setAutoReset(False)
-            progress.setCancelButton(None)
-            progress.setMinimumWidth(360)
-            progress.setMinimumDuration(0)
-            progress.show()
-            QApplication.processEvents()
-            try:
+        progress = self._show_playlist_open_progress("Opening Playlist / Maps...") if show_progress else None
+        try:
+            if not hasattr(self, "_playlist_window") or self._playlist_window is None:
                 self._playlist_window = PlaylistWindow(
                     steam_id=steam_id,
                     initial_source_tab=initial_source_tab,
                     parent=None,
                 )
-            finally:
+            else:
+                if progress is not None:
+                    progress.setLabelText("Preparing Playlist / Maps...")
+                    QApplication.processEvents()
+                # プレイヤーが変わっていたら steam_id を更新
+                self._playlist_window._steam_id = steam_id
+                self._playlist_window._export_dir = _load_playlist_export_dir()
+                self._playlist_window.select_source_tab(initial_source_tab)
+        finally:
+            if progress is not None:
                 progress.close()
-        else:
-            # プレイヤーが変わっていたら steam_id を更新
-            self._playlist_window._steam_id = steam_id
-            self._playlist_window._export_dir = _load_playlist_export_dir()
-            self._playlist_window.select_source_tab(initial_source_tab)
         if show_window:
             self._playlist_window.show()
             self._playlist_window.raise_()
             self._playlist_window.activateWindow()
+            QApplication.processEvents()
 
     def open_playlist(self) -> None:
         """Playlist 画面を開く（現在プレイヤーのクリア情報を渡す）。"""
@@ -3887,8 +3904,20 @@ class PlayerWindow(QMainWindow):
         sort_mode: str = "status_desc",
     ) -> None:
         """Stats 画面からの連携用。Playlist 画面を開いてフィルタプリセットを適用する。"""
-        self._show_playlist_window("snapshot")
-        if self._playlist_window is not None:
+        progress = self._show_playlist_open_progress("Opening Playlist / Maps...")
+        try:
+            self._show_playlist_window("snapshot", show_window=False, show_progress=False)
+            if self._playlist_window is None:
+                return
+            if not self._playlist_window.isVisible() and not self._playlist_window._initial_restore_started:
+                self._playlist_window._initial_restore_started = True
+            progress.close()
+            self._playlist_window.show()
+            self._playlist_window.raise_()
+            self._playlist_window.activateWindow()
+            QApplication.processEvents()
+            progress = self._show_playlist_open_progress("Applying Playlist filter...")
+            QApplication.processEvents()
             self._playlist_window.apply_filter_preset(
                 source=source,
                 star_min=star_min,
@@ -3899,6 +3928,11 @@ class PlayerWindow(QMainWindow):
                 show_unplayed=show_unplayed,
                 sort_mode=sort_mode,
             )
+        finally:
+            progress.close()
+        self._playlist_window.raise_()
+        self._playlist_window.activateWindow()
+        QApplication.processEvents()
 
     def _star_range_from_row(self, table: QTableWidget, row: int) -> tuple[float, float]:
         star_item = table.item(row, 0)

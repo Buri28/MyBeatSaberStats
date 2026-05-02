@@ -5944,7 +5944,7 @@ class PlaylistWindow(QMainWindow):
             dlg.setLabelText(label)
 
     def _on_load_finished(self, entries: List[MapEntry]) -> None:
-        self._close_load_progress_dialog()
+        self._update_load_progress_dialog(0, 3, "Applying loaded data...")
         self._btn_load.setEnabled(True)
         if not self._pending_load_maps_tab:
             _refresh_snapshot_entries_service_columns(entries, self._steam_id)
@@ -5958,9 +5958,11 @@ class PlaylistWindow(QMainWindow):
             self._invalidate_bl_preview_link_indices()
         self._sync_active_table_state()
         self._refresh_maps_entries_from_player_caches()
+        self._update_load_progress_dialog(1, 3, "Preparing table...")
         if not entries:
             self._count_label.setText("0 maps")
             self._save_window_state()
+            self._close_load_progress_dialog()
             if self._rb_bs.isChecked():
                 if self._current_bs_date_mode() == "dates":
                     date_summary = (
@@ -6009,10 +6011,13 @@ class PlaylistWindow(QMainWindow):
             self._update_sort_label()
         else:
             self._set_current_tab_sort_mode(self._current_sort_mode())
+        self._update_load_progress_dialog(2, 3, "Rendering rows...")
         self._apply_filter()
         if not self._rb_bs.isChecked():
             self._queue_beatsaver_cache_for_current_entries()
+        self._update_load_progress_dialog(3, 3, "Finalizing view...")
         self._save_window_state()
+        self._close_load_progress_dialog()
 
     def _on_load_error(self, msg: str) -> None:
         self._close_load_progress_dialog()

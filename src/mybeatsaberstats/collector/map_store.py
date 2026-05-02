@@ -1,29 +1,27 @@
 from __future__ import annotations
-import json
 
-from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 
 class MapStore:
     """
     マップやスコアの情報を保持するシングルトンクラス
     """
-    _instance = None
+    _instance: Optional[MapStore] = None
 
-    snapshots: dict = {}  # スナップショットデータキャッシュ
-    acc_players: dict = {}  # AccSaber プレイヤーデータキャッシュ
-    ss_basic_info: dict = {}  # ScoreSaber 基本情報キャッシュ ScoreSaberPlayer
-    bl_basic_info: dict = {}  # BeatLeader 基本情報キャッシュ BeatLeaderPlayer
+    snapshots: dict[str, Any] = {}  # スナップショットデータキャッシュ
+    acc_players: dict[str, Any] = {}  # AccSaber プレイヤーデータキャッシュ
+    ss_basic_info: dict[str, Any] = {}  # ScoreSaber 基本情報キャッシュ ScoreSaberPlayer
+    bl_basic_info: dict[str, Any] = {}  # BeatLeader 基本情報キャッシュ BeatLeaderPlayer
     
-    player_index: dict = {}  # プレイヤーインデックスキャッシュ
-    ss_players: dict = {}  # ScoreSaber プレイヤーデータキャッシュ
-    bl_players: dict = {}  # BeatLeader プレイヤーデータキャッシュ
+    player_index: dict[str, Any] = {}  # プレイヤーインデックスキャッシュ
+    ss_players: dict[str, Any] = {}  # ScoreSaber プレイヤーデータキャッシュ
+    bl_players: dict[str, Any] = {}  # BeatLeader プレイヤーデータキャッシュ
 
-    ss_ranked_maps: dict = {}  # ScoreSaber Ranked Maps キャッシュ
-    bl_ranked_maps: dict = {}  # BeatLeader Ranked Maps キャッシュ
+    ss_ranked_maps: dict[str, Any] = {}  # ScoreSaber Ranked Maps キャッシュ
+    bl_ranked_maps: dict[str, Any] = {}  # BeatLeader Ranked Maps キャッシュ
 
-    def __new__(cls, *args, **kwargs):
+    def __new__(cls, *args, **kwargs) -> MapStore:
         if cls._instance is None:
             # まだインスタンスがなければ作成
             cls._instance = super().__new__(cls)
