@@ -769,7 +769,7 @@ def _format_cache_timestamp_local(value: str) -> str:
 def show_bl_mapper_top_dialog(parent: Optional[QWidget], cache_data: dict, limit: Optional[int] = None) -> str:
     dlg = QDialog(parent)
     dlg.setWindowTitle("BeatLeader Mapper List")
-    dlg.resize(640, 640)
+    dlg.resize(640, 750)
 
     layout = QVBoxLayout(dlg)
     layout.setSpacing(8)
@@ -841,11 +841,6 @@ def show_bl_mapper_top_dialog(parent: Optional[QWidget], cache_data: dict, limit
     filter_edit.textChanged.connect(lambda _text: _apply_mapper_rows())
     _apply_mapper_rows()
     layout.addWidget(table, 1)
-
-    note_label = QLabel("Counts are based on BeatLeader best-score cache and include ranked/unranked maps when mapper data exists in the cache.")
-    note_label.setWordWrap(True)
-    note_label.setStyleSheet("color: #aaa;")
-    layout.addWidget(note_label)
 
     result = {"action": "close"}
     button_row = QHBoxLayout()
