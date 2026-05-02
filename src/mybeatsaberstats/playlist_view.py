@@ -72,6 +72,7 @@ from PySide6.QtWidgets import (
 
 from .snapshot import BASE_DIR, RESOURCES_DIR
 from .accsaber_reloaded import is_pending_difficulty as _is_rl_pending_difficulty
+from .beatleader_mapper_cache import build_bl_mapper_played_cache_from_local, load_bl_mapper_played_cache, refresh_bl_mapper_played_cache
 from .beatsaver_cache import load_beatsaver_meta_cache, update_beatsaver_meta_cache, upsert_beatsaver_meta_cache, _has_full_beatsaver_meta
 from .settings_store import (
     load_beatsaber_dir as _load_beatsaber_dir_setting,
@@ -527,11 +528,16 @@ def export_playlist_configs(
     has_rl = any(config.source == "rl" for config in configs)
     has_acc = any(config.source == "acc" for config in configs)
     bs_configs = [config for config in configs if config.source == "bs"]
+    needs_mapper_counts = any(
+        config.mapper_played_min > 0 or config.sort_mode in ("bl_mapper_played_desc", "bl_mapper_played_asc")
+        for config in configs
+    )
 
     ss_maps: List[MapEntry] = []
     bl_maps: List[MapEntry] = []
     rl_maps: List[MapEntry] = []
     acc_maps: List[MapEntry] = []
+    mapper_played_counts: Dict[str, int] = _load_bl_mapper_played_counts_from_cache(steam_id) if needs_mapper_counts else {}
 
     n_load = (1 if has_ss else 0) + (1 if has_bl else 0) + (1 if has_rl else 0) + (1 if has_acc else 0) + len(bs_configs)
     total = n_load + len(configs)
@@ -605,7 +611,7 @@ def export_playlist_configs(
                 step += 1
             else:
                 base_maps = {"ss": ss_maps, "bl": bl_maps, "rl": rl_maps, "acc": acc_maps}.get(config.source, [])
-            maps = _apply_config_filter(list(base_maps), config)
+            maps = _apply_config_filter(list(base_maps), config, mapper_played_counts)
             _write_config_files(maps, config, folder_path, saved_files, errors, resolved_covers)
         except Exception as exc:
             errors.append(f"{config.label}: {exc}")
@@ -732,6 +738,121 @@ def show_bplist_covers_dialog(
     outer.addLayout(btn_row)
 
     dlg.exec()
+
+
+def _format_cache_timestamp_local(value: str) -> str:
+    if not value:
+        return "Never"
+    try:
+        dt_utc = datetime.fromisoformat(value.rstrip("Z")).replace(tzinfo=timezone.utc)
+    except ValueError:
+        return value
+    return dt_utc.astimezone().strftime("%Y-%m-%d %H:%M")
+
+
+def show_bl_mapper_top_dialog(parent: Optional[QWidget], cache_data: dict, limit: Optional[int] = None) -> str:
+    dlg = QDialog(parent)
+    dlg.setWindowTitle("BeatLeader Mapper List")
+    dlg.resize(640, 640)
+
+    layout = QVBoxLayout(dlg)
+    layout.setSpacing(8)
+    layout.setContentsMargins(12, 12, 12, 12)
+
+    fetched_at = _format_cache_timestamp_local(str(cache_data.get("fetched_at") or ""))
+    total_maps = int(cache_data.get("total_played_maps") or cache_data.get("total_ranked_played_maps") or 0)
+    unique_mappers = int(cache_data.get("unique_mappers") or 0)
+    unknown_maps = int(cache_data.get("unknown_maps") or 0)
+    visible_limit = max(1, limit) if limit is not None else unique_mappers
+    title_label = QLabel(
+        f"Showing {min(unique_mappers, visible_limit):,} / {unique_mappers:,} mappers from BeatLeader best-score cache\n"
+        f"Fetched: {fetched_at}   Unique mappers: {unique_mappers:,}   Played maps: {total_maps:,}   Unknown: {unknown_maps:,}"
+    )
+    title_label.setWordWrap(True)
+    title_label.setStyleSheet("font-weight: 600;")
+    layout.addWidget(title_label)
+
+    filter_row = QHBoxLayout()
+    filter_row.setSpacing(6)
+    filter_row.addWidget(QLabel("Filter:"))
+    filter_edit = QLineEdit(dlg)
+    filter_edit.setPlaceholderText("Filter mapper names...")
+    filter_row.addWidget(filter_edit, 1)
+    layout.addLayout(filter_row)
+
+    table = QTableWidget(dlg)
+    table.setColumnCount(3)
+    table.setHorizontalHeaderLabels(["#", "Mapper", "Played"])
+    table.verticalHeader().setVisible(False)
+    table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+    table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+    table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+    table.setAlternatingRowColors(True)
+    table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+    table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+    table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+
+    sorted_rows_all = sorted(
+        ((str(mapper), int(count)) for mapper, count in (cache_data.get("counts") or {}).items()),
+        key=lambda kv: (-kv[1], kv[0].lower()),
+    )
+
+    def _apply_mapper_rows() -> None:
+        keyword = filter_edit.text().strip().lower()
+        visible_rows = []
+        for mapper_name, count_value in sorted_rows_all:
+            if keyword and keyword not in mapper_name.lower():
+                continue
+            visible_rows.append((mapper_name, count_value))
+        if limit is not None:
+            visible_rows = visible_rows[: max(1, limit)]
+        table.setRowCount(len(visible_rows))
+        for row, (mapper_name, count_value) in enumerate(visible_rows, start=1):
+            rank_item = _NumItem(str(row), float(row))
+            rank_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            mapper_item = QTableWidgetItem(mapper_name)
+            played_item = _NumItem(f"{count_value:,}", float(count_value))
+            played_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            table.setItem(row - 1, 0, rank_item)
+            table.setItem(row - 1, 1, mapper_item)
+            table.setItem(row - 1, 2, played_item)
+        summary_count = len(visible_rows)
+        title_label.setText(
+            f"Showing {summary_count:,} / {unique_mappers:,} mappers from BeatLeader best-score cache\n"
+            f"Fetched: {fetched_at}   Unique mappers: {unique_mappers:,}   Played maps: {total_maps:,}   Unknown: {unknown_maps:,}"
+        )
+
+    filter_edit.textChanged.connect(lambda _text: _apply_mapper_rows())
+    _apply_mapper_rows()
+    layout.addWidget(table, 1)
+
+    note_label = QLabel("Counts are based on BeatLeader best-score cache and include ranked/unranked maps when mapper data exists in the cache.")
+    note_label.setWordWrap(True)
+    note_label.setStyleSheet("color: #aaa;")
+    layout.addWidget(note_label)
+
+    result = {"action": "close"}
+    button_row = QHBoxLayout()
+    button_row.addStretch()
+    btn_refresh_since = QPushButton("Refresh Since Cache Date")
+    btn_full = QPushButton("Full Rebuild")
+    btn_close = QPushButton("Close")
+    btn_close.setDefault(True)
+
+    def _set_action(action: str) -> None:
+        result["action"] = action
+        dlg.accept()
+
+    btn_refresh_since.clicked.connect(lambda: _set_action("since"))
+    btn_full.clicked.connect(lambda: _set_action("full"))
+    btn_close.clicked.connect(dlg.accept)
+    button_row.addWidget(btn_refresh_since)
+    button_row.addWidget(btn_full)
+    button_row.addWidget(btn_close)
+    layout.addLayout(button_row)
+
+    dlg.exec()
+    return str(result.get("action") or "close")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1310,6 +1431,14 @@ def _played_at_item(ts: int) -> QTableWidgetItem:
     return item
 
 
+def _played_status_item(ts: int, played: bool) -> QTableWidgetItem:
+    if ts > 0:
+        return _played_at_item(ts)
+    item = _NumItem("Played" if played else "-", 0.0 if played else -1.0)
+    item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+    return item
+
+
 def _format_source_date(ts: int, *, include_time: bool = False) -> str:
     if ts <= 0:
         return "-"
@@ -1332,7 +1461,7 @@ def _sort_dir_from_mode(sort_mode: str) -> str:
         "acc_ap_high", "accsvc_acc_high", "acc_rank_high", "acc_complexity_desc", "acc_cat_desc", "acc_played_desc",
         "rl_ap_high", "rl_acc_high", "rl_rank_high", "rl_complexity_desc", "rl_cat_desc", "rl_played_desc",
         "pp_high", "ap_high", "acc_high", "rank_high", "star_desc", "fc_desc", "duration_desc",
-        "bl_watched_desc",
+        "bl_watched_desc", "bl_mapper_played_desc",
         "bl_maps_watched_desc", "bl_maps_played_desc",
         "status_desc", "song_desc", "date_desc", "playtime_desc", "diff_desc", "mode_desc", "cat_desc",
         "mapper_desc", "author_desc",
@@ -2026,6 +2155,12 @@ class _BeatSaverMetaSignals(QObject):
     error = Signal(str)
 
 
+class _BLMapperStatsSignals(QObject):
+    finished = Signal(object, str)
+    error = Signal(str)
+    progress = Signal(int, int, str)
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # バッチエクスポート
 # ──────────────────────────────────────────────────────────────────────────────
@@ -2082,6 +2217,7 @@ class _BatchConfig:
     bs_max_maps: int = 1000
     bs_min_rating: int = 50
     bs_min_votes: int = 0
+    mapper_played_min: int = 0
     bs_unranked_only: bool = True
     bs_exclude_ai: bool = True
     # Enabled
@@ -2104,7 +2240,10 @@ class _BatchConfig:
             cats = [n for flag, n in [(self.cat_true, "Tr"), (self.cat_standard, "Std"), (self.cat_tech, "Tch")] if flag]
             src = f"Acc[{'+'.join(cats) or 'none'}]"
         elif self.source == "bs":
-            src = f"BS[R{self.bs_min_rating},V{self.bs_min_votes},M{self.bs_max_maps}]"
+            parts = [f"R{self.bs_min_rating}", f"V{self.bs_min_votes}", f"Max{self.bs_max_maps}"]
+            if self.mapper_played_min > 0:
+                parts.append(f"MP{self.mapper_played_min}")
+            src = f"BS[{','.join(parts)}]"
         sts = "".join([s for flag, s in [(self.show_cleared, "✓"), (self.show_nf, "⚠"), (self.show_unplayed, "✗"), (self.show_queued, "Q")] if flag])
         filter_parts = [sts] if sts else []
         if self.highest_diff_only:
@@ -2125,6 +2264,7 @@ class _BatchConfig:
             "date_desc": "Date↓", "date_asc": "Date↑",
             "duration_desc": "Len↓", "duration_asc": "Len↑",
             "bl_watched_desc": "BLWatched↓", "bl_watched_asc": "BLWatched↑",
+            "bl_mapper_played_desc": "MapperPlayed↓", "bl_mapper_played_asc": "MapperPlayed↑",
             "bl_maps_played_desc": "BLPlayed↓", "bl_maps_played_asc": "BLPlayed↑",
             "bl_maps_watched_desc": "BLWatched↓", "bl_maps_watched_asc": "BLWatched↑",
             "diff_desc": "Diff↓", "diff_asc": "Diff↑",
@@ -2164,9 +2304,11 @@ _BATCH_PRESETS: List[_BatchPreset] = [
 ]
 
 
-def _sort_entries(entries: List[MapEntry], sort_mode: str) -> List[MapEntry]:
+def _sort_entries(entries: List[MapEntry], sort_mode: str, mapper_played_counts: Optional[Dict[str, int]] = None) -> List[MapEntry]:
     """sort_mode に従って MapEntry をソートした新しいリストを返す。"""
     result = list(entries)
+    if mapper_played_counts is None:
+        mapper_played_counts = _build_bl_mapper_played_counts(entries)
     if sort_mode == "ss_pp_high":
         result.sort(key=lambda e: (-e.ss_player_pp, e.ss_stars, e.song_name.lower()))
     elif sort_mode == "ss_pp_low":
@@ -2340,6 +2482,10 @@ def _sort_entries(entries: List[MapEntry], sort_mode: str) -> List[MapEntry]:
         result.sort(key=lambda e: (-e.beatleader_replays_watched, e.song_name.lower()))
     elif sort_mode == "bl_watched_asc":
         result.sort(key=lambda e: (e.beatleader_replays_watched, e.song_name.lower()))
+    elif sort_mode == "bl_mapper_played_desc":
+        result.sort(key=lambda e: (-_bl_mapper_played_count_value(e, mapper_played_counts), e.mapper.lower(), e.song_name.lower()))
+    elif sort_mode == "bl_mapper_played_asc":
+        result.sort(key=lambda e: (_bl_mapper_played_count_value(e, mapper_played_counts), e.mapper.lower(), e.song_name.lower()))
     elif sort_mode == "bl_maps_played_desc":
         result.sort(key=lambda e: (0 if e.bl_played_at_ts > 0 else 1, -e.bl_played_at_ts if e.bl_played_at_ts > 0 else 0, e.song_name.lower()))
     elif sort_mode == "bl_maps_played_asc":
@@ -2367,6 +2513,62 @@ def _sort_entries(entries: List[MapEntry], sort_mode: str) -> List[MapEntry]:
     else:
         result.sort(key=lambda e: (e.stars, e.song_name))
     return result
+
+
+def _build_bl_mapper_played_counts(entries: List[MapEntry]) -> Dict[str, int]:
+    counts: Dict[str, int] = {}
+    for entry in entries:
+        mapper = str(entry.mapper or "").strip()
+        if not mapper or not _bl_has_played_score(entry):
+            continue
+        counts[mapper] = counts.get(mapper, 0) + 1
+    return counts
+
+
+def _bl_mapper_played_count_value(entry: MapEntry, counts: Dict[str, int]) -> int:
+    mapper = str(entry.mapper or "").strip()
+    if not mapper:
+        return -1
+    return counts.get(mapper, 0)
+
+
+def _load_bl_mapper_played_counts_from_cache(steam_id: Optional[str]) -> Dict[str, int]:
+    if not steam_id:
+        return {}
+    cache_data = load_bl_mapper_played_cache(steam_id)
+    if not isinstance(cache_data, dict):
+        return {}
+    counts = cache_data.get("counts")
+    if not isinstance(counts, dict):
+        return {}
+    normalized: Dict[str, int] = {}
+    for mapper, count in counts.items():
+        mapper_name = str(mapper or "").strip()
+        if not mapper_name:
+            continue
+        try:
+            count_value = int(count)
+        except (TypeError, ValueError):
+            continue
+        if count_value > 0:
+            normalized[mapper_name] = count_value
+    return normalized
+
+
+def _bl_effective_played_at_ts(entry: MapEntry) -> int:
+    if entry.bl_played_at_ts > 0:
+        return entry.bl_played_at_ts
+    if entry.source == "beatleader" or entry.score_source == "BL":
+        return entry.played_at_ts
+    return 0
+
+
+def _bl_has_played_score(entry: MapEntry) -> bool:
+    if _bl_effective_played_at_ts(entry) > 0:
+        return True
+    if entry.played and (entry.source == "beatleader" or entry.score_source == "BL"):
+        return True
+    return False
 
 
 def _filter_highest_difficulty_only(entries: List[MapEntry]) -> List[MapEntry]:
@@ -2400,10 +2602,16 @@ def _filter_highest_difficulty_only(entries: List[MapEntry]) -> List[MapEntry]:
         ]).lower()][3] is entry
     ]
 
-def _apply_config_filter(maps: List[MapEntry], cfg: "_BatchConfig") -> List[MapEntry]:
+def _apply_config_filter(
+    maps: List[MapEntry],
+    cfg: "_BatchConfig",
+    mapper_played_counts: Optional[Dict[str, int]] = None,
+) -> List[MapEntry]:
     """_BatchConfig のフィルタ条件をマップリストに適用してソート済みリストを返す。"""
     q = cfg.song_filter.lower() if cfg.song_filter else ""
     keywords = q.split() if q else []
+    if mapper_played_counts is None:
+        mapper_played_counts = {}
     result: List[MapEntry] = []
     for e in maps:
         if keywords:
@@ -2411,6 +2619,8 @@ def _apply_config_filter(maps: List[MapEntry], cfg: "_BatchConfig") -> List[MapE
             if not all(any(kw in t for t in targets) for kw in keywords):
                 continue
         if e.stars < cfg.star_min or e.stars >= cfg.star_max:
+            continue
+        if cfg.mapper_played_min > 0 and _bl_mapper_played_count_value(e, mapper_played_counts) < cfg.mapper_played_min:
             continue
         if e.pending:
             if not cfg.show_queued:
@@ -2432,7 +2642,7 @@ def _apply_config_filter(maps: List[MapEntry], cfg: "_BatchConfig") -> List[MapE
         result.append(e)
     if cfg.highest_diff_only:
         result = _filter_highest_difficulty_only(result)
-    return _sort_entries(result, cfg.sort_mode)
+    return _sort_entries(result, cfg.sort_mode, mapper_played_counts)
 
 
 def _pregenerate_covers(configs: "List[_BatchConfig]") -> Dict[str, str]:
@@ -2570,6 +2780,8 @@ _SORT_SYMBOL: Dict[str, str] = {
     "duration_asc":  "Len↑",
     "bl_watched_desc": "BLWatched↓",
     "bl_watched_asc":  "BLWatched↑",
+    "bl_mapper_played_desc": "MapperPlayed↓",
+    "bl_mapper_played_asc":  "MapperPlayed↑",
     "bl_maps_played_desc": "BLPlayed↓",
     "bl_maps_played_asc":  "BLPlayed↑",
     "bl_maps_watched_desc": "BLWatched↓",
@@ -2647,6 +2859,8 @@ def _sort_indicator_from_mode(sort_mode: str) -> Tuple[int, Qt.SortOrder]:
         "bl_pp_low": (_COL_BL_PP, Qt.SortOrder.AscendingOrder),
         "bl_watched_desc": (_COL_BL_WATCHED, Qt.SortOrder.DescendingOrder),
         "bl_watched_asc": (_COL_BL_WATCHED, Qt.SortOrder.AscendingOrder),
+        "bl_mapper_played_desc": (_COL_BL_MAPPER_PLAYED, Qt.SortOrder.DescendingOrder),
+        "bl_mapper_played_asc": (_COL_BL_MAPPER_PLAYED, Qt.SortOrder.AscendingOrder),
         "bl_maps_played_desc": (_COL_BL_MAPS_PLAYED, Qt.SortOrder.DescendingOrder),
         "bl_maps_played_asc": (_COL_BL_MAPS_PLAYED, Qt.SortOrder.AscendingOrder),
         "bl_maps_watched_desc": (_COL_BL_MAPS_WATCHED, Qt.SortOrder.DescendingOrder),
@@ -2935,9 +3149,10 @@ _COL_FC = 35
 _COL_MOD = 36
 _COL_MAPPER = 37
 _COL_AUTHOR = 38
-_COL_BL_MAPS_PLAYED = 39
-_COL_BL_MAPS_WATCHED = 40
-_COL_COUNT = 41
+_COL_BL_MAPPER_PLAYED = 39
+_COL_BL_MAPS_PLAYED = 40
+_COL_BL_MAPS_WATCHED = 41
+_COL_COUNT = 42
 
 _COL_LABELS = [
     "Status", "Cover", "Song", "DL", "Del", "Date", "Length", "Diff", "Mode",
@@ -2945,7 +3160,7 @@ _COL_LABELS = [
     "Played", "Rank", "★", "Acc %", "PP", "Watched",
     "Played", "Category", "Cmplx", "Acc %", "AP", "Rank",
     "Played", "Category", "Cmplx", "Acc %", "AP", "Rank",
-    "Rate %", "⇧", "⇩", "FC", "Mods", "Mapper", "Author", "Played", "Watched",
+    "Rate %", "⇧", "⇩", "FC", "Mods", "Mapper", "Author", "Mapper Played", "Played", "Watched",
 ]
 
 
@@ -3014,6 +3229,10 @@ class PlaylistWindow(QMainWindow):
         self._beatsaver_meta_signals = _BeatSaverMetaSignals()
         self._beatsaver_meta_signals.finished.connect(self._on_beatsaver_meta_batch_finished)
         self._beatsaver_meta_signals.error.connect(self._on_beatsaver_meta_batch_error)
+        self._bl_mapper_stats_signals = _BLMapperStatsSignals()
+        self._bl_mapper_stats_signals.finished.connect(self._on_bl_mapper_stats_finished)
+        self._bl_mapper_stats_signals.error.connect(self._on_bl_mapper_stats_error)
+        self._bl_mapper_stats_signals.progress.connect(self._on_bl_mapper_stats_progress)
         self._preview_cache: Dict[str, bytes] = {}
         self._thumbnail_cache: Dict[str, QPixmap] = {}
         self._thumbnail_queue: List[str] = []
@@ -3033,6 +3252,7 @@ class PlaylistWindow(QMainWindow):
         self._preview_token = 0
         self._current_preview_url = ""
         self._progress_dlg: Optional[QProgressDialog] = None
+        self._bl_mapper_stats_progress_dlg: Optional[QProgressDialog] = None
         self._deferred_maps_restore_scheduled = False
         self._bl_api_session = requests.Session()
         self._bl_top_replay_cache: Dict[Tuple[str, str], str] = {}
@@ -3397,6 +3617,18 @@ class PlaylistWindow(QMainWindow):
         self._bs_filter_votes_value_label.setValue(0)
         self._bs_filter_votes_value_label.setFixedWidth(72)
         self._bs_filter_votes_value_label.valueChanged.connect(self._on_bs_filter_votes_changed)
+        self._mapper_played_filter_label = QLabel("Mapper Played ≥")
+        self._mapper_played_filter_slider = QSlider(Qt.Orientation.Horizontal)
+        self._mapper_played_filter_slider.setRange(0, 5000)
+        self._mapper_played_filter_slider.setValue(0)
+        self._mapper_played_filter_slider.setFixedWidth(110)
+        self._mapper_played_filter_slider.setToolTip("Mapper Played cache count の下限")
+        self._mapper_played_filter_slider.valueChanged.connect(self._on_mapper_played_filter_changed)
+        self._mapper_played_filter_value = QSpinBox()
+        self._mapper_played_filter_value.setRange(0, 5000)
+        self._mapper_played_filter_value.setValue(0)
+        self._mapper_played_filter_value.setFixedWidth(72)
+        self._mapper_played_filter_value.valueChanged.connect(self._on_mapper_played_filter_changed)
         filter_row3.addSpacing(6)
         filter_row3.addWidget(self._bs_post_filter_label)
         filter_row3.addWidget(self._bs_filter_rating_label)
@@ -3405,6 +3637,9 @@ class PlaylistWindow(QMainWindow):
         filter_row3.addWidget(self._bs_filter_votes_label)
         filter_row3.addWidget(self._bs_filter_min_votes)
         filter_row3.addWidget(self._bs_filter_votes_value_label)
+        filter_row3.addWidget(self._mapper_played_filter_label)
+        filter_row3.addWidget(self._mapper_played_filter_slider)
+        filter_row3.addWidget(self._mapper_played_filter_value)
         filter_row1.addWidget(self._bs_post_filter_widget)
         filter_row1.addStretch()
         self._bs_to_date.setDate(QDate.currentDate())
@@ -3564,6 +3799,18 @@ class PlaylistWindow(QMainWindow):
         self._beatsaver_cache_status_label.setStyleSheet("color: #aaa;")
         _selection_status_layout.addSpacing(12)
         _selection_status_layout.addWidget(self._beatsaver_cache_status_label)
+        self._bl_mapper_cache_status_label = QLabel("Mapper cache: idle")
+        self._bl_mapper_cache_status_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        self._bl_mapper_cache_status_label.setMinimumHeight(18)
+        self._bl_mapper_cache_status_label.setStyleSheet("color: #aaa;")
+        _selection_status_layout.addSpacing(12)
+        _selection_status_layout.addWidget(self._bl_mapper_cache_status_label)
+        self._btn_mapper_top = QPushButton("Mapper List")
+        self._btn_mapper_top.setToolTip("Show BeatLeader mapper counts from cached data")
+        self._btn_mapper_top.clicked.connect(self._on_mapper_top_clicked)
+        _register_secondary_buttons(self._btn_mapper_top)
+        _selection_status_layout.addSpacing(8)
+        _selection_status_layout.addWidget(self._btn_mapper_top)
         _selection_status_layout.addStretch()
 
         self._btn_row_height_up = QPushButton("▲")
@@ -3608,6 +3855,7 @@ class PlaylistWindow(QMainWindow):
 
         self.statusBar().hide()
         self._update_selection_status()
+        self._update_bl_mapper_cache_status()
 
         # ─ Right panel: Batch Export ────────────────────────────────────
         _right_w = QWidget()
@@ -4013,6 +4261,7 @@ class PlaylistWindow(QMainWindow):
         table.setColumnWidth(_COL_MOD, 45)
         table.setColumnWidth(_COL_AUTHOR, 140)
         table.setColumnWidth(_COL_MAPPER, 120)
+        table.setColumnWidth(_COL_BL_MAPPER_PLAYED, 94)
         table.setColumnWidth(_COL_BL_WATCHED, 78)
         table.setColumnWidth(_COL_BL_MAPS_PLAYED, 110)
         table.setColumnWidth(_COL_BL_MAPS_WATCHED, 78)
@@ -4088,6 +4337,7 @@ class PlaylistWindow(QMainWindow):
         self._update_sort_label()
         self._update_selection_status()
         self._update_beatsaver_cache_status()
+        self._update_bl_mapper_cache_status()
         self._update_preview_from_selection()
 
     def _current_tab_sort_mode(self) -> str:
@@ -4132,6 +4382,30 @@ class PlaylistWindow(QMainWindow):
             )
             return
         self._beatsaver_cache_status_label.setText(f"BeatSaver cache: {done}/{total} done")
+
+    def _update_bl_mapper_cache_status(self, error_text: str = "") -> None:
+        if not hasattr(self, "_bl_mapper_cache_status_label"):
+            return
+        is_maps = self._is_maps_tab()
+        self._bl_mapper_cache_status_label.setVisible(is_maps)
+        self._btn_mapper_top.setVisible(is_maps)
+        self._btn_mapper_top.setEnabled(bool(self._steam_id))
+        if error_text:
+            self._bl_mapper_cache_status_label.setText(f"Mapper cache: {error_text}")
+            return
+        if not self._steam_id:
+            self._bl_mapper_cache_status_label.setText("Mapper cache: N/A")
+            return
+        cache_data = load_bl_mapper_played_cache(self._steam_id)
+        if cache_data is None:
+            self._bl_mapper_cache_status_label.setText("Mapper cache: none")
+            return
+        fetched_at_text = _format_cache_timestamp_local(str(cache_data.get("fetched_at") or ""))
+        unique_mappers = int(cache_data.get("unique_mappers") or 0)
+        total_maps = int(cache_data.get("total_ranked_played_maps") or 0)
+        self._bl_mapper_cache_status_label.setText(
+            f"Mapper cache: {fetched_at_text} / {unique_mappers:,} mappers / {total_maps:,} maps"
+        )
 
     def _queue_beatsaver_cache_entries(
         self,
@@ -4555,6 +4829,16 @@ class PlaylistWindow(QMainWindow):
     def _on_bs_filter_votes_changed(self, value: int) -> None:
         self._set_bs_votes_value(value)
 
+    def _on_mapper_played_filter_changed(self, value: int) -> None:
+        normalized = max(0, min(int(value), self._mapper_played_filter_slider.maximum()))
+        for widget in (self._mapper_played_filter_slider, self._mapper_played_filter_value):
+            widget.blockSignals(True)
+        self._mapper_played_filter_slider.setValue(normalized)
+        self._mapper_played_filter_value.setValue(normalized)
+        for widget in (self._mapper_played_filter_slider, self._mapper_played_filter_value):
+            widget.blockSignals(False)
+        self._apply_filter()
+
     def _show_preview_meta_context_menu(self, position) -> None:
         menu = self._preview_meta_text.createStandardContextMenu()
         self._apply_preview_menu_theme(menu)
@@ -4704,6 +4988,7 @@ class PlaylistWindow(QMainWindow):
         self._apply_bs_date_mode_ui()
         self._set_bs_rating_value(int(state.get("bs_min_rating") or 50))
         self._set_bs_votes_value(int(state.get("bs_min_votes") or 0))
+        self._on_mapper_played_filter_changed(0)
         self._cb_bs_unranked.setChecked(bool(state.get("bs_unranked_only", True)))
         self._cb_bs_no_ai.setChecked(bool(state.get("bs_exclude_ai", True)))
 
@@ -4988,8 +5273,22 @@ class PlaylistWindow(QMainWindow):
         self._cb_bs_not_downloaded.setVisible(is_bs)
         self._cb_bs_downloaded.setVisible(is_bs)
         self._bs_filter_row_widget.setVisible(is_bs)
-        self._bs_post_filter_widget.setVisible(is_bs)
+        self._bs_post_filter_widget.setVisible(is_maps)
+        self._bs_post_filter_label.setVisible(is_bs)
+        self._bs_filter_rating_label.setVisible(is_bs)
+        self._bs_filter_min_rating.setVisible(is_bs)
+        self._bs_filter_rating_value_label.setVisible(is_bs)
+        self._bs_filter_votes_label.setVisible(is_bs)
+        self._bs_filter_min_votes.setVisible(is_bs)
+        self._bs_filter_votes_value_label.setVisible(is_bs)
+        self._mapper_played_filter_label.setVisible(is_maps)
+        self._mapper_played_filter_slider.setVisible(is_maps)
+        self._mapper_played_filter_value.setVisible(is_maps)
         self._btn_download_selected.setVisible(is_bs)
+        if hasattr(self, "_btn_mapper_top"):
+            self._btn_mapper_top.setVisible(is_maps)
+        if hasattr(self, "_bl_mapper_cache_status_label"):
+            self._bl_mapper_cache_status_label.setVisible(is_maps)
         if is_bs:
             self._search_edit.setPlaceholderText("Filter loaded BeatSaver rows by song / author / mapper...")
             self._search_edit.setToolTip("Load後の BeatSaver 一覧を絞り込みます。Load Query は下の BeatSaver 行で指定します")
@@ -5010,6 +5309,7 @@ class PlaylistWindow(QMainWindow):
         for col in (_COL_BS_RATE, _COL_BS_UPVOTES, _COL_BS_DOWNVOTES):
             self._table.setColumnHidden(col, not is_bs)
         is_maps = self._is_maps_tab()
+        self._table.setColumnHidden(_COL_BL_MAPPER_PLAYED, not is_maps)
         self._table.setColumnHidden(_COL_BL_MAPS_PLAYED, not is_maps)
         self._table.setColumnHidden(_COL_BL_MAPS_WATCHED, not is_maps)
         self._table.setColumnHidden(_COL_FC, is_maps)
@@ -5059,6 +5359,7 @@ class PlaylistWindow(QMainWindow):
         for col, text in [
             (_COL_BL_PLAYED, "Played"), (_COL_BL_RANK, "Rank"), (_COL_BL_STARS, "★"), (_COL_BL_ACC, "Acc %"), (_COL_BL_PP, "PP"),
             (_COL_BL_WATCHED, "Watched"),
+            (_COL_BL_MAPPER_PLAYED, "Mapper Played"),
             (_COL_BL_MAPS_PLAYED, "Played"), (_COL_BL_MAPS_WATCHED, "Watched"),
         ]:
             self._set_table_header_item(col, text, bl_icon)
@@ -5106,6 +5407,8 @@ class PlaylistWindow(QMainWindow):
             return "bl_pp_high" if is_desc else "bl_pp_low"
         if col == _COL_BL_WATCHED:
             return "bl_watched_desc" if is_desc else "bl_watched_asc"
+        if col == _COL_BL_MAPPER_PLAYED:
+            return "bl_mapper_played_desc" if is_desc else "bl_mapper_played_asc"
         if col == _COL_BL_MAPS_PLAYED:
             return "bl_maps_played_desc" if is_desc else "bl_maps_played_asc"
         if col == _COL_BL_MAPS_WATCHED:
@@ -5200,6 +5503,7 @@ class PlaylistWindow(QMainWindow):
             "date_desc": "date_desc", "date_asc": "date_asc",
             "duration_desc": "duration_desc", "duration_asc": "duration_asc",
             "bl_watched_desc": "bl_watched_desc", "bl_watched_asc": "bl_watched_asc",
+            "bl_mapper_played_desc": "bl_mapper_played_desc", "bl_mapper_played_asc": "bl_mapper_played_asc",
             "bl_maps_played_desc": "bl_maps_played_desc", "bl_maps_played_asc": "bl_maps_played_asc",
             "bl_maps_watched_desc": "bl_maps_watched_desc", "bl_maps_watched_asc": "bl_maps_watched_asc",
             "playtime_desc": "playtime_desc", "playtime_asc": "playtime_asc",
@@ -5273,6 +5577,8 @@ class PlaylistWindow(QMainWindow):
             self._star_max,
             self._bs_filter_min_rating,
             self._bs_filter_min_votes,
+            self._mapper_played_filter_slider,
+            self._mapper_played_filter_value,
             self._cb_sts_cleared,
             self._cb_sts_nf,
             self._cb_sts_unplayed,
@@ -5292,6 +5598,8 @@ class PlaylistWindow(QMainWindow):
             self._star_max.setValue(20.0)
             self._set_bs_rating_value(50)
             self._set_bs_votes_value(0)
+            self._mapper_played_filter_slider.setValue(0)
+            self._mapper_played_filter_value.setValue(0)
             self._cb_sts_cleared.setChecked(True)
             self._cb_sts_nf.setChecked(True)
             self._cb_sts_unplayed.setChecked(True)
@@ -5402,8 +5710,11 @@ class PlaylistWindow(QMainWindow):
 
         prep_steps = 4
         self._update_load_progress_dialog(0, prep_steps, "Preparing load... 0%")
-        if reset_filters and not self._rb_bs.isChecked():
-            self._reset_filters()
+        if reset_filters:
+            if self._rb_bs.isChecked():
+                self._on_mapper_played_filter_changed(0)
+            else:
+                self._reset_filters()
         self._update_load_progress_dialog(1, prep_steps, "Preparing load... 25%")
         self._all_entries = []
         self._filtered = []
@@ -5477,6 +5788,108 @@ class PlaylistWindow(QMainWindow):
 
         dlg.canceled.connect(_on_cancel)
         t.start()
+
+    def _show_bl_mapper_progress_dialog(self, label: str) -> None:
+        dlg = self._bl_mapper_stats_progress_dlg
+        if dlg is not None:
+            dlg.setLabelText(label)
+            dlg.show()
+            QApplication.processEvents()
+            return
+        dlg = QProgressDialog(label, "Cancel", 0, 0, self)
+        dlg.setWindowTitle("BeatLeader Mapper Top")
+        dlg.setMinimumWidth(380)
+        dlg.setWindowModality(Qt.WindowModality.ApplicationModal)
+        dlg.setAutoClose(False)
+        dlg.setAutoReset(False)
+        dlg.show()
+        self._bl_mapper_stats_progress_dlg = dlg
+        QApplication.processEvents()
+
+    def _close_bl_mapper_progress_dialog(self) -> None:
+        dlg = self._bl_mapper_stats_progress_dlg
+        self._bl_mapper_stats_progress_dlg = None
+        if dlg is not None:
+            dlg.close()
+
+    def _update_bl_mapper_progress_dialog(self, done: int, total: int, label: str) -> None:
+        self._show_bl_mapper_progress_dialog(label)
+        dlg = self._bl_mapper_stats_progress_dlg
+        if dlg is None:
+            return
+        dlg.setRange(0, max(1, total))
+        dlg.setValue(max(0, min(done, total)))
+        dlg.setLabelText(label)
+        QApplication.processEvents()
+
+    def _on_mapper_top_clicked(self) -> None:
+        if not self._steam_id:
+            QMessageBox.information(self, "BeatLeader Mapper Top", "Steam ID is not available.")
+            return
+        cache_data = load_bl_mapper_played_cache(self._steam_id)
+        if cache_data is None:
+            self._start_bl_mapper_stats_task("local")
+            return
+        action = show_bl_mapper_top_dialog(self, cache_data)
+        if action in ("since", "full"):
+            self._start_bl_mapper_stats_task(action)
+
+    def _start_bl_mapper_stats_task(self, mode: str) -> None:
+        if not self._steam_id:
+            return
+        labels = {
+            "local": "Building mapper stats from local caches...",
+            "since": "Refreshing mapper stats since cache date...",
+            "full": "Running full mapper stats rebuild...",
+        }
+        self._btn_mapper_top.setEnabled(False)
+        self._show_bl_mapper_progress_dialog(labels.get(mode, "Updating mapper stats..."))
+        dlg = self._bl_mapper_stats_progress_dlg
+        if dlg is not None:
+            def _on_cancel() -> None:
+                self._close_bl_mapper_progress_dialog()
+                self._btn_mapper_top.setEnabled(True)
+
+            dlg.canceled.connect(_on_cancel)
+
+        sigs = self._bl_mapper_stats_signals
+        steam_id = self._steam_id
+
+        def _progress(done: int, total: int, label: str) -> None:
+            sigs.progress.emit(done, total, label)
+
+        def _task() -> None:
+            try:
+                if mode == "local":
+                    payload = build_bl_mapper_played_cache_from_local(steam_id, progress=_progress)
+                else:
+                    payload = refresh_bl_mapper_played_cache(steam_id, refresh_mode=mode, progress=_progress)
+                sigs.finished.emit(payload, mode)
+            except Exception as exc:  # noqa: BLE001
+                sigs.error.emit(str(exc))
+
+        threading.Thread(target=_task, daemon=True).start()
+
+    def _on_bl_mapper_stats_progress(self, done: int, total: int, label: str) -> None:
+        self._update_bl_mapper_progress_dialog(done, total, label)
+
+    def _on_bl_mapper_stats_finished(self, payload: object, mode: str) -> None:
+        self._close_bl_mapper_progress_dialog()
+        self._btn_mapper_top.setEnabled(bool(self._steam_id))
+        if not isinstance(payload, dict):
+            self._update_bl_mapper_cache_status("invalid payload")
+            return
+        self._update_bl_mapper_cache_status()
+        action = show_bl_mapper_top_dialog(self, payload)
+        if action in ("since", "full"):
+            self._start_bl_mapper_stats_task(action)
+
+    def _on_bl_mapper_stats_error(self, message: str) -> None:
+        self._close_bl_mapper_progress_dialog()
+        self._btn_mapper_top.setEnabled(bool(self._steam_id))
+        short_message = message.strip() or "unknown error"
+        self._update_bl_mapper_cache_status(short_message)
+        QMessageBox.warning(self, "BeatLeader Mapper Top", short_message)
 
     def _run_load_open_rl(self, sigs: _LoadSignals, bplist_path: Path, steam_id: Optional[str]) -> None:
         """open + AccSaber RL の非同期ロードタスク。"""
@@ -6363,6 +6776,8 @@ class PlaylistWindow(QMainWindow):
             self._bs_filter_min_rating,
             self._bs_min_votes,
             self._bs_filter_min_votes,
+            self._mapper_played_filter_slider,
+            self._mapper_played_filter_value,
             self._cb_bs_unranked,
             self._cb_bs_no_ai,
             self._rb_exp_single,
@@ -6393,6 +6808,8 @@ class PlaylistWindow(QMainWindow):
             self._apply_bs_date_mode_ui()
             self._set_bs_rating_value(cfg.bs_min_rating)
             self._set_bs_votes_value(cfg.bs_min_votes)
+            self._mapper_played_filter_slider.setValue(cfg.mapper_played_min)
+            self._mapper_played_filter_value.setValue(cfg.mapper_played_min)
             self._cb_bs_unranked.setChecked(cfg.bs_unranked_only)
             self._cb_bs_no_ai.setChecked(cfg.bs_exclude_ai)
             self._rb_exp_single.setChecked(cfg.split_mode == "single")
@@ -6501,6 +6918,7 @@ class PlaylistWindow(QMainWindow):
             bs_max_maps=self._bs_max_maps.value() if src_tag == "bs" else 1000,
             bs_min_rating=self._bs_min_rating.value() if src_tag == "bs" else 50,
             bs_min_votes=self._bs_min_votes.value() if src_tag == "bs" else 0,
+            mapper_played_min=self._mapper_played_filter_slider.value() if self._is_maps_tab() else 0,
             bs_unranked_only=self._cb_bs_unranked.isChecked() if src_tag == "bs" else True,
             bs_exclude_ai=self._cb_bs_no_ai.isChecked() if src_tag == "bs" else True,
         )
@@ -6585,6 +7003,7 @@ class PlaylistWindow(QMainWindow):
                     existing.bs_max_maps == new.bs_max_maps and
                     existing.bs_min_rating == new.bs_min_rating and
                     existing.bs_min_votes == new.bs_min_votes and
+                    existing.mapper_played_min == new.mapper_played_min and
                     existing.bs_unranked_only == new.bs_unranked_only and
                     existing.bs_exclude_ai == new.bs_exclude_ai
                 )
@@ -6936,6 +7355,14 @@ class PlaylistWindow(QMainWindow):
     def _refresh_rows_for_hashes(self, song_hashes: set[str]) -> None:
         if not song_hashes:
             return
+        mapper_counts = _load_bl_mapper_played_counts_from_cache(self._steam_id)
+        if not mapper_counts:
+            mapper_counts = _build_bl_mapper_played_counts(self._maps_all_entries)
+        changed_mappers = {
+            str(entry.mapper or "").strip()
+            for entry in self._maps_all_entries
+            if (entry.song_hash or "").upper() in song_hashes and str(entry.mapper or "").strip()
+        }
         for table in (self._snapshot_table, self._maps_table):
             for row in range(table.rowCount()):
                 item = table.item(row, _COL_SONG)
@@ -6944,7 +7371,7 @@ class PlaylistWindow(QMainWindow):
                 entry = item.data(Qt.ItemDataRole.UserRole)
                 if not isinstance(entry, MapEntry):
                     continue
-                if (entry.song_hash or "").upper() not in song_hashes:
+                if (entry.song_hash or "").upper() not in song_hashes and str(entry.mapper or "").strip() not in changed_mappers:
                     continue
                 if not table.isColumnHidden(_COL_COVER):
                     table.setCellWidget(row, _COL_COVER, self._make_cover_cell_widget(entry))
@@ -6971,6 +7398,14 @@ class PlaylistWindow(QMainWindow):
                 )
                 bl_plays_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                 table.setItem(row, _COL_BL_WATCHED, bl_plays_item)
+                mapper_played_value = _bl_mapper_played_count_value(entry, mapper_counts)
+                mapper_played_item = _NumItem(
+                    str(mapper_played_value) if mapper_played_value >= 0 else "-",
+                    float(mapper_played_value),
+                )
+                mapper_played_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                table.setItem(row, _COL_BL_MAPPER_PLAYED, mapper_played_item)
+                table.setItem(row, _COL_BL_MAPS_PLAYED, _played_status_item(_bl_effective_played_at_ts(entry), _bl_has_played_score(entry)))
 
     def _hydrate_visible_row_widgets(self, table: Optional[QTableWidget] = None) -> None:
         target_table = self._table if table is None else table
@@ -7032,6 +7467,12 @@ class PlaylistWindow(QMainWindow):
         show_bs_downloaded = self._cb_bs_downloaded.isChecked()
         min_bs_rating = self._bs_filter_min_rating.value()
         min_bs_votes = self._bs_filter_min_votes.value()
+        min_mapper_played = self._mapper_played_filter_slider.value()
+        mapper_played_counts: Dict[str, int] = {}
+        if self._is_maps_tab():
+            mapper_played_counts = _load_bl_mapper_played_counts_from_cache(self._steam_id)
+            if not mapper_played_counts:
+                mapper_played_counts = _build_bl_mapper_played_counts(self._all_entries)
         highest_diff_only = self._cb_top_diff_only.isChecked()
         show_queued = self._cb_sts_queued.isChecked() and (
             self._rb_acc_rl.isChecked() or (
@@ -7059,6 +7500,9 @@ class PlaylistWindow(QMainWindow):
             if keywords:
                 targets = (e.song_name.lower(), e.song_author.lower(), e.mapper.lower())
                 if not all(any(kw in t for t in targets) for kw in keywords):
+                    continue
+            if min_mapper_played > 0:
+                if _bl_mapper_played_count_value(e, mapper_played_counts) < min_mapper_played:
                     continue
             if self._rb_bs.isChecked():
                 if e.player_pp < min_bs_rating:
@@ -7111,6 +7555,7 @@ class PlaylistWindow(QMainWindow):
         table: QTableWidget,
         row: int,
         e: MapEntry,
+        bl_mapper_played_counts: Dict[str, int],
         cleared_bg: QColor,
         nf_bg: QColor,
         unplayed_bg: QColor,
@@ -7244,12 +7689,19 @@ class PlaylistWindow(QMainWindow):
         )
         bl_plays_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         table.setItem(row, _COL_BL_WATCHED, bl_plays_item)
+        mapper_played_value = _bl_mapper_played_count_value(e, bl_mapper_played_counts)
+        mapper_played_item = _NumItem(
+            str(mapper_played_value) if mapper_played_value >= 0 else "-",
+            float(mapper_played_value),
+        )
+        mapper_played_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        table.setItem(row, _COL_BL_MAPPER_PLAYED, mapper_played_item)
         bl_maps_watched_item = _NumItem(
             str(e.beatleader_replays_watched) if has_bl_stats_source else "-",
             float(e.beatleader_replays_watched if has_bl_stats_source else -1.0),
         )
         bl_maps_watched_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        table.setItem(row, _COL_BL_MAPS_PLAYED, _played_at_item(e.bl_played_at_ts))
+        table.setItem(row, _COL_BL_MAPS_PLAYED, _played_status_item(_bl_effective_played_at_ts(e), _bl_has_played_score(e)))
         table.setItem(row, _COL_BL_MAPS_WATCHED, bl_maps_watched_item)
 
         fc_item = _NumItem("FC" if e.full_combo else "", 1.0 if e.full_combo else 0.0)
@@ -7283,6 +7735,7 @@ class PlaylistWindow(QMainWindow):
         entries: List[MapEntry],
         start_row: int,
         render_token: int,
+        bl_mapper_played_counts: Dict[str, int],
         cleared_bg: QColor,
         nf_bg: QColor,
         unplayed_bg: QColor,
@@ -7299,6 +7752,7 @@ class PlaylistWindow(QMainWindow):
                 table,
                 row,
                 entries[row],
+                bl_mapper_played_counts,
                 cleared_bg,
                 nf_bg,
                 unplayed_bg,
@@ -7311,6 +7765,7 @@ class PlaylistWindow(QMainWindow):
             QTimer.singleShot(
                 0,
                 lambda current_table=table, current_entries=entries, next_row=end_row, current_token=render_token,
+                current_bl_mapper_played_counts=bl_mapper_played_counts,
                 current_cleared_bg=cleared_bg, current_nf_bg=nf_bg, current_unplayed_bg=unplayed_bg,
                 current_is_acc_mode=is_acc_mode, current_is_bs_mode=is_bs_mode:
                     self._populate_table_rows_chunk(
@@ -7318,6 +7773,7 @@ class PlaylistWindow(QMainWindow):
                         current_entries,
                         next_row,
                         current_token,
+                        current_bl_mapper_played_counts,
                         current_cleared_bg,
                         current_nf_bg,
                         current_unplayed_bg,
@@ -7348,6 +7804,11 @@ class PlaylistWindow(QMainWindow):
             self._rb_open.isChecked() and self._svc_combo.currentData() in ("accsaber_rl", "accsaber")
         )
         _is_bs_mode = self._rb_bs.isChecked()
+        _bl_mapper_played_counts: Dict[str, int] = {}
+        if self._is_maps_tab():
+            _bl_mapper_played_counts = _load_bl_mapper_played_counts_from_cache(self._steam_id)
+            if not _bl_mapper_played_counts:
+                _bl_mapper_played_counts = _build_bl_mapper_played_counts(self._all_entries)
         self._update_table_visual_mode()
         table.setUpdatesEnabled(True)
         table.clearSelection()
@@ -7364,6 +7825,7 @@ class PlaylistWindow(QMainWindow):
             entries,
             0,
             render_token,
+            _bl_mapper_played_counts,
             _cleared_bg,
             _nf_bg,
             _unplayed_bg,

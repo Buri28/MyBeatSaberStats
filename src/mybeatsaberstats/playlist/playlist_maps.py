@@ -190,6 +190,8 @@ def load_beatsaver_maps(
     on_progress: Optional[Callable[[int, int, str], None]] = None,
     session: Optional[requests.Session] = None,
 ) -> List[MapEntry]:
+    if on_progress:
+        on_progress(0, 1, "Preparing BeatSaver search... loading local score caches")
     no_date_filter = days == 0 and from_dt is None and to_dt is None
     now = datetime.now(timezone.utc)
     if no_date_filter:
@@ -235,6 +237,8 @@ def load_beatsaver_maps(
     bl_score_idx = _build_bl_score_hash_index(bl_scores_raw)
     bl_replay_idx = _build_bl_replay_hash_index(bl_scores_raw)
     bl_leaderboard_idx = _build_bl_leaderboard_hash_index(bl_scores_raw)
+    if on_progress:
+        on_progress(0, 1, "Preparing BeatSaver search... loading BeatLeader ranked map index")
     bl_ranked_idx = _build_bl_hash_index(load_bl_maps())
 
     session = session or requests.Session()
@@ -247,7 +251,7 @@ def load_beatsaver_maps(
         if max_maps is not None and len(entries) >= max_maps:
             break
         if on_progress:
-            on_progress(page, max(pages, 1), f"Searching BeatSaver... {page + 1}/{max(pages, 1)}")
+            on_progress(page, max(pages, 1), f"Searching BeatSaver page {page + 1}/{max(pages, 1)}... requesting API")
         search_params: Dict[str, str] = {
             "q": search_query,
             "pageSize": str(100 if max_maps is None else min(100, max_maps)),
@@ -270,10 +274,18 @@ def load_beatsaver_maps(
             pages = 1
         if not docs:
             break
+        if on_progress:
+            on_progress(page, max(pages, 1), f"Searching BeatSaver page {page + 1}/{max(pages, 1)}... processing {len(docs)} results")
 
-        for doc in docs:
+        for doc_index, doc in enumerate(docs, start=1):
             if max_maps is not None and len(entries) >= max_maps:
                 break
+            if on_progress and (doc_index == 1 or doc_index % 10 == 0 or doc_index == len(docs)):
+                on_progress(
+                    page,
+                    max(pages, 1),
+                    f"Searching BeatSaver page {page + 1}/{max(pages, 1)}... matching leaderboards {doc_index}/{len(docs)}",
+                )
             if unranked_only and any(doc.get(flag) for flag in ("ranked", "qualified", "blRanked", "blQualified")):
                 continue
             tags = [str(tag).lower() for tag in (doc.get("tags") or [])]
