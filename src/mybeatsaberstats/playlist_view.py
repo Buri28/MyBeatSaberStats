@@ -3615,6 +3615,7 @@ class PlaylistWindow(QMainWindow):
         self._pending_restore_entry = None
         self._initial_source_tab = initial_source_tab
         self._initial_restore_started = False
+        self._skip_initial_snapshot_restore = False
 
     def _build_base_layout(self) -> QVBoxLayout:
         """左右 split のベースレイアウトを作り、左ペイン root を返す。"""
@@ -4117,13 +4118,16 @@ class PlaylistWindow(QMainWindow):
         # 初回表示時は「前回の画面状態の復元」と「Maps 側の保存済み一覧の復元」が
         # 別経路になっているため、ここでダイアログ表示の起点をまとめる。
         close_progress = False
+        skip_snapshot_restore = self._skip_initial_snapshot_restore
+        self._skip_initial_snapshot_restore = False
         if has_saved_playlist_window_state():
             self._show_load_progress_dialog("Loading saved view...")
             close_progress = True
         try:
             self._load_window_state()
             self.select_source_tab(self._initial_source_tab)
-            self._restore_saved_snapshot_state()
+            if not skip_snapshot_restore:
+                self._restore_saved_snapshot_state()
             if self._is_maps_tab() and self._restored_maps_state:
                 self._show_load_progress_dialog("Restoring Maps view...")
                 self._schedule_deferred_maps_restore()
