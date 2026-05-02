@@ -1023,6 +1023,64 @@ class _AvatarFetchSignals(QObject):
     fetched = Signal(str, bytes)   # service ("ss" | "bl"), image_bytes
 
 
+class _RemoteImageFetchSignals(QObject):
+    """非同期画像取得の完了シグナル。"""
+    fetched = Signal(int, str, bytes)
+
+
+class RemotePixmapLabel(QLabel):
+    """URL から画像を非同期取得して表示する小さな QLabel。"""
+
+    _pixmap_cache: Dict[str, QPixmap] = {}
+
+    def __init__(self, size: int = 18, parent=None) -> None:
+        super().__init__(parent)
+        self._size = size
+        self._request_id = 0
+        self._signals = _RemoteImageFetchSignals()
+        self._signals.fetched.connect(self._on_fetched)
+        self.setFixedSize(size, size)
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+    def set_image_url(self, url: Optional[str]) -> None:
+        self._request_id += 1
+        request_id = self._request_id
+        if not url:
+            self.setPixmap(QPixmap())
+            return
+        cached = self._pixmap_cache.get(url)
+        if cached is not None:
+            self.setPixmap(cached)
+            return
+        self.setPixmap(QPixmap())
+        threading.Thread(target=self._fetch, args=(request_id, url), daemon=True).start()
+
+    def _fetch(self, request_id: int, url: str) -> None:
+        try:
+            import requests as _requests
+
+            response = _requests.get(url, timeout=8)
+            response.raise_for_status()
+            self._signals.fetched.emit(request_id, url, response.content)
+        except Exception:
+            pass
+
+    def _on_fetched(self, request_id: int, url: str, data: bytes) -> None:
+        if request_id != self._request_id:
+            return
+        pixmap = QPixmap()
+        if not pixmap.loadFromData(data):
+            return
+        pixmap = pixmap.scaled(
+            self._size,
+            self._size,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        self._pixmap_cache[url] = pixmap
+        self.setPixmap(pixmap)
+
+
 class PlayerAvatarWidget(QLabel):
     """プレイヤーアバターを表示し、クリックで SS/BL を切り替えるウィジェット。"""
 
@@ -1323,6 +1381,11 @@ class PlayerWindow(QMainWindow):
         # キャッシュ情報ラベル（下部エリアに配置）
         self._ss_cache_label = QLabel("ScoreSaber scores: -", self)
         self._bl_cache_label = QLabel("BeatLeader scores: -", self)
+        self._bl_prestige_icon_label = RemotePixmapLabel(18, self)
+        self._bl_prestige_icon_label.setToolTip("BeatLeader Prestige")
+        self._bl_prestige_text_label = QLabel("", self)
+        self._bl_prestige_text_label.setStyleSheet("font-size: 11px; font-weight: 600; color: #DF8511; padding: 0px 2px;")
+        self._bl_prestige_text_label.setTextFormat(Qt.TextFormat.RichText)
 
         # --- 中央〜下部: 2 列レイアウト (SS パネル | BL パネル) + 下部 AccSaber ---
 
@@ -1583,6 +1646,8 @@ class PlayerWindow(QMainWindow):
         _bl_hdr_row.setContentsMargins(2, 2, 2, 2)
         _bl_hdr_row.addWidget(_bl_icon_label)
         _bl_hdr_row.addWidget(self._bl_id_label)
+        _bl_hdr_row.addWidget(self._bl_prestige_icon_label)
+        _bl_hdr_row.addWidget(self._bl_prestige_text_label)
         _bl_hdr_row.addWidget(self._bl_cache_label)
         _bl_hdr_row.addStretch(1)
         _bl_hdr_widget = QWidget(self)
@@ -2768,6 +2833,8 @@ class PlayerWindow(QMainWindow):
         self.bl_info_table.clearContents()
         self._ss_id_label.setText("")
         self._bl_id_label.setText("")
+        self._bl_prestige_text_label.setText("")
+        self._bl_prestige_icon_label.set_image_url(None)
         self._acc_rl_xp_label.setText("")
         self._acc_title.setText("AccSaber")
         self._acc_rl_title.setText("AccSaber Reloaded")
@@ -2991,6 +3058,16 @@ class PlayerWindow(QMainWindow):
             self._bl_id_label.setText(f'<a href="https://beatleader.com/u/{bl_id}" style="{_link_style}">{bl_name_country}</a>')
         else:
             self._bl_id_label.setText(bl_name_country or "")
+        if snap.beatleader_prestige is not None:
+            _bl_prestige_text = f'<span style="font-size:12px;">Prestige:{snap.beatleader_prestige}</span>'
+            if snap.beatleader_level is not None:
+                _bl_prestige_text += f'<span style="font-size:11px;"> (Lv.{snap.beatleader_level})</span>'
+        elif snap.beatleader_level is not None:
+            _bl_prestige_text = f'<span style="font-size:12px;">Lv.{snap.beatleader_level}</span>'
+        else:
+            _bl_prestige_text = ""
+        self._bl_prestige_text_label.setText(_bl_prestige_text)
+        self._bl_prestige_icon_label.set_image_url(snap.beatleader_prestige_icon_url)
         _set_info_tbl(
             self.ss_info_table,
             snap.scoresaber_id or snap.steam_id or "", ss_pp_text, ss_rank_text,

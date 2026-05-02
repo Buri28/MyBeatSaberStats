@@ -508,6 +508,7 @@ class SnapshotGraphDialog(QDialog):
             _MetricDef("scoresaber_total_play_count", "ScoreSaber Total Play Count", is_int=True),
             _MetricDef("scoresaber_ranked_play_count", "ScoreSaber Ranked Play Count", is_int=True),
             _MetricDef("beatleader_pp", "BeatLeader PP", is_int=False),
+            _MetricDef("beatleader_prestige", "BeatLeader Prestige", is_int=True),
             _MetricDef("beatleader_rank_global", "BeatLeader Global Rank", is_int=True),
             _MetricDef("beatleader_rank_country", "BeatLeader Country Rank", is_int=True),
             _MetricDef("beatleader_average_ranked_acc", "BeatLeader Avg Ranked ACC", is_int=False),

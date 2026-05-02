@@ -112,6 +112,10 @@ class Snapshot:
     beatleader_pp: float | None
     beatleader_rank_global: int | None
     beatleader_rank_country: int | None
+    beatleader_level: int | None = None
+    beatleader_experience: int | None = None
+    beatleader_prestige: int | None = None
+    beatleader_prestige_icon_url: str | None = None
 
     # AccSaber ランキング（グローバル / 国別）
     # グローバルランク

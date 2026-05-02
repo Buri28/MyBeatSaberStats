@@ -1523,6 +1523,10 @@ def create_snapshot_for_steam_id(
     beatleader_pp: Optional[float] = beatleader.pp if beatleader is not None else None
     beatleader_rank_global: Optional[int] = beatleader.global_rank if beatleader is not None else None
     beatleader_rank_country: Optional[int] = beatleader.country_rank if beatleader is not None else None
+    beatleader_level: Optional[int] = beatleader.level if beatleader is not None else None
+    beatleader_experience: Optional[int] = beatleader.experience if beatleader is not None else None
+    beatleader_prestige: Optional[int] = beatleader.prestige if beatleader is not None else None
+    beatleader_prestige_icon_url: Optional[str] = beatleader.prestige_icon_url if beatleader is not None else None
 
     # BeatLeader の追加統計（average_acc, play_count 系）は scoreStats から取得する（ベストエフォート）。
     beatleader_average_ranked_acc: Optional[float] = None
@@ -2195,6 +2199,10 @@ def create_snapshot_for_steam_id(
         beatleader_pp=beatleader_pp,
         beatleader_rank_global=beatleader_rank_global,
         beatleader_rank_country=beatleader_rank_country,
+        beatleader_level=beatleader_level,
+        beatleader_experience=beatleader_experience,
+        beatleader_prestige=beatleader_prestige,
+        beatleader_prestige_icon_url=beatleader_prestige_icon_url,
         # AccSaber グローバルランク
         accsaber_overall_rank=acc_overall_rank_global,
         accsaber_true_rank=acc_true_rank_global,

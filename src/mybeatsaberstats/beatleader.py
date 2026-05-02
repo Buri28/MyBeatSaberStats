@@ -17,6 +17,7 @@ from .snapshot import BASE_DIR
 BASE_URL = "https://api.beatleader.xyz"
 LOG_DIR = BASE_DIR / "logs"
 LOG_PATH = LOG_DIR / "beatleader_api.log"
+_PRESTIGE_LEVELS_CACHE: list[dict] | None = None
 
 
 def _log_api_failure(api_name: str, message: str, exc: Optional[BaseException] = None) -> None:
@@ -48,6 +49,48 @@ class BeatLeaderPlayer:
     country_rank: int
     # Ranked play count if API exposes it
     ranked_play_count: int | None = None
+    level: int | None = None
+    experience: int | None = None
+    prestige: int | None = None
+    prestige_icon_url: str | None = None
+
+
+def _safe_int(value: int | float | str | None) -> int | None:
+    try:
+        if value is None or value == "":
+            return None
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _load_prestige_levels(session: requests.Session) -> list[dict]:
+    global _PRESTIGE_LEVELS_CACHE
+    if _PRESTIGE_LEVELS_CACHE is not None:
+        return _PRESTIGE_LEVELS_CACHE
+
+    url = f"{BASE_URL}/experience/levels"
+    try:
+        resp = session.get(url, timeout=10)
+        resp.raise_for_status()
+        payload = resp.json()
+    except Exception as exc:
+        _log_api_failure("_load_prestige_levels", f"Failed to load prestige levels url={url}", exc)
+        _PRESTIGE_LEVELS_CACHE = []
+        return _PRESTIGE_LEVELS_CACHE
+
+    _PRESTIGE_LEVELS_CACHE = [item for item in payload if isinstance(item, dict)] if isinstance(payload, list) else []
+    return _PRESTIGE_LEVELS_CACHE
+
+
+def _resolve_prestige_icon_url(session: requests.Session, prestige: int | None) -> str | None:
+    if prestige is None or prestige < 0:
+        return None
+    for item in _load_prestige_levels(session):
+        if _safe_int(item.get("level")) == prestige:
+            icon_url = str(item.get("smallIcon") or item.get("bigIcon") or "").strip()
+            return icon_url or None
+    return None
 
 
 def fetch_player(player_id: str, session: Optional[requests.Session] = None) -> Optional[BeatLeaderPlayer]:
@@ -108,6 +151,9 @@ def fetch_player(player_id: str, session: Optional[requests.Session] = None) -> 
     pp = float(data.get("pp") or 0.0)
     global_rank = int(data.get("rank") or 0)
     country_rank = int(data.get("countryRank") or 0)
+    level = _safe_int(data.get("level"))
+    experience = _safe_int(data.get("experience"))
+    prestige = _safe_int(data.get("prestige"))
 
     return BeatLeaderPlayer(
         id=pid,
@@ -116,6 +162,10 @@ def fetch_player(player_id: str, session: Optional[requests.Session] = None) -> 
         pp=pp,
         global_rank=global_rank,
         country_rank=country_rank,
+        level=level,
+        experience=experience,
+        prestige=prestige,
+        prestige_icon_url=_resolve_prestige_icon_url(session, prestige),
     )
 
 
@@ -263,6 +313,10 @@ def fetch_players_ranking(
                     pp=pp,
                     global_rank=int(p.get("rank", 0)),
                     country_rank=int(p.get("countryRank", 0)),
+                    level=_safe_int(p.get("level")),
+                    experience=_safe_int(p.get("experience")),
+                    prestige=_safe_int(p.get("prestige")),
+                    prestige_icon_url=_resolve_prestige_icon_url(session, _safe_int(p.get("prestige"))),
                 )
             )
         if page_stop:
