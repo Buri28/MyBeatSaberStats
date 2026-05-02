@@ -3080,7 +3080,7 @@ _COL_LABELS = [
     "Played", "Rank", "★", "Acc %", "PP", "Watched",
     "Played", "Category", "Cmplx", "Acc %", "AP", "Rank",
     "Played", "Category", "Cmplx", "Acc %", "AP", "Rank",
-    "Rate %", "⇧", "⇩", "FC", "Mods", "Mapper", "Author", "Mapper Played", "Played", "Watched",
+    "Rating", "⇧", "⇩", "FC", "Mods", "Mapper", "Author", "MP", "Played", "Watched",
 ]
 
 
@@ -3819,6 +3819,7 @@ class PlaylistWindow(QMainWindow):
         self._bs_min_rating.setValue(50)
         self._bs_min_rating.setToolTip("BeatSaver rating (%) の下限")
         self._bs_min_rating.setFixedWidth(110)
+        self._bs_load_filter_label = QLabel("BeatSaver:")
         self._bs_rating_label = QLabel("Rating ≥")
         self._bs_rating_value_label = QSpinBox()
         self._bs_rating_value_label.setRange(0, 100)
@@ -3841,15 +3842,19 @@ class PlaylistWindow(QMainWindow):
         self._cb_bs_no_ai.setChecked(True)
         bs_filter_row_top.addWidget(self._bs_query_label)
         bs_filter_row_top.addWidget(self._bs_query_edit)
+        bs_filter_row_top.addSpacing(18)
         bs_filter_row_top.addWidget(self._bs_max_label)
         bs_filter_row_top.addWidget(self._bs_max_maps)
+        bs_filter_row_top.addSpacing(18)
         bs_filter_row_top.addWidget(self._cb_bs_unranked)
         bs_filter_row_top.addWidget(self._cb_bs_no_ai)
         bs_filter_row_top.addStretch()
         bs_filter_row_middle.addSpacing(6)
         bs_filter_row_middle.addWidget(self._bs_all_label)
+        bs_filter_row_middle.addSpacing(18)
         bs_filter_row_middle.addWidget(self._bs_window_label)
         bs_filter_row_middle.addWidget(self._bs_days)
+        bs_filter_row_middle.addSpacing(18)
         bs_filter_row_middle.addWidget(self._bs_from_label)
         bs_filter_row_middle.addWidget(self._bs_from_date)
         bs_filter_row_middle.addWidget(self._bs_to_label)
@@ -3857,9 +3862,11 @@ class PlaylistWindow(QMainWindow):
         bs_filter_row_middle.addWidget(self._bs_to_latest_btn)
         bs_filter_row_middle.addStretch()
         bs_filter_row_bottom.addSpacing(6)
+        bs_filter_row_bottom.addWidget(self._bs_load_filter_label)
         bs_filter_row_bottom.addWidget(self._bs_rating_label)
         bs_filter_row_bottom.addWidget(self._bs_min_rating)
         bs_filter_row_bottom.addWidget(self._bs_rating_value_label)
+        bs_filter_row_bottom.addSpacing(18)
         bs_filter_row_bottom.addWidget(self._bs_votes_label)
         bs_filter_row_bottom.addWidget(self._bs_min_votes)
         bs_filter_row_bottom.addWidget(self._bs_votes_value_label)
@@ -3948,7 +3955,7 @@ class PlaylistWindow(QMainWindow):
         self._bs_post_filter_widget = QWidget()
         filter_row3 = QHBoxLayout(self._bs_post_filter_widget)
         filter_row3.setContentsMargins(0, 0, 0, 0)
-        filter_row3.setSpacing(8)
+        filter_row3.setSpacing(7)
         self._bs_post_filter_label = QLabel("BeatSaver:")
         self._bs_filter_rating_label = QLabel("Rating ≥")
         self._bs_filter_min_rating = QSlider(Qt.Orientation.Horizontal)
@@ -3962,6 +3969,7 @@ class PlaylistWindow(QMainWindow):
         self._bs_filter_rating_value_label.setValue(50)
         self._bs_filter_rating_value_label.setFixedWidth(70)
         self._bs_filter_rating_value_label.valueChanged.connect(self._on_bs_filter_rating_changed)
+        
         self._bs_filter_votes_label = QLabel("Votes ≥")
         self._bs_filter_min_votes = QSlider(Qt.Orientation.Horizontal)
         self._bs_filter_min_votes.setRange(0, 1000)
@@ -3973,7 +3981,7 @@ class PlaylistWindow(QMainWindow):
         self._bs_filter_votes_value_label.setValue(0)
         self._bs_filter_votes_value_label.setFixedWidth(72)
         self._bs_filter_votes_value_label.valueChanged.connect(self._on_bs_filter_votes_changed)
-        self._mapper_played_filter_label = QLabel("Mapper Played ≥")
+        self._mapper_played_filter_label = QLabel("Mapper Played (MP) ≥")
         self._mapper_played_filter_slider = QSlider(Qt.Orientation.Horizontal)
         self._mapper_played_filter_slider.setRange(0, 5000)
         self._mapper_played_filter_slider.setValue(0)
@@ -3990,9 +3998,11 @@ class PlaylistWindow(QMainWindow):
         filter_row3.addWidget(self._bs_filter_rating_label)
         filter_row3.addWidget(self._bs_filter_min_rating)
         filter_row3.addWidget(self._bs_filter_rating_value_label)
+        filter_row3.addSpacing(18)
         filter_row3.addWidget(self._bs_filter_votes_label)
         filter_row3.addWidget(self._bs_filter_min_votes)
         filter_row3.addWidget(self._bs_filter_votes_value_label)
+        filter_row3.addSpacing(18)
         filter_row3.addWidget(self._mapper_played_filter_label)
         filter_row3.addWidget(self._mapper_played_filter_slider)
         filter_row3.addWidget(self._mapper_played_filter_value)
@@ -4014,7 +4024,7 @@ class PlaylistWindow(QMainWindow):
         self._search_edit.textChanged.connect(self._apply_filter)
         filter_row2.addWidget(self._search_edit)
 
-        filter_row2.addSpacing(12)
+        filter_row2.addSpacing(20)
         filter_row2.addWidget(QLabel("Status:"))
         self._cb_sts_cleared = QCheckBox("Cleared ✔")
         self._cb_sts_cleared.setChecked(True)
@@ -4237,14 +4247,14 @@ class PlaylistWindow(QMainWindow):
         table.setColumnWidth(_COL_RL_ACC, 64)
         table.setColumnWidth(_COL_RL_AP, 52)
         table.setColumnWidth(_COL_RL_RANK, 60)
-        table.setColumnWidth(_COL_BS_RATE, 60)
+        table.setColumnWidth(_COL_BS_RATE, 76)
         table.setColumnWidth(_COL_BS_UPVOTES, 50)
         table.setColumnWidth(_COL_BS_DOWNVOTES, 50)
         table.setColumnWidth(_COL_FC, 32)
         table.setColumnWidth(_COL_MOD, 45)
         table.setColumnWidth(_COL_AUTHOR, 140)
         table.setColumnWidth(_COL_MAPPER, 120)
-        table.setColumnWidth(_COL_BL_MAPPER_PLAYED, 94)
+        table.setColumnWidth(_COL_BL_MAPPER_PLAYED, 68)
         table.setColumnWidth(_COL_BL_WATCHED, 78)
         table.setColumnWidth(_COL_BL_MAPS_PLAYED, 110)
         table.setColumnWidth(_COL_BL_MAPS_WATCHED, 78)
@@ -4280,12 +4290,19 @@ class PlaylistWindow(QMainWindow):
             "accsaber_rl": "accsaber_reloaded",
         }.get(svc, "scoresaber")
 
-    def _set_table_header_item(self, col: int, text: str, icon_path: Optional[Path] = None) -> None:
+    def _set_table_header_item(
+        self,
+        col: int,
+        text: str,
+        icon_path: Optional[Path] = None,
+        tooltip: Optional[str] = None,
+    ) -> None:
         item = self._table.horizontalHeaderItem(col)
         if item is None:
             item = QTableWidgetItem()
             self._table.setHorizontalHeaderItem(col, item)
         item.setText(text)
+        item.setToolTip(tooltip or text)
         if icon_path is not None and icon_path.exists():
             item.setIcon(QIcon(str(icon_path)))
         else:
@@ -5337,10 +5354,10 @@ class PlaylistWindow(QMainWindow):
         for col, text in [
             (_COL_BL_PLAYED, "Played"), (_COL_BL_RANK, "Rank"), (_COL_BL_STARS, "★"), (_COL_BL_ACC, "Acc %"), (_COL_BL_PP, "PP"),
             (_COL_BL_WATCHED, "Watched"),
-            (_COL_BL_MAPPER_PLAYED, "Mapper Played"),
             (_COL_BL_MAPS_PLAYED, "Played"), (_COL_BL_MAPS_WATCHED, "Watched"),
         ]:
             self._set_table_header_item(col, text, bl_icon)
+        self._set_table_header_item(_COL_BL_MAPPER_PLAYED, "MP", bl_icon, tooltip="Mapper Played")
         for col, text in [
             (_COL_ACC_PLAYED, "Played"), (_COL_ACC_CAT, "Category"), (_COL_ACC_COMPLEXITY, "Cmplx"), (_COL_ACC_ACC, "Acc %"), (_COL_ACC_AP, "AP"), (_COL_ACC_RANK, "Rank"),
         ]:
