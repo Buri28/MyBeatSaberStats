@@ -4170,7 +4170,6 @@ class PlaylistWindow(QMainWindow):
 
         # スプリッタ初期サイズ: 左を広く、右パネルを 252px
         self._splitter.setSizes([940, 350])
-        self._load_window_state()
         self._update_filter_export_ui()
         self._update_table_visual_mode()
         self._clear_preview()
@@ -4183,13 +4182,24 @@ class PlaylistWindow(QMainWindow):
         QTimer.singleShot(0, self._finish_initial_restore)
 
     def _finish_initial_restore(self) -> None:
-        self.select_source_tab(self._initial_source_tab)
-        self._restore_saved_snapshot_state()
-        if self._is_maps_tab():
-            self._schedule_deferred_maps_restore()
-        self._update_filter_export_ui()
-        self._update_table_visual_mode()
-        self._clear_preview()
+        close_progress = False
+        if _PLAYLIST_WINDOW_PATH.exists():
+            self._show_load_progress_dialog("Loading saved view...")
+            close_progress = True
+        try:
+            self._load_window_state()
+            self.select_source_tab(self._initial_source_tab)
+            self._restore_saved_snapshot_state()
+            if self._is_maps_tab() and self._restored_maps_state:
+                self._show_load_progress_dialog("Restoring Maps view...")
+                self._schedule_deferred_maps_restore()
+                close_progress = False
+            self._update_filter_export_ui()
+            self._update_table_visual_mode()
+            self._clear_preview()
+        finally:
+            if close_progress:
+                self._close_load_progress_dialog()
 
     def _schedule_deferred_maps_restore(self) -> None:
         if self._deferred_maps_restore_scheduled or not self._restored_maps_state:
@@ -4199,7 +4209,11 @@ class PlaylistWindow(QMainWindow):
 
     def _restore_saved_maps_state_deferred(self) -> None:
         self._deferred_maps_restore_scheduled = False
-        self._restore_saved_maps_state()
+        self._show_load_progress_dialog("Restoring Maps view...")
+        try:
+            self._restore_saved_maps_state()
+        finally:
+            self._close_load_progress_dialog()
 
     def _create_playlist_table(self) -> QTableWidget:
         table = _PlaylistTableWidget(0, _COL_COUNT, self)
@@ -4858,8 +4872,6 @@ class PlaylistWindow(QMainWindow):
         )
 
     def _build_list_state_payload(self, entries: List[MapEntry], source_key: str, sort_mode: str, last_load_text: str) -> Optional[dict]:
-        if not entries:
-            return None
         return {
             "source": source_key,
             "sort_mode": sort_mode,
@@ -4874,6 +4886,7 @@ class PlaylistWindow(QMainWindow):
             "bs_to_date": self._bs_to_date.date().toString("yyyy-MM-dd"),
             "bs_min_rating": self._bs_min_rating.value(),
             "bs_min_votes": self._bs_min_votes.value(),
+            "mapper_played_min": self._mapper_played_filter_slider.value(),
             "bs_unranked_only": self._cb_bs_unranked.isChecked(),
             "bs_exclude_ai": self._cb_bs_no_ai.isChecked(),
             "entries": [entry.to_dict() for entry in entries],
@@ -4988,7 +5001,7 @@ class PlaylistWindow(QMainWindow):
         self._apply_bs_date_mode_ui()
         self._set_bs_rating_value(int(state.get("bs_min_rating") or 50))
         self._set_bs_votes_value(int(state.get("bs_min_votes") or 0))
-        self._on_mapper_played_filter_changed(0)
+        self._on_mapper_played_filter_changed(int(state.get("mapper_played_min") or 0))
         self._cb_bs_unranked.setChecked(bool(state.get("bs_unranked_only", True)))
         self._cb_bs_no_ai.setChecked(bool(state.get("bs_exclude_ai", True)))
 
@@ -5710,11 +5723,8 @@ class PlaylistWindow(QMainWindow):
 
         prep_steps = 4
         self._update_load_progress_dialog(0, prep_steps, "Preparing load... 0%")
-        if reset_filters:
-            if self._rb_bs.isChecked():
-                self._on_mapper_played_filter_changed(0)
-            else:
-                self._reset_filters()
+        if reset_filters and not self._rb_bs.isChecked():
+            self._reset_filters()
         self._update_load_progress_dialog(1, prep_steps, "Preparing load... 25%")
         self._all_entries = []
         self._filtered = []
