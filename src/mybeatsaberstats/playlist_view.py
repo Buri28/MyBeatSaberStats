@@ -102,6 +102,7 @@ class _SwapSortArrowStyle(QProxyStyle):
     """
 
     def drawPrimitive(self, element, option, painter, widget=None) -> None:
+        """Qt 既定と逆向きのソート矢印になるようヘッダ描画を差し替える。"""
         if (
             element == QStyle.PrimitiveElement.PE_IndicatorHeaderArrow
             and isinstance(option, QStyleOptionHeader)
@@ -122,6 +123,7 @@ class _SwapSortArrowStyle(QProxyStyle):
 class _PlaylistTableWidget(QTableWidget):
     @staticmethod
     def _blend_colors(base: QColor, overlay: QColor, alpha_override: Optional[float] = None) -> QColor:
+        """ベース色へ選択色を重ねた合成色を返す。"""
         alpha = overlay.alphaF() if alpha_override is None else max(0.0, min(1.0, alpha_override))
         inv = 1.0 - alpha
         return QColor(
@@ -131,6 +133,7 @@ class _PlaylistTableWidget(QTableWidget):
         )
 
     def _selected_row_fill_color(self, row: int, active: bool) -> QColor:
+        """交互行色とアクティブ状態を考慮した選択行背景色を返す。"""
         fill_color, _text_color = _NoFocusItemDelegate._selection_colors(active)
         if self.alternatingRowColors() and row % 2 == 1:
             base_color = self.palette().color(QPalette.ColorRole.AlternateBase)
@@ -142,6 +145,7 @@ class _PlaylistTableWidget(QTableWidget):
         return blended
 
     def paintEvent(self, event) -> None:  # type: ignore[override]
+        """選択行の上下ラインと帯背景を追加で描画する。"""
         selection_model = self.selectionModel()
         if selection_model is not None:
             rows = selection_model.selectedRows()
@@ -187,6 +191,7 @@ class _PlaylistTableWidget(QTableWidget):
 class _NoFocusItemDelegate(QStyledItemDelegate):
     @staticmethod
     def _selection_colors(active: bool) -> tuple[QColor, QColor]:
+        """アクティブ/非アクティブ時の選択セル配色を返す。"""
         if is_dark():
             if active:
                 return QColor(127, 199, 243, 36), QColor("#e6f4ff")
@@ -204,6 +209,7 @@ class _NoFocusItemDelegate(QStyledItemDelegate):
         *,
         left_padding: int = 4,
     ) -> None:
+        """セルの表示文字列を alignment と余白付きで描画する。"""
         font_data = index.data(Qt.ItemDataRole.FontRole)
         if isinstance(font_data, QFont):
             painter.setFont(font_data)
@@ -222,6 +228,7 @@ class _NoFocusItemDelegate(QStyledItemDelegate):
 
     @staticmethod
     def _resolved_selection_fill(option: QStyleOptionViewItem, index, active: bool) -> QColor:
+        """行ごとのカスタム選択色があればそれを優先して返す。"""
         widget = getattr(option, "widget", None)
         resolver = getattr(widget, "_selected_row_fill_color", None)
         if callable(resolver):
@@ -232,6 +239,7 @@ class _NoFocusItemDelegate(QStyledItemDelegate):
         return fill
 
     def paint(self, painter, option, index):  # type: ignore[override]
+        """フォーカス枠を出さずに選択背景と文字色を整えて描画する。"""
         opt = QStyleOptionViewItem(option)
         selected = bool(opt.state & QStyle.StateFlag.State_Selected)  # type: ignore[attr-defined]
         active = bool(opt.state & QStyle.StateFlag.State_Active)  # type: ignore[attr-defined]
@@ -265,6 +273,7 @@ class _NoFocusItemDelegate(QStyledItemDelegate):
 
 class _TransparentSelectionItemDelegate(QStyledItemDelegate):
     def paint(self, painter, option, index):  # type: ignore[override]
+        """透明寄りの選択背景でシンプルにセルを描画する。"""
         opt = QStyleOptionViewItem(option)
         selected = bool(opt.state & QStyle.StateFlag.State_Selected)  # type: ignore[attr-defined]
         active = bool(opt.state & QStyle.StateFlag.State_Active)  # type: ignore[attr-defined]
@@ -298,6 +307,7 @@ class _PercentageBarDelegate(QStyledItemDelegate):
         light_text_on_bar: Optional[str] = "#2222FF",
         light_text_off_bar: Optional[str] = "#111199",
     ) -> None:
+        """割合値をバー付きで描画する delegate を初期化する。"""
         super().__init__(parent)
         self._max_value = max_value
         self._min_value = gradient_min
@@ -307,12 +317,14 @@ class _PercentageBarDelegate(QStyledItemDelegate):
         self._light_text_off_bar = light_text_off_bar
 
     def _parse_value(self, value_str) -> Optional[float]:
+        """表示値からバー描画用の float を抽出する。"""
         try:
             return float(str(value_str)) if value_str not in (None, "") else None
         except ValueError:
             return None
 
     def _bar_value(self, index) -> Optional[float]:
+        """UserRole または表示文字列からバー値を解決する。"""
         user_val = index.data(Qt.ItemDataRole.UserRole)
         if user_val is not None:
             try:
@@ -322,6 +334,7 @@ class _PercentageBarDelegate(QStyledItemDelegate):
         return self._parse_value(index.data())
 
     def initStyleOption(self, option, index) -> None:  # type: ignore[override]
+        """バー列用に文字配置と強調表示を調整する。"""
         super().initStyleOption(option, index)
         option.displayAlignment = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
         value = self._bar_value(index)
@@ -329,6 +342,7 @@ class _PercentageBarDelegate(QStyledItemDelegate):
             option.font.setBold(True)
 
     def paint(self, painter, option, index):  # type: ignore[override]
+        """セル内へ割合バーと表示文字列を重ねて描画する。"""
         opt = QStyleOptionViewItem(option)
         selected = bool(opt.state & QStyle.StateFlag.State_Selected)  # type: ignore[attr-defined]
         active = bool(opt.state & QStyle.StateFlag.State_Active)  # type: ignore[attr-defined]
@@ -433,6 +447,7 @@ def _secondary_button_stylesheet() -> str:
 
 
 def _is_windows_light_app_light() -> bool:
+    """Windows の配色設定がライト側かを簡易判定する。"""
     return not is_dark() and not detect_system_dark()
 
 # ステータス表示
@@ -465,11 +480,13 @@ _COVER_CACHE_DIR = _CACHE_DIR / "covers"
 
 
 def _cover_cache_path(url: str) -> Path:
+    """カバー URL に対応するローカルキャッシュパスを返す。"""
     digest = hashlib.sha1(url.encode("utf-8")).hexdigest()
     return _COVER_CACHE_DIR / f"{digest}.img"
 
 
 def _read_cover_cache(url: str) -> Optional[bytes]:
+    """カバー画像のローカルキャッシュを読み込む。"""
     if not url:
         return None
     try:
@@ -483,6 +500,7 @@ def _read_cover_cache(url: str) -> Optional[bytes]:
 
 
 def _write_cover_cache(url: str, data: bytes) -> None:
+    """カバー画像 bytes をローカルキャッシュへ保存する。"""
     if not url or not data:
         return
     try:
@@ -757,6 +775,7 @@ def show_bplist_covers_dialog(
 
 
 def _format_cache_timestamp_local(value: str) -> str:
+    """キャッシュ時刻文字列をローカル時刻の見やすい表示へ変換する。"""
     if not value:
         return "Never"
     try:
@@ -767,6 +786,7 @@ def _format_cache_timestamp_local(value: str) -> str:
 
 
 def show_bl_mapper_top_dialog(parent: Optional[QWidget], cache_data: dict, limit: Optional[int] = None) -> str:
+    """Mapper Played 一覧ダイアログを開き、選ばれた更新操作を返す。"""
     dlg = QDialog(parent)
     dlg.setWindowTitle("BeatLeader Mapper List")
     dlg.resize(640, 750)
@@ -952,6 +972,7 @@ class MapEntry:
 
     @property
     def status_str(self) -> str:
+        """一覧表示用のステータス文字列を返す。"""
         queued_suffix = "[Q]" if self.pending else ""
         if self.cleared:
             return f"{STATUS_CLEARED}{queued_suffix}"
@@ -965,27 +986,33 @@ class MapEntry:
 
     @property
     def sort_stars(self) -> float:
+        """ソート時に使用する星数値を返す。"""
         return self.stars
 
     @property
     def played(self) -> bool:
+        """プレイ済み判定を真偽値で返す。"""
         return self.cleared or self.nf_clear
 
     @property
     def display_song_name(self) -> str:
+        """画面表示に使う曲名を返す。"""
         return self.song_name
 
     @property
     def beatleader_success_rate(self) -> float:
+        """BeatLeader の replay 視聴率を百分率で返す。"""
         if self.beatleader_attempts <= 0:
             return 0.0
         return self.beatleader_replays_watched / self.beatleader_attempts * 100.0
 
     def to_dict(self) -> dict:
+        """永続化用に MapEntry を辞書化する。"""
         return asdict(self)
 
     @classmethod
     def from_dict(cls, data: dict) -> "MapEntry":
+        """保存済み辞書から MapEntry を復元する。"""
         known = {field_name for field_name in cls.__dataclass_fields__.keys()}  # type: ignore[attr-defined]
         return cls(**{key: value for key, value in data.items() if key in known})
 
@@ -1016,6 +1043,7 @@ def _mode_from_gamemode(game_mode: str) -> str:
 
 
 def _parse_iso_datetime_to_ts(value: object) -> int:
+    """ISO8601 文字列を Unix 秒へ変換する。"""
     if not isinstance(value, str) or not value:
         return 0
     try:
@@ -1028,6 +1056,7 @@ def _parse_iso_datetime_to_ts(value: object) -> int:
 
 
 def _parse_unix_datetime_to_ts(value: object) -> int:
+    """Unix 時刻表現を int 秒へ正規化する。"""
     if value is None:
         return 0
     try:
@@ -1041,6 +1070,7 @@ def _parse_unix_datetime_to_ts(value: object) -> int:
 
 
 def _parse_local_date_filter(value: object, *, end_of_day: bool = False) -> Optional[datetime]:
+    """ローカル日付入力を UTC 基準 datetime へ変換する。"""
     if value is None:
         return None
     text = str(value).strip()
@@ -1060,6 +1090,7 @@ def _parse_local_date_filter(value: object, *, end_of_day: bool = False) -> Opti
 
 
 def _apply_beatsaver_meta(entry: MapEntry, meta: Optional[dict]) -> None:
+    """BeatSaver metadata を entry の不足フィールドへ補完する。"""
     beatsaver_key = str(entry.beatsaver_key or (meta or {}).get("beatsaver_key") or "").strip()
     if beatsaver_key and not entry.beatsaver_key:
         entry.beatsaver_key = beatsaver_key
@@ -1107,6 +1138,7 @@ def _apply_beatsaver_meta(entry: MapEntry, meta: Optional[dict]) -> None:
 
 
 def _enrich_entries_with_beatsaver_cache(entries: List[MapEntry]) -> List[MapEntry]:
+    """BeatSaver cache を一括反映して entries を補完する。"""
     if not entries:
         return entries
     cache = load_beatsaver_meta_cache()
@@ -1117,6 +1149,7 @@ def _enrich_entries_with_beatsaver_cache(entries: List[MapEntry]) -> List[MapEnt
 
 
 def _cache_beatsaver_meta_from_entries(entries: List[MapEntry]) -> List[MapEntry]:
+    """entries 由来の BeatSaver metadata を cache へ追記して再反映する。"""
     meta_entries = []
     for entry in entries:
         song_hash = (entry.song_hash or "").upper()
@@ -1156,6 +1189,7 @@ def _cache_beatsaver_meta_from_entries(entries: List[MapEntry]) -> List[MapEntry
 
 
 def _collect_beatsaver_cache_targets(entries: List[MapEntry]) -> Tuple[List[str], Dict[str, str]]:
+    """BeatSaver API 補完が必要な hash と seed key を収集する。"""
     missing_hashes: List[str] = []
     seed_map: Dict[str, str] = {}
     seen_hashes: set[str] = set()
@@ -1179,6 +1213,7 @@ def _cache_missing_beatsaver_metadata(
     entries: List[MapEntry],
     on_progress: Optional[Callable[[int, int, str], None]] = None,
 ) -> List[MapEntry]:
+    """不足している BeatSaver metadata を取得して entries を更新する。"""
     missing_hashes, seed_map = _collect_beatsaver_cache_targets(entries)
     if not missing_hashes and not seed_map:
         return _enrich_entries_with_beatsaver_cache(entries)
@@ -1200,102 +1235,126 @@ def _cache_missing_beatsaver_metadata(
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _snapshot_logic():
+    """Snapshot 系処理モジュールを遅延 import して返す。"""
     from .playlist import playlist_snapshot as module
 
     return module
 
 
 def _maps_logic():
+    """Maps 系処理モジュールを遅延 import して返す。"""
     from .playlist import playlist_maps as module
 
     return module
 
 
 def _ss_player_score_info(scores: Dict, lb_id: str, max_score_from_map: int = 0) -> Tuple[float, bool, bool, float, int, str]:
+    """Snapshot ロジックの ScoreSaber スコア抽出 helper を委譲呼び出しする。"""
     return _snapshot_logic()._ss_player_score_info(scores, lb_id, max_score_from_map)
 
 
 def _bl_player_score_info(scores: Dict, map_id: str) -> Tuple[float, bool, bool, float, int, str]:
+    """Snapshot ロジックの BeatLeader スコア抽出 helper を委譲呼び出しする。"""
     return _snapshot_logic()._bl_player_score_info(scores, map_id)
 
 
 def _ss_player_score_timeset(scores: Dict, lb_id: str) -> int:
+    """ScoreSaber スコアから日時を引く helper を委譲呼び出しする。"""
     return _snapshot_logic()._ss_player_score_timeset(scores, lb_id)
 
 
 def _bl_player_score_timeset(scores: Dict, map_id: str) -> int:
+    """BeatLeader スコアから日時を引く helper を委譲呼び出しする。"""
     return _snapshot_logic()._bl_player_score_timeset(scores, map_id)
 
 
 def _file_signature(*paths: Path) -> Tuple[Tuple[str, bool, int, int], ...]:
+    """キャッシュ差分判定用のファイル署名を返す。"""
     return _snapshot_logic()._file_signature(*paths)
 
 
 def _clone_entries(entries: List[MapEntry]) -> List[MapEntry]:
+    """MapEntry 配列の複製処理を委譲呼び出しする。"""
     return _snapshot_logic()._clone_entries(entries)
 
 
 def load_ss_maps(steam_id: Optional[str] = None, filter_stars: bool = True) -> List[MapEntry]:
+    """ScoreSaber ranked maps 一覧を読み込む。"""
     return _snapshot_logic().load_ss_maps(steam_id, filter_stars)
 
 
 def load_bl_maps(steam_id: Optional[str] = None) -> List[MapEntry]:
+    """BeatLeader ranked maps 一覧を読み込む。"""
     return _snapshot_logic().load_bl_maps(steam_id)
 
 
 def _build_ss_score_hash_index(ss_scores: Dict[str, dict]) -> Dict[Tuple[str, str, str], Tuple[float, bool, bool, float, int, str, int]]:
+    """ScoreSaber スコア辞書を hash 索引へ変換する。"""
     return _snapshot_logic()._build_ss_score_hash_index(ss_scores)
 
 
 def _build_ss_hash_index(entries: List[MapEntry]) -> Dict[Tuple[str, str, str], MapEntry]:
+    """ScoreSaber entries を hash 索引へ変換する。"""
     return _snapshot_logic()._build_ss_hash_index(entries)
 
 
 def _build_bl_hash_index(entries: List[MapEntry]) -> Dict[Tuple[str, str, str], MapEntry]:
+    """BeatLeader entries を hash 索引へ変換する。"""
     return _snapshot_logic()._build_bl_hash_index(entries)
 
 
 def _build_bl_score_hash_index(bl_scores: Dict[str, dict]) -> Dict[Tuple[str, str, str], Tuple[float, bool, bool, float, int, str, int]]:
+    """BeatLeader スコア辞書を hash 索引へ変換する。"""
     return _snapshot_logic()._build_bl_score_hash_index(bl_scores)
 
 
 def _build_bl_replay_hash_index(bl_scores: Dict[str, dict]) -> Dict[Tuple[str, str, str], str]:
+    """BeatLeader replay URL を hash 索引へ変換する。"""
     return _snapshot_logic()._build_bl_replay_hash_index(bl_scores)
 
 
 def _build_bl_leaderboard_hash_index(bl_scores: Dict[str, dict]) -> Dict[Tuple[str, str, str], str]:
+    """BeatLeader leaderboard id を hash 索引へ変換する。"""
     return _snapshot_logic()._build_bl_leaderboard_hash_index(bl_scores)
 
 
 def _load_cached_player_score_dicts(steam_id: Optional[str]) -> Tuple[Dict[str, dict], Dict[str, dict]]:
+    """保存済み player score 辞書群を読み込む。"""
     return _snapshot_logic()._load_cached_player_score_dicts(steam_id)
 
 
 def _refresh_entries_from_cached_player_scores(entries: List[MapEntry], steam_id: Optional[str]) -> set[str]:
+    """cached player score を entries に再適用する。"""
     return _snapshot_logic()._refresh_entries_from_cached_player_scores(entries, steam_id)
 
 
 def _apply_entry_snapshot_service_field(entry: MapEntry, service_entry: MapEntry) -> None:
+    """別サービス entry の Snapshot 表示列だけを転写する。"""
     _snapshot_logic()._apply_entry_snapshot_service_field(entry, service_entry)
 
 
 def _load_snapshot_service_entries_from_cache(steam_id: Optional[str]) -> Dict[str, List[MapEntry]]:
+    """Snapshot 用のサービス別 entries を cache から読み込む。"""
     return _snapshot_logic()._load_snapshot_service_entries_from_cache(steam_id)
 
 
 def _refresh_snapshot_entries_service_columns(entries: List[MapEntry], steam_id: Optional[str]) -> None:
+    """Snapshot entries のサービス列を cache から補完し直す。"""
     _snapshot_logic()._refresh_snapshot_entries_service_columns(entries, steam_id)
 
 
 def _fetch_bl_leaderboards_by_hash(session: requests.Session, song_hash: str) -> Dict[Tuple[str, str], str]:
+    """BeatLeader API から hash 対応 leaderboard id 一覧を取得する。"""
     return _maps_logic()._fetch_bl_leaderboards_by_hash(session, song_hash)
 
 
 def _fetch_bl_top_replay_url(session: requests.Session, leaderboard_id: str, countries: str = "") -> str:
+    """BeatLeader API から top replay URL を取得する。"""
     return _maps_logic()._fetch_bl_top_replay_url(session, leaderboard_id, countries)
 
 
 def _normalize_duration_seconds(value: object) -> int:
+    """長さ表現を int 秒へ正規化する。"""
     return _maps_logic()._normalize_duration_seconds(value)
 
 
@@ -1305,6 +1364,7 @@ def load_bplist_maps(
     steam_id: Optional[str] = None,
     on_progress: Optional[Callable[[int, int, str], None]] = None,
 ) -> List[MapEntry]:
+    """.bplist / .json を MapEntry 一覧として読み込む。"""
     return _maps_logic().load_bplist_maps(bplist_path, service, steam_id, on_progress=on_progress)
 
 
@@ -1322,6 +1382,7 @@ def load_beatsaver_maps(
     on_progress: Optional[Callable[[int, int, str], None]] = None,
     session: Optional[requests.Session] = None,
 ) -> List[MapEntry]:
+    """BeatSaver 検索条件から Maps タブ向けの一覧を取得する。"""
     return _maps_logic().load_beatsaver_maps(
         steam_id=steam_id,
         query=query,
@@ -1344,10 +1405,12 @@ def load_beatsaver_maps(
 
 class _NumItem(QTableWidgetItem):
     def __init__(self, text: str, sort_val: float = 0.0) -> None:
+        """表示文字列とは別に数値ソート値を保持するセル項目。"""
         super().__init__(text)
         self._v = sort_val
 
     def __lt__(self, other: "QTableWidgetItem") -> bool:  # type: ignore[override]
+        """保持している数値を使って並び順比較を行う。"""
         other_v = other._v if isinstance(other, _NumItem) else 0.0  # type: ignore[attr-defined]
         return self._v < other_v
 
@@ -1382,6 +1445,7 @@ def _beatsaver_song_marker_color(entry: MapEntry) -> Optional[QColor]:
 
 
 def _diff_item(difficulty: str) -> QTableWidgetItem:
+    """難易度短縮表記と色付き背景を持つセル項目を返す。"""
     short, color = _DIFF_INFO.get(difficulty, (difficulty[:4], QColor("#aaaaaa")))
     _diff_val = {"Easy": 1, "Normal": 3, "Hard": 5, "Expert": 7, "ExpertPlus": 9}
     item = _NumItem(short, float(_diff_val.get(difficulty, 0)))
@@ -1397,6 +1461,7 @@ def _diff_item(difficulty: str) -> QTableWidgetItem:
 
 
 def _mode_item(mode: str) -> QTableWidgetItem:
+    """プレイモード短縮表記のセル項目を返す。"""
     short = _MODE_INFO.get(mode, mode[:4])
     item = _NumItem(short, float(_MODE_ORDER.get(mode, 0)))
     item.setToolTip(mode)
@@ -1405,6 +1470,7 @@ def _mode_item(mode: str) -> QTableWidgetItem:
 
 
 def _format_duration(seconds: int) -> str:
+    """秒数を一覧表示用の hh:mm:ss / mm:ss 文字列へ変換する。"""
     if seconds <= 0:
         return "-"
     minutes, sec = divmod(seconds, 60)
@@ -1415,12 +1481,14 @@ def _format_duration(seconds: int) -> str:
 
 
 def _duration_item(seconds: int) -> QTableWidgetItem:
+    """曲長セル用の数値ソート付き項目を返す。"""
     item = _NumItem(_format_duration(seconds), float(seconds))
     item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
     return item
 
 
 def _preview_text_to_html(text: str) -> str:
+    """プレビューテキストを簡易 HTML へ変換し URL/Markdown リンクを有効化する。"""
     if not text:
         return ""
 
@@ -1439,18 +1507,21 @@ def _preview_text_to_html(text: str) -> str:
 
 
 def _format_played_at(ts: int) -> str:
+    """プレイ日時 Unix 秒を一覧表示文字列へ変換する。"""
     if ts <= 0:
         return "-"
     return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
 
 
 def _played_at_item(ts: int) -> QTableWidgetItem:
+    """プレイ日時列用の数値ソート付きセル項目を返す。"""
     item = _NumItem(_format_played_at(ts), float(ts))
     item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
     return item
 
 
 def _played_status_item(ts: int, played: bool) -> QTableWidgetItem:
+    """日時がない場合は Played / - を含めて状態表示するセル項目を返す。"""
     if ts > 0:
         return _played_at_item(ts)
     item = _NumItem("Played" if played else "-", 0.0 if played else -1.0)
@@ -1459,6 +1530,7 @@ def _played_status_item(ts: int, played: bool) -> QTableWidgetItem:
 
 
 def _format_source_date(ts: int, *, include_time: bool = False) -> str:
+    """譜面の作成日・ランク日を表示用文字列へ変換する。"""
     if ts <= 0:
         return "-"
     fmt = "%Y-%m-%d %H:%M" if include_time else "%Y-%m-%d"
@@ -1466,6 +1538,7 @@ def _format_source_date(ts: int, *, include_time: bool = False) -> str:
 
 
 def _source_date_item(ts: int, *, include_time: bool = False) -> QTableWidgetItem:
+    """Source Date 列用の数値ソート付きセル項目を返す。"""
     sort_value = float(ts) if ts > 0 else -1.0
     item = _NumItem(_format_source_date(ts, include_time=include_time), sort_value)
     item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
@@ -2432,6 +2505,7 @@ def _sort_entries(entries: List[MapEntry], sort_mode: str, mapper_played_counts:
 
 
 def _build_bl_mapper_played_counts(entries: List[MapEntry]) -> Dict[str, int]:
+    """BeatLeader プレイ済み譜面数を mapper 名ごとに集計する。"""
     counts: Dict[str, int] = {}
     for entry in entries:
         mapper = str(entry.mapper or "").strip()
@@ -2442,6 +2516,7 @@ def _build_bl_mapper_played_counts(entries: List[MapEntry]) -> Dict[str, int]:
 
 
 def _bl_mapper_played_count_value(entry: MapEntry, counts: Dict[str, int]) -> int:
+    """対象 entry の mapper に対応する集計値を返す。"""
     mapper = str(entry.mapper or "").strip()
     if not mapper:
         return -1
@@ -2449,6 +2524,7 @@ def _bl_mapper_played_count_value(entry: MapEntry, counts: Dict[str, int]) -> in
 
 
 def _load_bl_mapper_played_counts_from_cache(steam_id: Optional[str]) -> Dict[str, int]:
+    """保存済み Mapper Played キャッシュを正規化して読み込む。"""
     if not steam_id:
         return {}
     cache_data = load_bl_mapper_played_cache(steam_id)
@@ -2474,6 +2550,7 @@ def _load_bl_mapper_played_counts_from_cache(steam_id: Optional[str]) -> Dict[st
 # BeatLeader の played 判定は複数ソース由来の値を跨いで使うため、
 # UI 側ではこの helper 経由で揃えて扱う。
 def _bl_effective_played_at_ts(entry: MapEntry) -> int:
+    """BeatLeader 由来の実効 played_at_ts を返す。"""
     if entry.bl_played_at_ts > 0:
         return entry.bl_played_at_ts
     if entry.source == "beatleader" or entry.score_source == "BL":
@@ -2482,6 +2559,7 @@ def _bl_effective_played_at_ts(entry: MapEntry) -> int:
 
 
 def _bl_has_played_score(entry: MapEntry) -> bool:
+    """BeatLeader 側でプレイ済みとみなせるかを返す。"""
     if _bl_effective_played_at_ts(entry) > 0:
         return True
     if entry.played and (entry.source == "beatleader" or entry.score_source == "BL"):
@@ -2652,6 +2730,7 @@ def _config_export_tag(cfg: "_BatchConfig") -> str:
 
 
 def _split_start_of_week(ts: int) -> Optional[datetime]:
+    """指定日時を含む週の開始日時を返す。"""
     if ts <= 0:
         return None
     dt = datetime.fromtimestamp(ts)
@@ -2660,6 +2739,7 @@ def _split_start_of_week(ts: int) -> Optional[datetime]:
 
 
 def _split_start_of_month(ts: int) -> Optional[datetime]:
+    """指定日時を含む月の開始日時を返す。"""
     if ts <= 0:
         return None
     dt = datetime.fromtimestamp(ts)
@@ -2667,6 +2747,7 @@ def _split_start_of_month(ts: int) -> Optional[datetime]:
 
 
 def _split_end_of_month(start: datetime) -> datetime:
+    """月初日時からその月の最終日を返す。"""
     if start.month == 12:
         next_month = start.replace(year=start.year + 1, month=1, day=1)
     else:
@@ -2675,6 +2756,7 @@ def _split_end_of_month(start: datetime) -> datetime:
 
 
 def _group_entries_by_week(entries: List[MapEntry]) -> Dict[Optional[datetime], List[MapEntry]]:
+    """entries を source_date_ts 基準の週ごとにグループ化する。"""
     groups: Dict[Optional[datetime], List[MapEntry]] = {}
     for entry in entries:
         groups.setdefault(_split_start_of_week(entry.source_date_ts), []).append(entry)
@@ -2682,6 +2764,7 @@ def _group_entries_by_week(entries: List[MapEntry]) -> Dict[Optional[datetime], 
 
 
 def _group_entries_by_month(entries: List[MapEntry]) -> Dict[Optional[datetime], List[MapEntry]]:
+    """entries を source_date_ts 基準の月ごとにグループ化する。"""
     groups: Dict[Optional[datetime], List[MapEntry]] = {}
     for entry in entries:
         groups.setdefault(_split_start_of_month(entry.source_date_ts), []).append(entry)
@@ -2689,6 +2772,7 @@ def _group_entries_by_month(entries: List[MapEntry]) -> Dict[Optional[datetime],
 
 
 def _sort_period_group_keys(keys: List[Optional[datetime]]) -> List[Optional[datetime]]:
+    """週/月グループキーを None を末尾にして昇順整列する。"""
     return sorted(keys, key=lambda key: (key is None, key or datetime.min))
 
 
@@ -2749,6 +2833,7 @@ _SRC_LABEL: Dict[str, str] = {
 
 
 def _sort_indicator_from_mode(sort_mode: str) -> Tuple[int, Qt.SortOrder]:
+    """sort_mode に対応する列番号と Qt ソート順を返す。"""
     sort_col_map = {
         "status_desc": (_COL_STATUS, Qt.SortOrder.DescendingOrder),
         "status_asc": (_COL_STATUS, Qt.SortOrder.AscendingOrder),
@@ -2852,6 +2937,7 @@ def _status_filter_tag(
     show_unplayed: bool,
     show_queued: bool,
 ) -> Optional[str]:
+    """ステータス絞り込み状態をファイル名用タグへ変換する。"""
     if show_cleared and show_nf and show_unplayed:
         if show_queued:
             return "+Q"
@@ -4127,6 +4213,7 @@ class PlaylistWindow(QMainWindow):
         root.addWidget(export_group)
 
     def showEvent(self, event) -> None:  # type: ignore[override]
+        """初回表示時にだけ保存済み状態の復元処理を起動する。"""
         super().showEvent(event)
         if self._initial_restore_started:
             return
@@ -4162,6 +4249,7 @@ class PlaylistWindow(QMainWindow):
                 self._close_load_progress_dialog()
 
     def _center_on_screen(self) -> None:
+        """現在の画面中央へウィンドウを移動する。"""
         screen = self.screen() or QApplication.primaryScreen()
         if screen is None:
             return
@@ -4170,12 +4258,14 @@ class PlaylistWindow(QMainWindow):
         self.move(frame.topLeft())
 
     def _schedule_deferred_maps_restore(self) -> None:
+        """Maps 復元をイベントループ後へ遅延登録する。"""
         if self._deferred_maps_restore_scheduled or not self._restored_maps_state:
             return
         self._deferred_maps_restore_scheduled = True
         QTimer.singleShot(1, self._restore_saved_maps_state_deferred)
 
     def _restore_saved_maps_state_deferred(self) -> None:
+        """保存済み Maps 一覧の復元を進捗ダイアログ付きで実行する。"""
         self._deferred_maps_restore_scheduled = False
         self._show_load_progress_dialog("Restoring Maps view...")
         try:
@@ -4185,6 +4275,7 @@ class PlaylistWindow(QMainWindow):
         self._maybe_start_auto_mapper_load_new()
 
     def _maybe_start_auto_mapper_load_new(self) -> None:
+        """条件を満たす場合だけ Maps 表示後の Mapper cache 更新を自動実行する。"""
         if not self._steam_id:
             return
         if not self._is_maps_tab():
@@ -4198,6 +4289,7 @@ class PlaylistWindow(QMainWindow):
         self._start_bl_mapper_stats_task("since", silent=True)
 
     def _create_playlist_table(self) -> QTableWidget:
+        """Playlist / Maps 共通の一覧テーブルを初期設定込みで生成する。"""
         table = _PlaylistTableWidget(0, _COL_COUNT, self)
         table.setHorizontalHeaderLabels(_COL_LABELS)
         table.setItemDelegate(_NoFocusItemDelegate(table))
@@ -4269,6 +4361,7 @@ class PlaylistWindow(QMainWindow):
         return table
 
     def _visible_snapshot_service_columns(self) -> Dict[str, Tuple[int, ...]]:
+        """Snapshot タブでサービス別に表示する列グループ定義を返す。"""
         return {
             "scoresaber": (_COL_SS_PLAYED, _COL_SS_RANK, _COL_SS_STARS, _COL_SS_ACC, _COL_SS_PP),
             "beatleader": (_COL_BL_PLAYED, _COL_BL_RANK, _COL_BL_STARS, _COL_BL_ACC, _COL_BL_PP, _COL_BL_WATCHED),
@@ -4277,6 +4370,7 @@ class PlaylistWindow(QMainWindow):
         }
 
     def _current_snapshot_service_name(self) -> str:
+        """現在の Snapshot 系ソース選択をサービス名へ正規化して返す。"""
         if self._rb_ss.isChecked():
             return "scoresaber"
         if self._rb_bl.isChecked():
@@ -4300,6 +4394,7 @@ class PlaylistWindow(QMainWindow):
         icon_path: Optional[Path] = None,
         tooltip: Optional[str] = None,
     ) -> None:
+        """指定列のヘッダ文言・アイコン・ツールチップをまとめて更新する。"""
         item = self._table.horizontalHeaderItem(col)
         if item is None:
             item = QTableWidgetItem()
@@ -4312,10 +4407,12 @@ class PlaylistWindow(QMainWindow):
             item.setIcon(QIcon())
 
     def _is_maps_tab(self, index: Optional[int] = None) -> bool:
+        """指定 index または現在タブが Maps かどうかを返す。"""
         tab_index = self._source_tabs.currentIndex() if index is None else index
         return tab_index == self._source_tab_maps_idx
 
     def _sync_active_table_state(self) -> None:
+        """現在アクティブなテーブルの entries/filter 状態を各タブ用バッファへ戻す。"""
         if self._table is self._maps_table:
             self._maps_all_entries = self._all_entries
             self._maps_filtered = self._filtered
@@ -4324,6 +4421,7 @@ class PlaylistWindow(QMainWindow):
             self._snapshot_filtered = self._filtered
 
     def _activate_table_for_tab(self, index: Optional[int] = None) -> None:
+        """指定タブに対応するテーブルと状態バッファをアクティブ化する。"""
         if self._is_maps_tab(index):
             self._table = self._maps_table
             self._all_entries = self._maps_all_entries
@@ -4346,20 +4444,24 @@ class PlaylistWindow(QMainWindow):
         self._update_preview_from_selection()
 
     def _current_tab_sort_mode(self) -> str:
+        """現在タブに対応する保存済み sort_mode を返す。"""
         return self._maps_sort_mode if self._is_maps_tab() else self._snapshot_sort_mode
 
     def _set_current_tab_sort_mode(self, sort_mode: str) -> None:
+        """現在タブ側の保存用 sort_mode を更新する。"""
         if self._is_maps_tab():
             self._maps_sort_mode = sort_mode
         else:
             self._snapshot_sort_mode = sort_mode
 
     def _apply_saved_sort_for_current_tab(self) -> None:
+        """現在タブに保存されているソート状態をヘッダへ反映する。"""
         sort_col, sort_order = _sort_indicator_from_mode(self._current_tab_sort_mode())
         self._table.horizontalHeader().setSortIndicator(sort_col, sort_order)
         self._update_sort_label()
 
     def _reset_beatsaver_cache_status(self) -> None:
+        """BeatSaver metadata 取得キューと進捗表示用状態を初期化する。"""
         self._beatsaver_meta_pending_hashes.clear()
         self._beatsaver_meta_pending_set.clear()
         self._beatsaver_meta_pending_seed_map.clear()
@@ -4370,6 +4472,7 @@ class PlaylistWindow(QMainWindow):
         self._update_beatsaver_cache_status()
 
     def _update_beatsaver_cache_status(self, error_text: str = "") -> None:
+        """BeatSaver metadata キャッシュ更新の進捗テキストを更新する。"""
         total = len(self._beatsaver_meta_total_hashes)
         done = len(self._beatsaver_meta_completed_hashes)
         inflight = len(self._beatsaver_meta_inflight_hashes)
@@ -4389,6 +4492,7 @@ class PlaylistWindow(QMainWindow):
         self._beatsaver_cache_status_label.setText(f"BeatSaver cache: {done}/{total} done")
 
     def _update_bl_mapper_cache_status(self, error_text: str = "") -> None:
+        """Mapper Played cache の有無と取得日時をステータス表示へ反映する。"""
         if not hasattr(self, "_bl_mapper_cache_status_label"):
             return
         is_maps = self._is_maps_tab()
@@ -4418,6 +4522,7 @@ class PlaylistWindow(QMainWindow):
         *,
         prioritize: bool = False,
     ) -> None:
+        """不足している BeatSaver metadata 取得対象をキューへ積む。"""
         missing_hashes, seed_map = _collect_beatsaver_cache_targets(entries)
         cache = load_beatsaver_meta_cache()
         resolved_hashes: set[str] = set()
@@ -4456,6 +4561,7 @@ class PlaylistWindow(QMainWindow):
             self._start_next_beatsaver_meta_batch()
 
     def _visible_first_entries(self) -> List[MapEntry]:
+        """画面内で見えている行を優先した metadata 取得順リストを返す。"""
         if not self._filtered or self._table.rowCount() <= 0:
             return list(self._filtered)
         first_row = self._table.rowAt(0)
@@ -4482,11 +4588,13 @@ class PlaylistWindow(QMainWindow):
         return ordered
 
     def _queue_beatsaver_cache_for_current_entries(self) -> None:
+        """現在表示中の entries を対象に BeatSaver metadata 取得を予約する。"""
         if not self._filtered:
             return
         self._queue_beatsaver_cache_entries(self._visible_first_entries())
 
     def _start_next_beatsaver_meta_batch(self) -> None:
+        """BeatSaver metadata 取得キューの次バッチをバックグラウンド開始する。"""
         if self._beatsaver_meta_inflight_hashes or not self._beatsaver_meta_pending_hashes:
             self._update_beatsaver_cache_status()
             return
@@ -4519,6 +4627,7 @@ class PlaylistWindow(QMainWindow):
         threading.Thread(target=_task, daemon=True).start()
 
     def _on_beatsaver_meta_batch_finished(self, hashes: List[str]) -> None:
+        """BeatSaver metadata 取得完了後に entries と UI を更新する。"""
         cache = load_beatsaver_meta_cache()
         changed_hashes = {str(song_hash).upper() for song_hash in hashes}
         self._beatsaver_meta_inflight_hashes.clear()
@@ -4539,6 +4648,7 @@ class PlaylistWindow(QMainWindow):
         self._start_next_beatsaver_meta_batch()
 
     def _on_beatsaver_meta_batch_error(self, _msg: str) -> None:
+        """BeatSaver metadata 取得失敗時に状態を巻き戻して次回再試行へ進める。"""
         self._beatsaver_meta_inflight_hashes.clear()
         self._beatsaver_meta_active_hash = ""
         self._update_beatsaver_cache_status("retrying after error")
@@ -4616,14 +4726,17 @@ class PlaylistWindow(QMainWindow):
             self._restored_maps_state = maps_state
 
     def _highest_diff_only_default_for_tab(self, index: Optional[int] = None) -> bool:
+        """タブごとの Highest diff only の既定値を返す。"""
         tab_index = self._source_tabs.currentIndex() if index is None else index
         return tab_index == self._source_tab_maps_idx
 
     def _highest_diff_only_value_for_tab(self, index: Optional[int] = None) -> bool:
+        """タブごとに保持している Highest diff only の現在値を返す。"""
         tab_index = self._source_tabs.currentIndex() if index is None else index
         return self._highest_diff_only_maps if tab_index == self._source_tab_maps_idx else self._highest_diff_only_snapshot
 
     def _set_highest_diff_only_for_tab(self, checked: bool, index: Optional[int] = None) -> None:
+        """タブごとの Highest diff only 状態を保存する。"""
         tab_index = self._source_tabs.currentIndex() if index is None else index
         if tab_index == self._source_tab_maps_idx:
             self._highest_diff_only_maps = checked
@@ -4631,16 +4744,19 @@ class PlaylistWindow(QMainWindow):
             self._highest_diff_only_snapshot = checked
 
     def _apply_highest_diff_only_for_current_tab(self) -> None:
+        """現在タブの Highest diff only 状態をチェックボックスへ反映する。"""
         checked = self._highest_diff_only_value_for_tab()
         self._cb_top_diff_only.blockSignals(True)
         self._cb_top_diff_only.setChecked(checked)
         self._cb_top_diff_only.blockSignals(False)
 
     def _on_top_diff_only_toggled(self, checked: bool) -> None:
+        """Highest diff only 切替時に保存値を更新して再フィルタする。"""
         self._set_highest_diff_only_for_tab(checked)
         self._apply_filter()
 
     def _current_source_key(self) -> str:
+        """現在選択中のソースを内部キー文字列で返す。"""
         if self._rb_ss.isChecked():
             return "ss"
         if self._rb_bl.isChecked():
@@ -4656,6 +4772,7 @@ class PlaylistWindow(QMainWindow):
         return "ss"
 
     def _current_bs_date_mode(self) -> str:
+        """BeatSaver 日付条件 UI の現在モードを返す。"""
         if self._bs_from_label.isChecked():
             return "dates"
         if self._bs_all_label.isChecked():
@@ -4663,6 +4780,7 @@ class PlaylistWindow(QMainWindow):
         return "days"
 
     def _apply_bs_date_mode_ui(self) -> None:
+        """BeatSaver 日付モードに応じて日数入力と日付入力の有効状態を切り替える。"""
         mode = self._current_bs_date_mode()
         use_days = (mode == "days")
         use_dates = (mode == "dates")
@@ -4675,9 +4793,11 @@ class PlaylistWindow(QMainWindow):
             self._sync_bs_dates_from_days()
 
     def _on_bs_date_mode_toggled(self, _checked: bool) -> None:
+        """BeatSaver 日付モード切替時に関連 UI を更新する。"""
         self._apply_bs_date_mode_ui()
 
     def _sync_bs_dates_from_days(self, _value: int = 0) -> None:
+        """Last N days 入力から From/To 日付ピッカーを同期更新する。"""
         if self._bs_date_sync or self._current_bs_date_mode() not in ("days",):
             return
         self._bs_date_sync = True
@@ -4689,6 +4809,7 @@ class PlaylistWindow(QMainWindow):
             self._bs_date_sync = False
 
     def _sync_bs_days_from_dates(self, _date: QDate) -> None:
+        """From/To 日付ピッカーから日数スピンボックスを逆算して更新する。"""
         if self._bs_date_sync or self._current_bs_date_mode() != "dates":
             return
         self._bs_date_sync = True
@@ -4707,15 +4828,18 @@ class PlaylistWindow(QMainWindow):
             self._bs_date_sync = False
 
     def _set_bs_to_latest(self) -> None:
+        """BeatSaver To 日付を今日へ合わせて日数表示も同期する。"""
         if self._current_bs_date_mode() != "dates":
             return
         self._bs_to_date.setDate(QDate.currentDate())
         self._sync_bs_days_from_dates(self._bs_to_date.date())
 
     def _playlist_table_stylesheet(self) -> str:
+        """一覧テーブルへ適用する共通スタイルシートを返す。"""
         return table_stylesheet()
 
     def _source_tabs_stylesheet(self) -> str:
+        """Snapshot / Maps タブに適用するテーマ別スタイルシートを返す。"""
         if is_dark():
             return (
                 "QTabWidget::pane { border: 0; margin: 0; padding: 0; }"
@@ -4735,6 +4859,7 @@ class PlaylistWindow(QMainWindow):
         )
 
     def _set_bs_rating_value(self, value: int) -> None:
+        """BeatSaver Rating の source/filter 両 UI を同じ値へ同期する。"""
         value = max(0, min(100, int(value)))
         if self._bs_rating_sync:
             return
@@ -4750,6 +4875,7 @@ class PlaylistWindow(QMainWindow):
             self._apply_filter()
 
     def _set_bs_votes_value(self, value: int) -> None:
+        """BeatSaver Votes の source/filter 両 UI を同じ値へ同期する。"""
         value = max(0, min(1000, int(value)))
         if self._bs_votes_sync:
             return
@@ -4765,6 +4891,7 @@ class PlaylistWindow(QMainWindow):
             self._apply_filter()
 
     def _apply_preview_menu_theme(self, menu: QMenu) -> None:
+        """プレビュー右クリックメニューへ現在テーマに合った配色を適用する。"""
         if is_dark():
             menu.setStyleSheet(
                 "QMenu { background: #2b2b2b; color: #f3f4f6; border: 1px solid #5f6368; }"
@@ -4781,6 +4908,7 @@ class PlaylistWindow(QMainWindow):
         )
 
     def _apply_preview_meta_frame_theme(self) -> None:
+        """プレビューパネル外枠と本文欄にテーマ別スタイルを適用する。"""
         if is_dark():
             self._preview_pane.setStyleSheet(
                 "#previewPane {"
@@ -4815,18 +4943,23 @@ class PlaylistWindow(QMainWindow):
             )
 
     def _on_bs_source_rating_changed(self, value: int) -> None:
+        """BeatSaver source 側 Rating 変更を共通同期処理へ渡す。"""
         self._set_bs_rating_value(value)
 
     def _on_bs_filter_rating_changed(self, value: int) -> None:
+        """Loaded List Filter 側 Rating 変更を共通同期処理へ渡す。"""
         self._set_bs_rating_value(value)
 
     def _on_bs_source_votes_changed(self, value: int) -> None:
+        """BeatSaver source 側 Votes 変更を共通同期処理へ渡す。"""
         self._set_bs_votes_value(value)
 
     def _on_bs_filter_votes_changed(self, value: int) -> None:
+        """Loaded List Filter 側 Votes 変更を共通同期処理へ渡す。"""
         self._set_bs_votes_value(value)
 
     def _on_mapper_played_filter_changed(self, value: int) -> None:
+        """Mapper Played スライダーと数値入力を同期して再フィルタする。"""
         normalized = max(0, min(int(value), self._mapper_played_filter_slider.maximum()))
         for widget in (self._mapper_played_filter_slider, self._mapper_played_filter_value):
             widget.blockSignals(True)
@@ -4837,6 +4970,7 @@ class PlaylistWindow(QMainWindow):
         self._apply_filter()
 
     def _show_preview_meta_context_menu(self, position) -> None:
+        """プレビュー本文の右クリックメニューへ翻訳アクションを追加して表示する。"""
         menu = self._preview_meta_text.createStandardContextMenu()
         self._apply_preview_menu_theme(menu)
         selected_text = self._preview_meta_text.textCursor().selectedText().replace("\u2029", "\n").strip()
@@ -4847,6 +4981,7 @@ class PlaylistWindow(QMainWindow):
         menu.exec(self._preview_meta_text.mapToGlobal(position))
 
     def _translate_preview_text(self, text: str) -> None:
+        """選択したプレビュー本文を Google Translate で開く。"""
         selected_text = text.strip()
         if not selected_text:
             return
@@ -4878,6 +5013,7 @@ class PlaylistWindow(QMainWindow):
         }
 
     def _restore_saved_snapshot_state(self) -> None:
+        """保存済み Snapshot 一覧状態を読み戻して必要なら表示へ反映する。"""
         state = self._restored_snapshot_state
         self._restored_snapshot_state = None
         if not state:
@@ -4933,6 +5069,7 @@ class PlaylistWindow(QMainWindow):
             self._apply_filter()
 
     def _restore_saved_maps_state(self) -> None:
+        """保存済み Maps 一覧状態を読み戻して必要なら表示へ反映する。"""
         state = self._restored_maps_state
         self._restored_maps_state = None
         if not state:
@@ -5017,15 +5154,18 @@ class PlaylistWindow(QMainWindow):
             self._apply_filter()
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
+        """終了時に現在のウィンドウ状態を保存してから閉じる。"""
         self._save_window_state()
         super().closeEvent(event)
 
     def _apply_secondary_button_theme(self) -> None:
+        """登録済みの補助ボタン群へ共通テーマを再適用する。"""
         style = _secondary_button_stylesheet()
         for button in self._secondary_buttons:
             button.setStyleSheet(style)
 
     def _apply_export_button_theme(self) -> None:
+        """Export ボタンへ OS / テーマに応じた見た目を適用する。"""
         if _is_windows_light_app_light():
             self._btn_export.setMinimumHeight(30)
             self._btn_export.setMinimumWidth(104)
@@ -5063,6 +5203,7 @@ class PlaylistWindow(QMainWindow):
             self._table = saved_table
 
     def can_reuse_filter_preset_source(self, source: str) -> bool:
+        """Stats 画面からの遷移時に既存 Snapshot データを再利用できるか判定する。"""
         source_key = str(source or "").strip().lower()
         return (
             source_key == self._snapshot_loaded_source_key
@@ -5155,6 +5296,7 @@ class PlaylistWindow(QMainWindow):
     # ──────────────────────────────────────────────────────────────────────────
 
     def _on_source_changed(self, btn, checked: bool) -> None:
+        """ソース切替時に対象タブ・UI 表示・ヘッダ状態をまとめて更新する。"""
         if checked:
             current_source_key = self._current_source_key()
             if current_source_key == "bs":
@@ -5190,6 +5332,7 @@ class PlaylistWindow(QMainWindow):
         self._update_score_headers()
 
     def _on_source_tab_changed(self, index: int) -> None:
+        """Snapshot / Maps タブ切替時に Load フッタと表示状態を切り替える。"""
         if index == self._source_tab_maps_idx:
             if not self._rb_bs.isChecked():
                 self._rb_bs.setChecked(True)
@@ -5212,6 +5355,7 @@ class PlaylistWindow(QMainWindow):
             self._btn_load.setText("⏵  Load")
 
     def _set_load_footer_host(self, host: QWidget) -> None:
+        """Load ボタン行を Snapshot 側または Maps 側のホストへ付け替える。"""
         current_parent = self._load_footer_widget.parentWidget()
         if current_parent is host:
             return
@@ -5227,6 +5371,7 @@ class PlaylistWindow(QMainWindow):
         self._maps_load_host.setVisible(host is self._maps_load_host)
 
     def select_source_tab(self, tab_name: str) -> None:
+        """外部呼び出し用に Snapshot / Maps タブを名前で選択する。"""
         target = (tab_name or "snapshot").strip().lower()
         if target == "maps":
             self._source_tabs.setCurrentIndex(self._source_tab_maps_idx)
@@ -5296,6 +5441,7 @@ class PlaylistWindow(QMainWindow):
         self._update_table_visual_mode()
 
     def _update_table_visual_mode(self) -> None:
+        """現在ソースとタブに応じて一覧テーブルの表示列を切り替える。"""
         is_bs = self._rb_bs.isChecked()
         show_cover = is_bs or not self._is_maps_tab()
         snapshot_groups = self._visible_snapshot_service_columns()
@@ -5541,6 +5687,7 @@ class PlaylistWindow(QMainWindow):
         self._save_window_state()
 
     def _browse_bplist(self) -> None:
+        """Open 用の .bplist / .json を選択し、必要ならサービスも推定設定する。"""
         # 前回のエクスポート先または開いたファイルのディレクトリを初期フォルダにする
         current = self._open_edit.text().strip()
         init_dir = str(Path(current).parent) if current and Path(current).exists() else self._export_dir
@@ -5569,6 +5716,7 @@ class PlaylistWindow(QMainWindow):
                     self._svc_combo.setCurrentIndex(idx)
 
     def _reset_filters(self) -> None:
+        """検索・星・Status などのフィルタ UI を現在タブ向け既定値へ戻す。"""
         widgets = [
             self._search_edit,
             self._star_min,
@@ -5615,11 +5763,12 @@ class PlaylistWindow(QMainWindow):
                 widget.blockSignals(False)
 
     def _on_reset_filters_clicked(self) -> None:
+        """Reset ボタン押下時にフィルタを初期化して再適用する。"""
         self._reset_filters()
         self._apply_filter()
 
     def _on_load_clicked(self) -> None:
-        
+        """Load / Search ボタン押下時に日時表示を更新して読み込みを開始する。"""
         if self._is_maps_tab():
             load_text = f"Last Searched: {datetime.now().strftime('%Y/%m/%d %H:%M:%S')}"
             self._maps_last_load_text = load_text
@@ -5725,6 +5874,7 @@ class PlaylistWindow(QMainWindow):
         self._start_async_load(worker_fn)
 
     def _show_load_progress_dialog(self, label: str = "Loading...") -> None:
+        """共通のロード進捗ダイアログを生成または再表示する。"""
         dlg = self._progress_dlg
         if dlg is not None:
             dlg.setLabelText(label)
@@ -5742,12 +5892,14 @@ class PlaylistWindow(QMainWindow):
         QApplication.processEvents()
 
     def _close_load_progress_dialog(self) -> None:
+        """表示中のロード進捗ダイアログを閉じる。"""
         dlg = self._progress_dlg
         self._progress_dlg = None
         if dlg is not None:
             dlg.close()
 
     def _update_load_progress_dialog(self, done: int, total: int, label: str) -> None:
+        """ロード進捗ダイアログの値と表示文言を更新する。"""
         self._show_load_progress_dialog(label)
         dlg = self._progress_dlg
         if dlg is None:
@@ -5785,6 +5937,7 @@ class PlaylistWindow(QMainWindow):
         t.start()
 
     def _show_bl_mapper_progress_dialog(self, label: str) -> None:
+        """Mapper Played 集計用の進捗ダイアログを生成または再表示する。"""
         dlg = self._bl_mapper_stats_progress_dlg
         if dlg is not None:
             dlg.setLabelText(label)
@@ -5802,12 +5955,14 @@ class PlaylistWindow(QMainWindow):
         QApplication.processEvents()
 
     def _close_bl_mapper_progress_dialog(self) -> None:
+        """Mapper Played 集計用の進捗ダイアログを閉じる。"""
         dlg = self._bl_mapper_stats_progress_dlg
         self._bl_mapper_stats_progress_dlg = None
         if dlg is not None:
             dlg.close()
 
     def _update_bl_mapper_progress_dialog(self, done: int, total: int, label: str) -> None:
+        """Mapper Played 集計ダイアログの進捗値と文言を更新する。"""
         self._show_bl_mapper_progress_dialog(label)
         dlg = self._bl_mapper_stats_progress_dlg
         if dlg is None:
@@ -5818,6 +5973,7 @@ class PlaylistWindow(QMainWindow):
         QApplication.processEvents()
 
     def _on_mapper_top_clicked(self) -> None:
+        """Mapper List ボタン押下時にキャッシュ表示または再集計を開始する。"""
         if not self._steam_id:
             QMessageBox.information(self, "BeatLeader Mapper Top", "Steam ID is not available.")
             return
@@ -5830,6 +5986,7 @@ class PlaylistWindow(QMainWindow):
             self._start_bl_mapper_stats_task(action)
 
     def _start_bl_mapper_stats_task(self, mode: str, *, silent: bool = False) -> None:
+        """Mapper Played cache の構築・更新処理をバックグラウンドで開始する。"""
         if not self._steam_id:
             return
         labels = {
@@ -5870,12 +6027,14 @@ class PlaylistWindow(QMainWindow):
         threading.Thread(target=_task, daemon=True).start()
 
     def _on_bl_mapper_stats_progress(self, done: int, total: int, label: str) -> None:
+        """Mapper Played 集計中の進捗をダイアログまたはステータスへ反映する。"""
         if self._bl_mapper_stats_silent:
             self._update_bl_mapper_cache_status(label)
             return
         self._update_bl_mapper_progress_dialog(done, total, label)
 
     def _on_bl_mapper_stats_finished(self, payload: object, mode: str) -> None:
+        """Mapper Played 集計完了後にキャッシュ表示と必要な後続操作を更新する。"""
         silent = self._bl_mapper_stats_silent
         self._bl_mapper_stats_silent = False
         self._close_bl_mapper_progress_dialog()
@@ -5891,6 +6050,7 @@ class PlaylistWindow(QMainWindow):
             self._start_bl_mapper_stats_task(action)
 
     def _on_bl_mapper_stats_error(self, message: str) -> None:
+        """Mapper Played 集計失敗時に UI 状態を戻してエラーを通知する。"""
         silent = self._bl_mapper_stats_silent
         self._bl_mapper_stats_silent = False
         self._close_bl_mapper_progress_dialog()
@@ -5912,6 +6072,7 @@ class PlaylistWindow(QMainWindow):
             sigs.error.emit(str(exc))
 
     def _run_load_ss(self, sigs: _LoadSignals, steam_id: Optional[str]) -> None:
+        """ScoreSaber キャッシュ読み込みを非同期 worker から実行する。"""
         def _progress(done: int, total: int, label: str) -> None:
             sigs.progress.emit(done, total, label)
         try:
@@ -5923,6 +6084,7 @@ class PlaylistWindow(QMainWindow):
             sigs.error.emit(str(exc))
 
     def _run_load_bl(self, sigs: _LoadSignals, steam_id: Optional[str]) -> None:
+        """BeatLeader キャッシュ読み込みを非同期 worker から実行する。"""
         def _progress(done: int, total: int, label: str) -> None:
             sigs.progress.emit(done, total, label)
         try:
@@ -5934,6 +6096,7 @@ class PlaylistWindow(QMainWindow):
             sigs.error.emit(str(exc))
 
     def _run_load_open(self, sigs: _LoadSignals, bplist_path: Path, service: str, steam_id: Optional[str]) -> None:
+        """Open モードの .bplist / .json 読み込みを非同期 worker から実行する。"""
         def _progress(done: int, total: int, label: str) -> None:
             sigs.progress.emit(done, total, label)
         try:
@@ -5945,6 +6108,7 @@ class PlaylistWindow(QMainWindow):
             sigs.error.emit(str(exc))
 
     def _run_load_acc(self, sigs: _LoadSignals, steam_id: Optional[str], category: str) -> None:
+        """AccSaber キャッシュ/API 読み込みを非同期 worker から実行する。"""
         def _progress(done: int, total: int, label: str) -> None:
             sigs.progress.emit(done, total, label)
         try:
@@ -5954,6 +6118,7 @@ class PlaylistWindow(QMainWindow):
             sigs.error.emit(str(exc))
 
     def _run_load_acc_rl(self, sigs: _LoadSignals, steam_id: Optional[str], category: str) -> None:
+        """AccSaber Reloaded 読み込みを非同期 worker から実行する。"""
         def _progress(done: int, total: int, label: str) -> None:
             sigs.progress.emit(done, total, label)
         try:
@@ -5963,6 +6128,7 @@ class PlaylistWindow(QMainWindow):
             sigs.error.emit(str(exc))
 
     def _run_load_beatsaver(self, sigs: _LoadSignals, steam_id: Optional[str], opts: Dict[str, object]) -> None:
+        """BeatSaver 検索条件を解釈して Maps 用一覧を非同期読み込みする。"""
         def _progress(done: int, total: int, label: str) -> None:
             sigs.progress.emit(done, total, label)
         try:
@@ -7248,6 +7414,7 @@ class PlaylistWindow(QMainWindow):
         filenames: List[str],
         errors: List[str],
     ) -> None:
+        """書き出した bplist のカバー画像一覧ダイアログを表示する。"""
         show_bplist_covers_dialog(self, title, folder, filenames, errors)
 
     def _show_cover_preview(self) -> None:
@@ -7264,18 +7431,22 @@ class PlaylistWindow(QMainWindow):
         self._show_bplist_covers_dialog(f"Cover Preview — {Path(folder).name}", folder, bplist_files, [])
 
     def _scroll_table_to_top(self) -> None:
+        """現在の一覧テーブルを先頭行へスクロールする。"""
         self._table.scrollToTop()
 
     def _scroll_table_to_bottom(self) -> None:
+        """現在の一覧テーブルを最終行へスクロールする。"""
         self._table.scrollToBottom()
 
     def _custom_levels_dir(self) -> Path:
+        """設定済み Beat Saber フォルダから CustomLevels ディレクトリを組み立てる。"""
         beatsaber_dir = load_beatsaber_dir().strip()
         if not beatsaber_dir:
             return Path()
         return Path(beatsaber_dir) / "Beat Saber_Data" / "CustomLevels"
 
     def _refresh_installed_levels_cache(self, force: bool = False) -> None:
+        """CustomLevels 一覧を走査してインストール済み譜面キャッシュを更新する。"""
         custom_levels_dir = self._custom_levels_dir()
         cache_key = str(custom_levels_dir)
         if not force and cache_key == self._installed_beatsaber_dir:
@@ -7302,6 +7473,7 @@ class PlaylistWindow(QMainWindow):
         self._installed_level_dirs = installed_dirs
 
     def _is_beatsaver_entry_installed(self, entry: MapEntry) -> bool:
+        """BeatSaver entry がローカル Beat Saber に導入済みか判定する。"""
         beatsaver_key = str(entry.beatsaver_key or "").strip().lower()
         if not beatsaver_key:
             return False
@@ -7311,6 +7483,7 @@ class PlaylistWindow(QMainWindow):
         return beatsaver_key in self._installed_level_keys
 
     def _make_oneclick_button(self, entry: MapEntry) -> QWidget:
+        """BeatSaver 行用の OneClickDownload ボタンセルを生成する。"""
         button = QPushButton("")
         button.setIcon(QIcon(str(RESOURCES_DIR / "onclick_download.png")))
         icon_edge = max(26, min(self._row_height - 6, 30))
@@ -7347,6 +7520,7 @@ class PlaylistWindow(QMainWindow):
         return container
 
     def _make_delete_button(self, entry: MapEntry) -> QWidget:
+        """BeatSaver 行用の削除ボタンセルを生成する。"""
         button = QPushButton("")
         button.setIcon(QIcon(str(RESOURCES_DIR / "trash.png")))
         icon_edge = max(18, min(self._row_height - 6, 30))
@@ -7374,15 +7548,18 @@ class PlaylistWindow(QMainWindow):
         return container
 
     def _thumbnail_edge_size(self) -> int:
+        """現在の行高に合わせたカバーサムネイルの一辺サイズを返す。"""
         return max(28, min(self._row_height, 128))
 
     def _set_cover_label_pixmap(self, label: QLabel, pixmap: QPixmap) -> None:
+        """指定ラベルへ行高に合うサイズでカバー画像を設定する。"""
         edge = self._thumbnail_edge_size()
         label.setFixedSize(edge, edge)
         label.setPixmap(pixmap)
         label.setText("")
 
     def _make_cover_cell_widget(self, entry: MapEntry) -> QWidget:
+        """カバー画像列に入れるセルウィジェットを生成する。"""
         container = QWidget()
         container.setProperty("mbss_cell_widget", True)
         container.setStyleSheet("background: transparent;")
@@ -7404,6 +7581,7 @@ class PlaylistWindow(QMainWindow):
         return container
 
     def _apply_row_height(self, refresh_table: bool = True) -> None:
+        """行高変更を両テーブルへ反映し、必要なら再描画する。"""
         for table in (self._snapshot_table, self._maps_table):
             header = table.verticalHeader()
             header.setMinimumSectionSize(0)
@@ -7418,6 +7596,7 @@ class PlaylistWindow(QMainWindow):
         self._restore_selected_entry(selected_entry)
 
     def _restore_selected_entry(self, target: Optional[MapEntry]) -> None:
+        """再描画後に指定 entry の選択行を復元する。"""
         if target is None:
             return
         if self._table_render_active:
@@ -7433,6 +7612,7 @@ class PlaylistWindow(QMainWindow):
                 return
 
     def _refresh_rows_for_hashes(self, song_hashes: set[str]) -> None:
+        """指定 song hash 群に該当する行だけを部分更新する。"""
         if not song_hashes:
             return
         mapper_counts = _load_bl_mapper_played_counts_from_cache(self._steam_id)
@@ -7488,6 +7668,7 @@ class PlaylistWindow(QMainWindow):
                 table.setItem(row, _COL_BL_MAPS_PLAYED, _played_status_item(_bl_effective_played_at_ts(entry), _bl_has_played_score(entry)))
 
     def _hydrate_visible_row_widgets(self, table: Optional[QTableWidget] = None) -> None:
+        """画面内に見えている行の重いセルウィジェットだけ遅延生成する。"""
         target_table = self._table if table is None else table
         row_count = target_table.rowCount()
         if row_count <= 0:
@@ -7521,11 +7702,13 @@ class PlaylistWindow(QMainWindow):
                 target_table.setCellWidget(row, _COL_DELETE, self._make_delete_button(entry))
 
     def _on_row_height_up(self) -> None:
+        """行高を一段階大きくして保存する。"""
         self._row_height = min(self._row_height + 4, 64)
         self._apply_row_height(refresh_table=True)
         self._save_window_state()
 
     def _on_row_height_dn(self) -> None:
+        """行高を一段階小さくして保存する。"""
         self._row_height = max(self._row_height - 4, 18)
         self._apply_row_height(refresh_table=True)
         self._save_window_state()
@@ -7623,6 +7806,7 @@ class PlaylistWindow(QMainWindow):
     # ──────────────────────────────────────────────────────────────────────────
 
     def _update_selection_status(self) -> None:
+        """選択行数表示と Download Selected ボタン有効状態を更新する。"""
         selected_entries = self._selected_entries()
         selected_rows = len(selected_entries)
         self._selection_status_label.setText(
@@ -7642,6 +7826,7 @@ class PlaylistWindow(QMainWindow):
         is_acc_mode: bool,
         is_bs_mode: bool,
     ) -> None:
+        """1 行分の MapEntry を各列アイテムへ展開してテーブルへ配置する。"""
         status_val = 30 if e.cleared else 20 if e.nf_clear else 10
         status_item = _NumItem(e.status_str, float(status_val))
         status_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -7792,6 +7977,7 @@ class PlaylistWindow(QMainWindow):
         table.setItem(row, _COL_MOD, mod_item)
 
     def _format_acc_category_text(self, raw_cat: str) -> str:
+        """AccSaber 系カテゴリ値を表示用ラベルへ整形する。"""
         cat_display = {"true": "True", "standard": "Standard", "tech": "Tech"}
         if not raw_cat:
             return ""
@@ -7799,6 +7985,7 @@ class PlaylistWindow(QMainWindow):
         return "/".join(cat_display.get(c, c.capitalize()) for c in cats)
 
     def _finish_table_render(self, table: QTableWidget, render_token: int) -> None:
+        """分割描画完了後にソート再開と選択復元を行う。"""
         if render_token != self._table_render_token:
             return
         self._table_render_active = False
@@ -7822,6 +8009,7 @@ class PlaylistWindow(QMainWindow):
         is_acc_mode: bool,
         is_bs_mode: bool,
     ) -> None:
+        """大量行描画を UI フリーズしないようチャンク単位で進める。"""
         if render_token != self._table_render_token:
             return
         chunk_size = 120
@@ -7865,6 +8053,7 @@ class PlaylistWindow(QMainWindow):
         self._finish_table_render(table, render_token)
 
     def _refresh_table(self, entries: List[MapEntry]) -> None:
+        """現在の entries から一覧テーブル全体を再構築する。"""
         table = self._table
         self._table_render_token += 1
         render_token = self._table_render_token
@@ -8027,6 +8216,7 @@ class PlaylistWindow(QMainWindow):
         )
 
     def _export_per_period_all(self, tag: str = "all", *, period: str) -> None:
+        """現在の一覧を週別または月別に分割して複数 bplist へ書き出す。"""
         if not self._filtered:
             QMessageBox.information(self, "Export", "No maps found.")
             return
