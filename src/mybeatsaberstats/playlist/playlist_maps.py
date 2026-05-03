@@ -26,6 +26,7 @@ from ..playlist_view import (
 
 
 def _fetch_bl_leaderboards_by_hash(session: requests.Session, song_hash: str) -> Dict[Tuple[str, str], str]:
+    """song hash に対応する BeatLeader leaderboard id 一覧を取得する。"""
     if not song_hash:
         return {}
     try:
@@ -47,6 +48,7 @@ def _fetch_bl_leaderboards_by_hash(session: requests.Session, song_hash: str) ->
 
 
 def _fetch_bl_top_replay_url(session: requests.Session, leaderboard_id: str, countries: str = "") -> str:
+    """BeatLeader leaderboard から top replay の URL を取得する。"""
     if not leaderboard_id:
         return ""
     params = {
@@ -74,6 +76,7 @@ def _fetch_bl_top_replay_url(session: requests.Session, leaderboard_id: str, cou
 
 
 def _normalize_duration_seconds(value: object) -> int:
+    """曲長表現を正の整数秒へ正規化する。"""
     if value is None:
         return 0
     try:
@@ -93,6 +96,7 @@ def load_bplist_maps(
     steam_id: Optional[str] = None,
     on_progress: Optional[Callable[[int, int, str], None]] = None,
 ) -> List[MapEntry]:
+    """.bplist / .json を読み込み、既存 ranked 情報と突き合わせて MapEntry 化する。"""
     try:
         bplist = json.loads(bplist_path.read_text(encoding="utf-8"))
     except Exception as exc:
@@ -190,6 +194,7 @@ def load_beatsaver_maps(
     on_progress: Optional[Callable[[int, int, str], None]] = None,
     session: Optional[requests.Session] = None,
 ) -> List[MapEntry]:
+    """BeatSaver 検索 API とローカル score cache を突き合わせて Maps 一覧を構築する。"""
     if on_progress:
         on_progress(0, 1, "Preparing BeatSaver search... loading local score caches")
     no_date_filter = days == 0 and from_dt is None and to_dt is None

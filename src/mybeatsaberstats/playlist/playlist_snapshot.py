@@ -39,6 +39,7 @@ def _mode_from_gamemode(game_mode: str) -> str:
 
 
 def _parse_iso_datetime_to_ts(value: object) -> int:
+    """ISO8601 文字列を Unix 秒へ変換する。"""
     from datetime import datetime, timezone
 
     if not isinstance(value, str) or not value:
@@ -53,6 +54,7 @@ def _parse_iso_datetime_to_ts(value: object) -> int:
 
 
 def _parse_unix_datetime_to_ts(value: object) -> int:
+    """Unix 秒表現を int に正規化する。"""
     if value is None:
         return 0
     try:
@@ -66,6 +68,7 @@ def _parse_unix_datetime_to_ts(value: object) -> int:
 
 
 def _normalize_duration_seconds(value: object) -> int:
+    """曲長表現を正の整数秒へ正規化する。"""
     if value is None:
         return 0
     try:
@@ -116,17 +119,20 @@ def _bl_player_score_info(scores: Dict, map_id: str) -> Tuple[float, bool, bool,
 
 
 def _ss_player_score_timeset(scores: Dict, lb_id: str) -> int:
+    """ScoreSaber score エントリから play 時刻を Unix 秒で返す。"""
     entry = scores.get(str(lb_id)) or {}
     sc = entry.get("score", {})
     return _parse_iso_datetime_to_ts(sc.get("timeSet"))
 
 
 def _bl_player_score_timeset(scores: Dict, map_id: str) -> int:
+    """BeatLeader score エントリから play 時刻を Unix 秒で返す。"""
     entry = scores.get(str(map_id)) or {}
     return _parse_unix_datetime_to_ts(entry.get("timeset"))
 
 
 def _file_signature(*paths: Path) -> Tuple[Tuple[str, bool, int, int], ...]:
+    """キャッシュ無効化判定用のファイル署名配列を返す。"""
     signature: List[Tuple[str, bool, int, int]] = []
     for path in paths:
         try:
@@ -138,10 +144,12 @@ def _file_signature(*paths: Path) -> Tuple[Tuple[str, bool, int, int], ...]:
 
 
 def _clone_entries(entries: List[MapEntry]) -> List[MapEntry]:
+    """MapEntry 配列を dataclass replace で複製する。"""
     return [replace(entry) for entry in entries]
 
 
 def load_ss_maps(steam_id: Optional[str] = None, filter_stars: bool = True) -> List[MapEntry]:
+    """ScoreSaber ranked map cache を読み込み、必要なら player score を反映する。"""
     path = _CACHE_DIR / "scoresaber_ranked_maps.json"
     if not path.exists():
         return []
@@ -243,6 +251,7 @@ def load_ss_maps(steam_id: Optional[str] = None, filter_stars: bool = True) -> L
 
 
 def load_bl_maps(steam_id: Optional[str] = None) -> List[MapEntry]:
+    """BeatLeader ranked map cache を読み込み、必要なら player score を反映する。"""
     path = _CACHE_DIR / "beatleader_ranked_maps.json"
     if not path.exists():
         return []
@@ -328,6 +337,7 @@ def load_bl_maps(steam_id: Optional[str] = None) -> List[MapEntry]:
 
 
 def _build_ss_score_hash_index(ss_scores: Dict[str, dict]) -> Dict[Tuple[str, str, str], Tuple[float, bool, bool, float, int, str, int]]:
+    """ScoreSaber score 辞書を song hash + mode + difficulty の索引へ変換する。"""
     idx: Dict[Tuple[str, str, str], Tuple[float, bool, bool, float, int, str, int]] = {}
     for lb_id_str, entry in ss_scores.items():
         lb = entry.get("leaderboard", {})
@@ -350,6 +360,7 @@ def _build_ss_score_hash_index(ss_scores: Dict[str, dict]) -> Dict[Tuple[str, st
 
 
 def _build_ss_hash_index(entries: List[MapEntry]) -> Dict[Tuple[str, str, str], MapEntry]:
+    """MapEntry 配列を song hash + mode + difficulty の索引へ変換する。"""
     idx: Dict[Tuple[str, str, str], MapEntry] = {}
     for e in entries:
         idx[(e.song_hash.upper(), e.mode, e.difficulty)] = e
@@ -357,10 +368,12 @@ def _build_ss_hash_index(entries: List[MapEntry]) -> Dict[Tuple[str, str, str], 
 
 
 def _build_bl_hash_index(entries: List[MapEntry]) -> Dict[Tuple[str, str, str], MapEntry]:
+    """BeatLeader 用の MapEntry 索引を生成する。"""
     return _build_ss_hash_index(entries)
 
 
 def _build_bl_score_hash_index(bl_scores: Dict[str, dict]) -> Dict[Tuple[str, str, str], Tuple[float, bool, bool, float, int, str, int]]:
+    """BeatLeader score 辞書を song hash + mode + difficulty の索引へ変換する。"""
     idx: Dict[Tuple[str, str, str], Tuple[float, bool, bool, float, int, str, int]] = {}
     for map_id, entry in bl_scores.items():
         lb = entry.get("leaderboard") or {}
@@ -380,6 +393,7 @@ def _build_bl_score_hash_index(bl_scores: Dict[str, dict]) -> Dict[Tuple[str, st
 
 
 def _build_bl_replay_hash_index(bl_scores: Dict[str, dict]) -> Dict[Tuple[str, str, str], str]:
+    """BeatLeader score 辞書から replay URL 索引を構築する。"""
     idx: Dict[Tuple[str, str, str], str] = {}
     best_meta: Dict[Tuple[str, str, str], Tuple[bool, float, int]] = {}
     for map_id, entry in bl_scores.items():
@@ -407,6 +421,7 @@ def _build_bl_replay_hash_index(bl_scores: Dict[str, dict]) -> Dict[Tuple[str, s
 
 
 def _build_bl_leaderboard_hash_index(bl_scores: Dict[str, dict]) -> Dict[Tuple[str, str, str], str]:
+    """BeatLeader score 辞書から leaderboard id 索引を構築する。"""
     idx: Dict[Tuple[str, str, str], str] = {}
     best_meta: Dict[Tuple[str, str, str], Tuple[bool, float, int]] = {}
     for map_id, entry in bl_scores.items():
@@ -434,6 +449,7 @@ def _build_bl_leaderboard_hash_index(bl_scores: Dict[str, dict]) -> Dict[Tuple[s
 
 
 def _load_cached_player_score_dicts(steam_id: Optional[str]) -> Tuple[Dict[str, dict], Dict[str, dict]]:
+    """指定 steam_id の ScoreSaber / BeatLeader player score cache を読み込む。"""
     ss_scores_raw: Dict[str, dict] = {}
     bl_scores_raw: Dict[str, dict] = {}
     if not steam_id:
@@ -459,6 +475,7 @@ def _load_cached_player_score_dicts(steam_id: Optional[str]) -> Tuple[Dict[str, 
 
 
 def _refresh_entries_from_cached_player_scores(entries: List[MapEntry], steam_id: Optional[str]) -> set[str]:
+    """保存済み player score cache を現在の entries へ再適用し、変更 hash を返す。"""
     if not entries or not steam_id:
         return set()
 
@@ -562,6 +579,7 @@ def _refresh_entries_from_cached_player_scores(entries: List[MapEntry], steam_id
 
 
 def _apply_entry_snapshot_service_field(entry: MapEntry, service_entry: MapEntry) -> None:
+    """別サービス由来 entry から Snapshot 表示用フィールドだけを転写する。"""
     if service_entry.source == "scoresaber":
         entry.ss_stars = service_entry.stars
         entry.ss_player_pp = service_entry.player_pp
@@ -602,6 +620,7 @@ def _apply_entry_snapshot_service_field(entry: MapEntry, service_entry: MapEntry
 
 
 def _load_snapshot_service_entries_from_cache(steam_id: Optional[str]) -> Dict[str, List[MapEntry]]:
+    """Snapshot 比較用に各サービスの cached entries 一覧を読み込む。"""
     service_entries: Dict[str, List[MapEntry]] = {
         "scoresaber": [],
         "beatleader": [],
@@ -639,6 +658,7 @@ def _load_snapshot_service_entries_from_cache(steam_id: Optional[str]) -> Dict[s
 
 
 def _refresh_snapshot_entries_service_columns(entries: List[MapEntry], steam_id: Optional[str]) -> None:
+    """Snapshot entries にサービス別列値を再構築して埋め直す。"""
     if not entries:
         return
 
