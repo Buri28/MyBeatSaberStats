@@ -2162,6 +2162,7 @@ class _LoadSignals(QObject):
 class _PreviewSignals(QObject):
     loaded = Signal(int, str, bytes)
     error = Signal(int, str)
+    replay_links_resolved = Signal(int, str, str, str)
 
 
 class _ThumbnailSignals(QObject):
@@ -3569,6 +3570,7 @@ class PlaylistWindow(QMainWindow):
         self._preview_signals = _PreviewSignals()
         self._preview_signals.loaded.connect(self._on_preview_loaded)
         self._preview_signals.error.connect(self._on_preview_error)
+        self._preview_signals.replay_links_resolved.connect(self._on_preview_replay_links_resolved)
         self._thumbnail_signals = _ThumbnailSignals()
         self._thumbnail_signals.loaded.connect(self._on_thumbnail_loaded)
         self._thumbnail_signals.error.connect(self._on_thumbnail_error)
@@ -3597,6 +3599,7 @@ class PlaylistWindow(QMainWindow):
         self._bs_votes_sync = False
         self._bs_date_sync = False
         self._preview_token = 0
+        self._preview_selection_token = 0
         self._current_preview_url = ""
         self._progress_dlg = None
         self._bl_mapper_stats_progress_dlg = None
@@ -6128,6 +6131,7 @@ class PlaylistWindow(QMainWindow):
         return selected_entries
 
     def _clear_preview(self) -> None:
+        self._preview_selection_token += 1
         self._preview_image.setPixmap(QPixmap())
         self._preview_image.setText("(no cover)")
         self._preview_description_text = ""
@@ -6242,6 +6246,8 @@ class PlaylistWindow(QMainWindow):
         if entry is None:
             self._clear_preview()
             return
+        self._preview_selection_token += 1
+        selection_token = self._preview_selection_token
 
         cached_beatsaver_meta = load_beatsaver_meta_cache().get((entry.song_hash or "").upper())
         _apply_beatsaver_meta(entry, cached_beatsaver_meta)
@@ -6296,6 +6302,11 @@ class PlaylistWindow(QMainWindow):
             bl_leaderboard_id = entry.leaderboard_id
         elif entry.beatleader_page_url:
             bl_leaderboard_id = entry.beatleader_page_url.rstrip("/").rsplit("/", 1)[-1]
+        if not bl_leaderboard_id:
+            replay_index, leaderboard_index = self._load_bl_preview_link_indices()
+            bl_leaderboard_id = leaderboard_index.get((song_hash, song_mode, song_diff), "")
+            if bl_leaderboard_id and not entry.leaderboard_id:
+                entry.leaderboard_id = bl_leaderboard_id
         self._btn_preview_global1_replay.setProperty("leaderboard_id", bl_leaderboard_id)
         self._btn_preview_global1_replay.setProperty("countries", "")
         self._btn_preview_global1_replay.setProperty("song_hash", song_hash)
@@ -6306,10 +6317,38 @@ class PlaylistWindow(QMainWindow):
         self._btn_preview_local1_replay.setProperty("song_hash", song_hash)
         self._btn_preview_local1_replay.setProperty("song_mode", song_mode)
         self._btn_preview_local1_replay.setProperty("song_diff", song_diff)
-        self._btn_preview_global1_replay.setEnabled(bool(bl_leaderboard_id or entry.beatleader_global1_replay_url or song_hash))
+        self._btn_preview_global1_replay.setEnabled(bool(entry.beatleader_global1_replay_url))
         self._btn_preview_global1_replay.setProperty("url", entry.beatleader_global1_replay_url)
-        self._btn_preview_local1_replay.setEnabled(bool(bl_leaderboard_id or entry.beatleader_local1_replay_url or song_hash))
+        self._btn_preview_local1_replay.setEnabled(bool(entry.beatleader_local1_replay_url))
         self._btn_preview_local1_replay.setProperty("url", entry.beatleader_local1_replay_url)
+        if song_hash and song_mode and song_diff and (
+            bl_leaderboard_id or not (entry.beatleader_global1_replay_url and entry.beatleader_local1_replay_url)
+        ):
+            def _resolve_replay_links_task() -> None:
+                resolved_leaderboard_id = bl_leaderboard_id
+                global_url = entry.beatleader_global1_replay_url
+                local_url = entry.beatleader_local1_replay_url
+                try:
+                    if not resolved_leaderboard_id:
+                        lb_map = _fetch_bl_leaderboards_by_hash(self._bl_api_session, song_hash)
+                        resolved_leaderboard_id = lb_map.get((song_mode, song_diff), "")
+                    if resolved_leaderboard_id:
+                        if not global_url:
+                            global_url = self._resolve_bl_top_replay_url(resolved_leaderboard_id, "")
+                        if not local_url:
+                            local_url = self._resolve_bl_top_replay_url(resolved_leaderboard_id, "JP")
+                except Exception:
+                    resolved_leaderboard_id = resolved_leaderboard_id or ""
+                    global_url = global_url or ""
+                    local_url = local_url or ""
+                self._preview_signals.replay_links_resolved.emit(
+                    selection_token,
+                    resolved_leaderboard_id or "",
+                    global_url or "",
+                    local_url or "",
+                )
+
+            threading.Thread(target=_resolve_replay_links_task, daemon=True).start()
 
         cover_url = entry.beatsaver_cover_url
         if not cover_url:
@@ -6375,6 +6414,31 @@ class PlaylistWindow(QMainWindow):
             return
         self._preview_image.setPixmap(QPixmap())
         self._preview_image.setText(f"(cover load failed)\n{msg}")
+
+    def _on_preview_replay_links_resolved(
+        self,
+        selection_token: int,
+        leaderboard_id: str,
+        global_url: str,
+        local_url: str,
+    ) -> None:
+        if selection_token != self._preview_selection_token:
+            return
+        entry = self._selected_entry()
+        if entry is None:
+            return
+        if leaderboard_id:
+            entry.leaderboard_id = leaderboard_id
+        if global_url:
+            entry.beatleader_global1_replay_url = global_url
+        if local_url:
+            entry.beatleader_local1_replay_url = local_url
+        self._btn_preview_global1_replay.setProperty("leaderboard_id", leaderboard_id or entry.leaderboard_id)
+        self._btn_preview_global1_replay.setProperty("url", global_url)
+        self._btn_preview_global1_replay.setEnabled(bool(global_url))
+        self._btn_preview_local1_replay.setProperty("leaderboard_id", leaderboard_id or entry.leaderboard_id)
+        self._btn_preview_local1_replay.setProperty("url", local_url)
+        self._btn_preview_local1_replay.setEnabled(bool(local_url))
 
     def _cache_thumbnail_pixmap(self, url: str, data: bytes) -> Optional[QPixmap]:
         cached = self._thumbnail_cache.get(url)
