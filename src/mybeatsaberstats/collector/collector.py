@@ -42,6 +42,7 @@ from ..accsaber import (
     get_accsaber_playlist_map_counts_with_meta,
     fetch_and_save_accsaber_maps_cache as _fetch_and_save_accsaber_maps,
     fetch_and_save_player_scores_cache as _fetch_and_save_acc_player_scores,
+    compute_effective_played_counts_from_cache as _compute_acc_effective_played_counts,
 )
 from .accsaber import (
     _load_list_cache,
@@ -1939,6 +1940,18 @@ def create_snapshot_for_steam_id(
     else:
         print("9. AccSaber 取得スキップ（オプションが無効）")
         _step(0.60, "Skipping AccSaber data...")
+
+    # AccSaber classic は API の rankedPlays ではなく、current playlist と player score cache
+    # から既プレイ件数を再計算した値を優先する。
+    try:
+        _acc_effective_play_counts = _compute_acc_effective_played_counts(scoresaber_id) if scoresaber_id else {}
+        if _acc_effective_play_counts:
+            acc_overall_play_count = _acc_effective_play_counts.get("overall", acc_overall_play_count)
+            acc_true_play_count = _acc_effective_play_counts.get("true", acc_true_play_count)
+            acc_standard_play_count = _acc_effective_play_counts.get("standard", acc_standard_play_count)
+            acc_tech_play_count = _acc_effective_play_counts.get("tech", acc_tech_play_count)
+    except Exception:  # noqa: BLE001
+        pass
 
     # Overall AP は True / Standard / Tech の AP を合算した値とする
     if any(v is not None for v in (acc_true_ap, acc_standard_ap, acc_tech_ap)):

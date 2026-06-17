@@ -42,7 +42,7 @@ from PySide6.QtWidgets import (
 from .snapshot import Snapshot, SNAPSHOT_DIR, BASE_DIR, RESOURCES_DIR, StarClearStat, resource_path
 from .theme import table_stylesheet, toggle as _toggle_theme, is_dark, label_cell_color, label_cell_text_color, init_theme as _init_theme, button_label as _theme_button_label, current_theme_mode as _current_theme_mode, set_theme_mode as _set_theme_mode
 from .updater import StartupUpdateChecker, get_current_version
-from .accsaber import AccSaberPlayer, get_accsaber_playlist_map_counts_with_meta, get_accsaber_playlist_map_counts_from_cache
+from .accsaber import AccSaberPlayer, get_accsaber_playlist_map_counts_with_meta, get_accsaber_playlist_map_counts_from_cache, compute_effective_played_counts_from_cache
 from .accsaber_reloaded import get_reloaded_map_counts_from_cache as _get_reloaded_map_counts_from_cache
 from .accsaber_reloaded import fetch_all_maps_full as _rl_fetch_all_maps
 from .accsaber_reloaded import build_unplayed_bplist as _rl_build_unplayed_bplist
@@ -3139,6 +3139,10 @@ class PlayerWindow(QMainWindow):
         true_total_maps = playlist_counts.get("true")
         standard_total_maps = playlist_counts.get("standard")
         tech_total_maps = playlist_counts.get("tech")
+        live_acc_play_counts = compute_effective_played_counts_from_cache(snap.scoresaber_id or "")
+        acc_true_play_count = live_acc_play_counts.get("true", snap.accsaber_true_play_count)
+        acc_standard_play_count = live_acc_play_counts.get("standard", snap.accsaber_standard_play_count)
+        acc_tech_play_count = live_acc_play_counts.get("tech", snap.accsaber_tech_play_count)
         overall_total_maps: Optional[int]
         parts = [c for c in (true_total_maps, standard_total_maps, tech_total_maps) if c is not None]
         if parts:
@@ -3187,24 +3191,24 @@ class PlayerWindow(QMainWindow):
                 "Play Count",
                 _format_play_with_total(
                     (
-                        (snap.accsaber_true_play_count or 0)
-                        + (snap.accsaber_standard_play_count or 0)
-                        + (snap.accsaber_tech_play_count or 0)
+                        (acc_true_play_count or 0)
+                        + (acc_standard_play_count or 0)
+                        + (acc_tech_play_count or 0)
                     )
                     if any(
                         v is not None
                         for v in (
-                            snap.accsaber_true_play_count,
-                            snap.accsaber_standard_play_count,
-                            snap.accsaber_tech_play_count,
+                            acc_true_play_count,
+                            acc_standard_play_count,
+                            acc_tech_play_count,
                         )
                     )
                     else snap.accsaber_overall_play_count,
                     overall_total_maps,
                 ),
-                _format_play_with_total(snap.accsaber_true_play_count, true_total_maps),
-                _format_play_with_total(snap.accsaber_standard_play_count, standard_total_maps),
-                _format_play_with_total(snap.accsaber_tech_play_count, tech_total_maps),
+                _format_play_with_total(acc_true_play_count, true_total_maps),
+                _format_play_with_total(acc_standard_play_count, standard_total_maps),
+                _format_play_with_total(acc_tech_play_count, tech_total_maps),
             ),
         ]
 
@@ -3244,21 +3248,21 @@ class PlayerWindow(QMainWindow):
             return min(1.0, plays / total)
 
         _overall_play_count = (
-            (snap.accsaber_true_play_count or 0)
-            + (snap.accsaber_standard_play_count or 0)
-            + (snap.accsaber_tech_play_count or 0)
+            (acc_true_play_count or 0)
+            + (acc_standard_play_count or 0)
+            + (acc_tech_play_count or 0)
         ) if any(
             v is not None for v in (
-                snap.accsaber_true_play_count,
-                snap.accsaber_standard_play_count,
-                snap.accsaber_tech_play_count,
+                acc_true_play_count,
+                acc_standard_play_count,
+                acc_tech_play_count,
             )
         ) else snap.accsaber_overall_play_count
         _acc_play_ratios = {
             1: _play_ratio(_overall_play_count, overall_total_maps),
-            2: _play_ratio(snap.accsaber_true_play_count, true_total_maps),
-            3: _play_ratio(snap.accsaber_standard_play_count, standard_total_maps),
-            4: _play_ratio(snap.accsaber_tech_play_count, tech_total_maps),
+            2: _play_ratio(acc_true_play_count, true_total_maps),
+            3: _play_ratio(acc_standard_play_count, standard_total_maps),
+            4: _play_ratio(acc_tech_play_count, tech_total_maps),
         }
         _acc_avg_acc_vals = {
             0: getattr(snap, "accsaber_overall_avg_acc", None),
