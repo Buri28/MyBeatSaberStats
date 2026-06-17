@@ -513,3 +513,91 @@ def load_player_scores_from_cache(steam_id: str) -> Optional[List[dict]]:
     except Exception:  # noqa: BLE001
         pass
     return None
+
+
+def compute_effective_played_counts_from_cache(player_id: str) -> Dict[str, int]:
+    """現在の AccSaber playlist に対する既プレイ件数を cache から再計算する。
+
+    - accsaber_maps.json の playlists を母集団にする
+    - accsaber_player_scores_{player_id}.json の score を current playlist に突き合わせる
+    - 返却値は一意譜面数ベースで、Overall は True/Standard/Tech の合計
+    """
+
+    if not player_id:
+        return {}
+
+    maps_cache = load_accsaber_maps_cache()
+    score_list = load_player_scores_from_cache(player_id)
+    if not isinstance(maps_cache, dict) or not isinstance(score_list, list):
+        return {}
+
+    playlists = maps_cache.get("playlists")
+    if not isinstance(playlists, dict):
+        return {}
+
+    diff_norm = {
+        "easy": "Easy",
+        "normal": "Normal",
+        "hard": "Hard",
+        "expert": "Expert",
+        "expertplus": "ExpertPlus",
+        "expert+": "ExpertPlus",
+    }
+
+    def _norm_diff(name: object) -> str:
+        raw = str(name or "")
+        return diff_norm.get(raw.lower(), raw)
+
+    playlist_keys: Dict[str, set[tuple[str, str]]] = {"true": set(), "standard": set(), "tech": set()}
+    for cat in ("true", "standard", "tech"):
+        pdata = playlists.get(cat)
+        if not isinstance(pdata, dict):
+            continue
+        songs = pdata.get("songs")
+        if not isinstance(songs, list):
+            continue
+        for song in songs:
+            if not isinstance(song, dict):
+                continue
+            song_hash = str(song.get("hash") or "").upper()
+            if not song_hash:
+                continue
+            diffs = song.get("difficulties")
+            if not isinstance(diffs, list):
+                continue
+            for diff in diffs:
+                if not isinstance(diff, dict):
+                    continue
+                diff_name = _norm_diff(diff.get("name"))
+                if diff_name:
+                    playlist_keys[cat].add((song_hash, diff_name))
+
+    played_keys: Dict[str, set[tuple[str, str]]] = {"true": set(), "standard": set(), "tech": set()}
+    for score in score_list:
+        if not isinstance(score, dict):
+            continue
+        cat_name = str(score.get("categoryDisplayName") or "").lower()
+        if "true" in cat_name:
+            cat = "true"
+        elif "standard" in cat_name:
+            cat = "standard"
+        elif "tech" in cat_name:
+            cat = "tech"
+        else:
+            continue
+
+        song_hash = str(score.get("songHash") or "").upper()
+        diff_name = _norm_diff(score.get("difficulty"))
+        if not song_hash or not diff_name:
+            continue
+        key = (song_hash, diff_name)
+        if key in playlist_keys[cat]:
+            played_keys[cat].add(key)
+
+    result = {
+        "true": len(played_keys["true"]),
+        "standard": len(played_keys["standard"]),
+        "tech": len(played_keys["tech"]),
+    }
+    result["overall"] = result["true"] + result["standard"] + result["tech"]
+    return result
