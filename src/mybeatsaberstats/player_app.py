@@ -65,6 +65,7 @@ from .collector.collector import (
     SnapshotOptions,
     _read_cache_fetched_at,
 )
+from .collector.scoresaber import collect_scoresaber_star_stats_from_cache
 from mybeatsaberstats.collector.map_store import MapStore
 from .playlist_view import PlaylistWindow, _make_playlist_cover as _make_cover, \
     load_accsaber_reloaded_maps as _rl_load_maps_with_scores, \
@@ -2929,9 +2930,10 @@ class PlayerWindow(QMainWindow):
         except Exception:  # noqa: BLE001
             taken_text = snap.taken_at
 
-        # ★別統計は ScoreSaber / BeatLeader の Ranked 譜面数にも相当するので、
-        # 基本的にはスナップショットに保存された値を使い、無い場合のみ再集計する。
-        stats = snap.star_stats or []
+        # SS ★別統計は snapshot 保存時点と現在の cache がズレやすいため、
+        # 表示はまず live cache に合わせ、cache が無い場合だけ snapshot を使う。
+        live_ss_stats = collect_scoresaber_star_stats_from_cache(snap.scoresaber_id or "")
+        stats = live_ss_stats or snap.star_stats or []
         # 古いスナップショットでは BeatLeader ★統計が未保存のことがあるが、
         # ここで同期再取得すると起動時やプレイヤー切り替え時にネットワーク待ちで固まる。
         # 表示は保存済みデータだけを使い、未保存なら空表示にとどめる。
