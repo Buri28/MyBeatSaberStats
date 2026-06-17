@@ -21,6 +21,25 @@ SCORESABER_PLAYER_SCORES_URL = "https://scoresaber.com/api/player/{player_id}/sc
 SCORESABER_PLAYER_FULL_URL = "https://scoresaber.com/api/player/{player_id}/full"
 
 
+def _normalize_leaderboard_key(value: object) -> Optional[str]:
+    if value is None:
+        return None
+    key = str(value).strip()
+    return key or None
+
+
+def _normalize_leaderboard_cache(leaderboards: dict) -> dict[str, dict]:
+    normalized: dict[str, dict] = {}
+    for raw_key, lb in leaderboards.items():
+        if not isinstance(lb, dict):
+            continue
+        lb_id = _normalize_leaderboard_key(lb.get("id") or raw_key)
+        if lb_id is None:
+            continue
+        normalized[lb_id] = lb
+    return normalized
+
+
 def _load_cached_rank_maps(path: Path) -> Optional[dict]:
     """
     ScoreSaber等のAPIレスポンスをキャッシュしたJSONファイルからページリストを読み込む。
@@ -33,7 +52,7 @@ def _load_cached_rank_maps(path: Path) -> Optional[dict]:
         raw = json.loads(path.read_text(encoding="utf-8"))
         leaderboards = raw.get("leaderboards")
         if isinstance(leaderboards, dict):
-            return leaderboards
+            return _normalize_leaderboard_cache(leaderboards)
     except Exception:
         return None
     return None
@@ -56,11 +75,12 @@ def _save_cached_ranked_maps(path: Path, ranked_maps: dict, max_pages: int, tota
     ページリストをキャッシュファイル(JSON)として保存する。
     """
     print("Entering _save_cached_ranked_maps")
+    normalized_ranked_maps = _normalize_leaderboard_cache(ranked_maps)
     payload = {
         "fetched_at": datetime.utcnow().isoformat() + "Z",
-        "leaderboards": ranked_maps,
+        "leaderboards": normalized_ranked_maps,
         "max_pages": max_pages,
-        "total_maps": total_maps,
+        "total_maps": len(normalized_ranked_maps),
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -102,6 +122,253 @@ def _save_cached_pages(path: Path, pages: list[dict]) -> None:
         return
 
 
+def _build_scoresaber_star_stats(leaderboards: dict, scores: list[dict]) -> list[StarClearStat]:
+    """ScoreSaber の ranked leaderboard / player score から★別統計を組み立てる。"""
+
+    if not leaderboards:
+        return []
+
+    star_map_count: dict[int, int] = defaultdict(int)
+    leaderboard_star_bucket: dict[str, int] = {}
+
+    for lb in leaderboards.values():
+        if lb.get("ranked") is False:
+            continue
+        if lb.get("deleted") is True:
+            continue
+
+        diff = lb.get("difficulty") or {}
+        stars_value = lb.get("stars") or diff.get("stars")
+        if stars_value is None:
+            continue
+        try:
+            stars = float(stars_value)
+        except (TypeError, ValueError):
+            continue
+
+        if not math.isfinite(stars) or stars < 0:
+            continue
+
+        star_bucket = int(stars)
+        if star_bucket < 0:
+            star_bucket = 0
+
+        lb_id_raw = lb.get("id") or diff.get("leaderboardId")
+        if lb_id_raw is None:
+            continue
+        lb_id = str(lb_id_raw)
+
+        leaderboard_star_bucket[lb_id] = star_bucket
+        star_map_count[star_bucket] += 1
+
+    if not star_map_count or not leaderboard_star_bucket:
+        return []
+
+    star_clear_count: dict[int, int] = defaultdict(int)
+    star_nf_count: dict[int, int] = defaultdict(int)
+    star_ss_count: dict[int, int] = defaultdict(int)
+    star_na_count: dict[int, int] = defaultdict(int)
+    star_fc_count: dict[int, int] = defaultdict(int)
+    star_acc_sum: dict[int, float] = defaultdict(float)
+    star_acc_count: dict[int, int] = defaultdict(int)
+    star_pp_sum: dict[int, float] = defaultdict(float)
+
+    class _PerLeaderboardState(TypedDict):
+        star: int
+        clear: bool
+        nf: bool
+        ss: bool
+        na: bool
+        best_acc: Optional[float]
+        has_fc: bool
+        best_pp: Optional[float]
+
+    per_leaderboard: dict[str, _PerLeaderboardState] = {}
+
+    for item in scores:
+        score_info = item.get("score") if isinstance(item, dict) else None
+        leaderboard = item.get("leaderboard") if isinstance(item, dict) else None
+
+        if leaderboard is None and isinstance(item, dict):
+            leaderboard = item
+
+        if not isinstance(leaderboard, dict):
+            continue
+
+        diff = leaderboard.get("difficulty") or {}
+        lb_id_raw = leaderboard.get("id") or diff.get("leaderboardId")
+        if lb_id_raw is None:
+            continue
+        lb_id = str(lb_id_raw)
+
+        if lb_id not in leaderboard_star_bucket:
+            continue
+
+        star_bucket = leaderboard_star_bucket[lb_id]
+        state = per_leaderboard.get(lb_id)
+        if state is None:
+            state = _PerLeaderboardState(
+                star=star_bucket,
+                clear=False,
+                nf=False,
+                ss=False,
+                na=False,
+                best_acc=None,
+                has_fc=False,
+                best_pp=None,
+            )
+            per_leaderboard[lb_id] = state
+
+        modifiers = ""
+        if isinstance(score_info, dict):
+            modifiers = str(score_info.get("modifiers") or "")
+
+        mods_upper = modifiers.upper()
+        is_nf = "NF" in mods_upper
+        is_ss = "SS" in mods_upper
+        is_na = "NA" in mods_upper
+
+        if is_nf:
+            state["nf"] = True
+        elif is_ss:
+            state["ss"] = True
+        elif is_na:
+            state["na"] = True
+        else:
+            state["clear"] = True
+
+            if isinstance(score_info, dict) and score_info.get("fullCombo") is True:
+                state["has_fc"] = True
+
+            acc: Optional[float] = None
+            if isinstance(score_info, dict):
+                acc = _extract_scoresaber_accuracy(score_info)
+                if acc is None:
+                    try:
+                        base = score_info.get("baseScore") or score_info.get("score") or score_info.get("modifiedScore")
+                        max_score_lb = leaderboard.get("maxScore")
+                        if base is not None and max_score_lb is not None:
+                            base_f = float(base)
+                            max_f = float(max_score_lb)
+                            if math.isfinite(base_f) and math.isfinite(max_f) and max_f > 0:
+                                acc = max(0.0, min(100.0, base_f / max_f * 100.0))
+                    except (TypeError, ValueError):
+                        acc = None
+
+            if acc is not None:
+                best = state.get("best_acc")
+                if best is None or acc > best:
+                    state["best_acc"] = acc
+
+            if isinstance(score_info, dict):
+                try:
+                    pp_val = float(score_info.get("pp") or 0)
+                    if math.isfinite(pp_val) and pp_val > 0:
+                        prev_pp = state.get("best_pp")
+                        if prev_pp is None or pp_val > prev_pp:
+                            state["best_pp"] = pp_val
+                except (TypeError, ValueError):
+                    pass
+
+    for state in per_leaderboard.values():
+        star_bucket = int(state["star"])
+        has_clear = bool(state["clear"])
+        has_nf = bool(state["nf"])
+        has_ss = bool(state["ss"])
+        has_na = bool(state["na"])
+
+        if has_clear:
+            star_clear_count[star_bucket] += 1
+            if state.get("has_fc"):
+                star_fc_count[star_bucket] += 1
+            best_acc = state.get("best_acc")
+            if isinstance(best_acc, (int, float)) and math.isfinite(float(best_acc)):
+                star_acc_sum[star_bucket] += float(best_acc)
+                star_acc_count[star_bucket] += 1
+        elif has_nf:
+            star_nf_count[star_bucket] += 1
+        elif has_ss:
+            star_ss_count[star_bucket] += 1
+        elif has_na:
+            star_na_count[star_bucket] += 1
+
+    cleared_pp_entries: list[tuple[int, float]] = []
+    for state in per_leaderboard.values():
+        if not bool(state["clear"]):
+            continue
+        pp_val = state.get("best_pp")
+        if isinstance(pp_val, (int, float)) and math.isfinite(float(pp_val)) and float(pp_val) > 0:
+            cleared_pp_entries.append((int(state["star"]), float(pp_val)))
+
+    cleared_pp_entries.sort(key=lambda x: x[1], reverse=True)
+    for rank, (star_bucket, pp_val) in enumerate(cleared_pp_entries, start=1):
+        star_pp_sum[star_bucket] += pp_val * (0.965 ** (rank - 1))
+
+    star_pp_solo_sum: dict[int, float] = defaultdict(float)
+    star_pp_list: dict[int, list[float]] = defaultdict(list)
+    for star_bucket, pp_val in cleared_pp_entries:
+        star_pp_list[star_bucket].append(pp_val)
+    for star_bucket, pp_vals in star_pp_list.items():
+        for local_rank, pp_v in enumerate(sorted(pp_vals, reverse=True), start=1):
+            star_pp_solo_sum[star_bucket] += pp_v * (0.965 ** (local_rank - 1))
+
+    all_stars = (
+        set(star_map_count.keys())
+        | set(star_clear_count.keys())
+        | set(star_nf_count.keys())
+        | set(star_ss_count.keys())
+        | set(star_na_count.keys())
+    )
+    stats: list[StarClearStat] = []
+    for star in sorted(all_stars):
+        map_count = star_map_count.get(star, 0)
+        clear_count = star_clear_count.get(star, 0)
+        nf_count = star_nf_count.get(star, 0)
+        ss_count = star_ss_count.get(star, 0)
+        na_count = star_na_count.get(star, 0)
+        clear_rate = (clear_count / map_count) if map_count > 0 else 0.0
+
+        cnt = star_acc_count.get(star, 0)
+        avg_acc = (star_acc_sum.get(star, 0.0) / cnt) if cnt > 0 else None
+
+        pp_total = star_pp_sum.get(star)
+        pp_contribution = float(pp_total) if pp_total is not None and pp_total > 0 else (0.0 if clear_count > 0 else None)
+        pp_solo_val = star_pp_solo_sum.get(star)
+        pp_solo = float(pp_solo_val) if pp_solo_val is not None and pp_solo_val > 0 else (0.0 if clear_count > 0 else None)
+
+        stats.append(
+            StarClearStat(
+                star=star,
+                map_count=map_count,
+                clear_count=clear_count,
+                nf_count=nf_count,
+                ss_count=ss_count,
+                na_count=na_count,
+                clear_rate=clear_rate,
+                average_acc=avg_acc,
+                fc_count=star_fc_count.get(star, 0),
+                pp_contribution=pp_contribution,
+                pp_solo=pp_solo,
+            )
+        )
+
+    return stats
+
+
+def collect_scoresaber_star_stats_from_cache(scoresaber_id: str) -> list[StarClearStat]:
+    """現在の ScoreSaber キャッシュだけを使って★別統計を再計算する。"""
+
+    if not scoresaber_id:
+        return []
+
+    ranked_cache_path = CACHE_DIR / "scoresaber_ranked_maps.json"
+    score_cache_path = CACHE_DIR / f"scoresaber_player_scores_{scoresaber_id}.json"
+
+    leaderboards = _load_cached_rank_maps(ranked_cache_path) or {}
+    scores_dict = _load_cached_player_scores(score_cache_path) or {}
+    return _build_scoresaber_star_stats(leaderboards, list(scores_dict.values()))
+
+
 def _get_scoresaber_leaderboards_ranked(
     session: requests.Session,
     progress: Optional[Callable[[int, Optional[int]], None]] = None,
@@ -131,7 +398,7 @@ def _get_scoresaber_leaderboards_ranked(
     #すべての譜面データのidを格納するdicationaryを作成
     #existing_lb_ids = {}
     if cached_leaderboards is not None:
-        leaderboards = cached_leaderboards
+        leaderboards = _normalize_leaderboard_cache(cached_leaderboards)
         # # 重複を省くため、IDをキーにした辞書に格納
         # for lb in cached_leaderboards:
         #     lb_id = lb.get("id")
@@ -177,7 +444,9 @@ def _get_scoresaber_leaderboards_ranked(
                             print(f"SS Ranked Maps: fetch_until に到達 (rankedDate={cd})")
                             reached_fetch_until = True
                             break
-                    lb_id = lb.get("id")
+                    lb_id = _normalize_leaderboard_key(lb.get("id"))
+                    if lb_id is None:
+                        continue
                     # 既存マップも上書き（stars等が月次更新で変わっている可能性があるため）
                     if lb_id not in leaderboards or leaderboards[lb_id] != lb:
                         append_leaderboards[lb_id] = lb
@@ -244,83 +513,72 @@ def _get_scoresaber_leaderboards_ranked(
                 _touch_cache_fetched_at(cache_path)
                 return leaderboards
             
-            # total が増えている場合は、キャッシュ済みの最後のページ以降だけを追加取得する
-            print(f"ScoreSaberリーダーボードに新しい譜面が追加されています。{latest_total - cached_total}件の差分を取得し、キャッシュを更新します...")                
-           
-            append_leaderboards : dict = {}
+            # total がズレた場合は差分追加ではなく全件再構築する。
+            # Ranked/Unranked の入れ替わりや過去の壊れたキャッシュを自己修復するため。
+            print(f"ScoreSaberリーダーボードに差分があります。{latest_total - cached_total}件差のため、キャッシュを全件再構築します...")
+
+            rebuilt_leaderboards: dict = {}
             data_lbs = data.get("leaderboards") or []
-            add_leaderboards(append_leaderboards, leaderboards, data_lbs)
-            new_total = cached_total + len(append_leaderboards)
-            
-            max_cached_page = math.ceil(cached_total / per_page)
+            add_leaderboards(rebuilt_leaderboards, rebuilt_leaderboards, data_lbs)
+
             total_pages_new = math.ceil(latest_total / per_page)
-            print(f"既存キャッシュの最終ページ: {max_cached_page}, 新しい総ページ数: {total_pages_new}")    
-            print(f"取得済み譜面数: {new_total}, 最新総譜面数: {latest_total} ")
-            if new_total < latest_total:
-                total_maps_new = cached_total
-                page_no += 1
-                
-                for i in range(page_no, total_pages_new + 1):  # noqa: F841
-                    if progress is not None:
-                        progress(i, total_pages_new)
-                    params_page = {
-                        "ranked": "true",
-                        "page": str(i),
-                    }
-                    try:
-                        # 追加のページを取得
-                        resp_page = session.get(SCORESABER_LEADERBOARDS_URL, params=params_page, timeout=10)
-                        print(
-                            f"ScoreSaberリーダーボードの追加ページ {i} を取得中... URL: {resp_page.url} params: {params_page}"
-                        )
-                        if resp_page.status_code == 404:
-                            break
-                        resp_page.raise_for_status()
-                    except Exception:  # noqa: BLE001
-                        break
+            rebuild_failed = False
 
-                    try:
-                        # レスポンス JSON をパース
-                        data_page = resp_page.json()
-                        page_lbs = data_page.get("leaderboards") or []
-                        add_leaderboards(append_leaderboards, leaderboards, page_lbs)
-                        new_total = cached_total + len(append_leaderboards)
-                        # マップ数が一致した場合は終了
-                        if new_total >= latest_total:
-                            print("総譜面数が一致したため取得を終了します。：new_total:", new_total, " latest_total:", latest_total)
-                            break
-                        else:
-                            print("総譜面数不一致：new_total:", new_total, " latest_total:", latest_total)
-                    except Exception:  # noqa: BLE001
-                        break
-                    # ページ情報をキャッシュ用に保存
-                    #pages[:0] = [{"page": page_no, "params": params_page, "data": data_page}]
-                    # リーダーボード情報を追加取得
-                    lbs = data_page.get("leaderboards") or []
-                    if not lbs:
-                        break
-                    
-                    print(f"追加取得した譜面数: {len(lbs)} 総追加譜面数: {len(append_leaderboards)}")
-                    # if isinstance(lbs, list):
-                    #     # 既存のリーダーボードリストの先頭に追加する形でマージ
-                    #     leaderboards[:0] = [lb for lb in lbs if isinstance(lb, dict)]
-            if append_leaderboards:
-                print("ScoreSaberリーダーボードの保存中...")
-                # キャッシュを保存
+            print(f"新しい総ページ数: {total_pages_new}")
+            print(f"再構築開始時点の取得件数: {len(rebuilt_leaderboards)}, 最新総譜面数: {latest_total}")
+
+            for i in range(2, total_pages_new + 1):
+                if progress is not None:
+                    progress(i, total_pages_new)
+                params_page = {
+                    "ranked": "true",
+                    "page": str(i),
+                }
                 try:
-                    leaderboards.update(append_leaderboards)
-                    # leaderboardsをidの降順でソートする
-                    leaderboards :dict = dict(sorted(leaderboards.items(), key=lambda x: x[1].get("id", 0), reverse=True)   )
+                    resp_page = session.get(SCORESABER_LEADERBOARDS_URL, params=params_page, timeout=10)
+                    print(
+                        f"ScoreSaberリーダーボードの再構築ページ {i} を取得中... URL: {resp_page.url} params: {params_page}"
+                    )
+                    if resp_page.status_code == 404:
+                        rebuild_failed = True
+                        break
+                    resp_page.raise_for_status()
+                    data_page = resp_page.json()
+                except Exception:  # noqa: BLE001
+                    rebuild_failed = True
+                    break
 
-                    _save_cached_ranked_maps(cache_path, leaderboards, \
-                                                max_pages=total_pages_new, \
-                                                total_maps=len(leaderboards))
+                page_lbs = data_page.get("leaderboards") or []
+                if not page_lbs:
+                    rebuild_failed = True
+                    break
+
+                add_leaderboards(rebuilt_leaderboards, rebuilt_leaderboards, page_lbs)
+                print(f"再構築で取得した譜面数: {len(page_lbs)} 累計: {len(rebuilt_leaderboards)} / {latest_total}")
+
+            if not rebuild_failed and rebuilt_leaderboards:
+                print("ScoreSaberリーダーボードの保存中...")
+                try:
+                    rebuilt_leaderboards = dict(
+                        sorted(rebuilt_leaderboards.items(), key=lambda x: x[1].get("id", 0), reverse=True)
+                    )
+                    _save_cached_ranked_maps(
+                        cache_path,
+                        rebuilt_leaderboards,
+                        max_pages=total_pages_new,
+                        total_maps=len(rebuilt_leaderboards),
+                    )
                 except Exception:  # noqa: BLE001
                     pass
 
+                if progress is not None:
+                    progress(total_pages_new, total_pages_new)
+                print("ScoreSaberリーダーボードのキャッシュ再構築が完了しました。")
+                return rebuilt_leaderboards
+
+            print("ScoreSaberリーダーボードの再構築に失敗したため、既存キャッシュを利用します。")
             if progress is not None:
-                progress(total_pages_new, total_pages_new)
-            print("ScoreSaberリーダーボードのキャッシュ更新が完了しました。")
+                progress(1, 1)
             return leaderboards
     except Exception as exc:  # noqa: BLE001
         log_api_failure(
@@ -343,7 +601,11 @@ def _get_scoresaber_leaderboards_ranked(
 
 def add_leaderboards(leaderboards: dict, existing_lb_ids: dict, data_lbs: list):    
     for lb in data_lbs:
-        lb_id = lb.get("id")
+        if not isinstance(lb, dict):
+            continue
+        lb_id = _normalize_leaderboard_key(lb.get("id"))
+        if lb_id is None:
+            continue
         if lb_id not in existing_lb_ids:
             leaderboards[lb_id] = lb
             existing_lb_ids[lb_id] = lb
@@ -979,263 +1241,11 @@ def _collect_star_stats_from_scoresaber(scoresaber_id: str, session: requests.Se
     if not scoresaber_id:
         return []
 
-    # 1) Ranked マップ一覧から "全譜面" を集計（キャッシュ利用）
-    star_map_count: dict[int, int] = defaultdict(int)
-    leaderboard_star_bucket: dict[str, int] = {}
-
     leaderboards: dict = _get_scoresaber_leaderboards_ranked(session)
     print(f"取得した Ranked リーダーボード件数: {len(leaderboards)}")
-
-    for lb in leaderboards.values():
-        # 念のため ranked フラグを確認
-        if lb.get("ranked") is False:
-            continue
-
-        # Deleted フラグが true の譜面は対象外
-        if lb.get("deleted") is True:
-            continue
-
-        diff = lb.get("difficulty") or {}
-
-        stars_value = lb.get("stars") or diff.get("stars")
-        if stars_value is None:
-            continue
-        try:
-            stars = float(stars_value)
-        except (TypeError, ValueError):
-            continue
-
-        if not math.isfinite(stars) or stars < 0:
-            continue
-
-        # 四捨五入はしない
-        star_bucket = int(stars)
-        if star_bucket < 0:
-            star_bucket = 0
-
-        lb_id_raw = lb.get("id") or diff.get("leaderboardId")
-        if lb_id_raw is None:
-            continue
-        lb_id = str(lb_id_raw)
-
-        leaderboard_star_bucket[lb_id] = star_bucket
-        star_map_count[star_bucket] += 1
-
-    if not star_map_count or not leaderboard_star_bucket:
-        # Ranked マップ情報が取れない場合は何も返せない
-        return []
-
-    # 2) プレイヤースコアから各 Ranked マップのクリア / NF 状態を集計（キャッシュ利用）
-    star_clear_count: dict[int, int] = defaultdict(int)
-    star_nf_count: dict[int, int] = defaultdict(int)
-    star_ss_count: dict[int, int] = defaultdict(int)
-    star_na_count: dict[int, int] = defaultdict(int)
-    star_fc_count: dict[int, int] = defaultdict(int)
-    # ★別の平均精度算出用
-    star_acc_sum: dict[int, float] = defaultdict(float)
-    star_acc_count: dict[int, int] = defaultdict(int)
-    # ★別 PP 合計
-    star_pp_sum: dict[int, float] = defaultdict(float)
-
-    # leaderboardId ごとに「クリア有り / NF有り / SS有り」とベスト精度を記録する
-    class _PerLeaderboardState(TypedDict):
-        star: int
-        clear: bool
-        nf: bool
-        ss: bool
-        na: bool
-        best_acc: Optional[float]
-        has_fc: bool
-        best_pp: Optional[float]
-
-    per_leaderboard: dict[str, _PerLeaderboardState] = {}
-
     scores = _get_scoresaber_player_scores(scoresaber_id, session)
     print(f"取得したスコア件数: {len(scores)}")
-    for item in scores:
-        score_info = item.get("score") if isinstance(item, dict) else None
-        leaderboard = item.get("leaderboard") if isinstance(item, dict) else None
-
-        if leaderboard is None and isinstance(item, dict):
-            print(f"leaderboard 情報が score オブジェクトに無いケース発生。item={item}")
-            leaderboard = item
-        # print(f"処理中 score item: {leaderboard.get('id') if isinstance(leaderboard, dict) else 'N/A'}")
-
-        if not isinstance(leaderboard, dict):
-            print("leaderboard 情報が辞書型でないケース発生。スキップ")
-            continue
-
-        diff = leaderboard.get("difficulty") or {}
-
-        lb_id_raw = leaderboard.get("id") or diff.get("leaderboardId")
-        if lb_id_raw is None:
-            continue
-        lb_id = str(lb_id_raw)
-
-        # ranked_maps から構築した leaderboard_star_bucket を参照する
-        # キャッシュ外のマップ（アンランク or 以前ランクだったが現在アンランク）はスキップ
-        if lb_id not in leaderboard_star_bucket:
-            continue
-
-        star_bucket = leaderboard_star_bucket[lb_id]
-
-        state = per_leaderboard.get(lb_id)
-        if state is None:
-            state = _PerLeaderboardState(star=star_bucket, clear=False, nf=False, ss=False, na=False, best_acc=None, has_fc=False, best_pp=None)
-            per_leaderboard[lb_id] = state
-
-        modifiers = ""
-        if isinstance(score_info, dict):
-            modifiers = str(score_info.get("modifiers") or "")
-
-        mods_upper = modifiers.upper()
-        is_nf = "NF" in mods_upper
-        is_ss = "SS" in mods_upper
-        is_na = "NA" in mods_upper
-
-        if is_nf:
-            state["nf"] = True
-        elif is_ss:
-            state["ss"] = True
-        elif is_na:
-            state["na"] = True
-        else:
-            state["clear"] = True
-
-            if isinstance(score_info, dict) and score_info.get("fullCombo") is True:
-                state["has_fc"] = True
-
-            # NF/SS なしスコアの精度(%)を best_acc として保持
-            acc: Optional[float] = None
-            if isinstance(score_info, dict):
-                # まずスコアオブジェクト単体から推定
-                acc = _extract_scoresaber_accuracy(score_info)
-
-                # ScoreSaber の playerScores では maxScore が leaderboard 側にあるので、
-                # そちらからも再計算を試みる
-                if acc is None and isinstance(leaderboard, dict):
-                    try:
-                        base = score_info.get("baseScore") or score_info.get("score") or score_info.get("modifiedScore")
-                        max_score_lb = leaderboard.get("maxScore")
-                        if base is not None and max_score_lb is not None:
-                            base_f = float(base)
-                            max_f = float(max_score_lb)
-                            if math.isfinite(base_f) and math.isfinite(max_f) and max_f > 0:
-                                acc = max(0.0, min(100.0, base_f / max_f * 100.0))
-                    except (TypeError, ValueError):  # noqa: BLE001
-                        acc = None
-
-            if acc is not None:
-                best = state.get("best_acc")
-                if best is None or acc > best:
-                    state["best_acc"] = acc
-
-            # クリア済みスコアの pp 値を記録（最大値を保持）
-            if isinstance(score_info, dict):
-                try:
-                    pp_val = float(score_info.get("pp") or 0)
-                    if math.isfinite(pp_val) and pp_val > 0:
-                        prev_pp = state.get("best_pp")
-                        if prev_pp is None or pp_val > prev_pp:
-                            state["best_pp"] = pp_val
-                except (TypeError, ValueError):
-                    pass
-
-    # leaderboard ごとの状態から★別のクリア数 / NF数を算出
-    print(f"集計対象 leaderboard 数: {len(per_leaderboard)}")
-    for state in per_leaderboard.values():
-        star_bucket = int(state["star"])
-        has_clear = bool(state["clear"])
-        has_nf = bool(state["nf"])
-        has_ss = bool(state["ss"])
-        has_na = bool(state["na"])
-
-        if has_clear:
-            # print(f"クリア済み leaderboard (星 {star_bucket}){state.get("best_acc")=}")
-            star_clear_count[star_bucket] += 1
-            if state.get("has_fc"):
-                star_fc_count[star_bucket] += 1
-            # クリア済み譜面については best_acc を★別に集計
-            best_acc = state.get("best_acc")
-            if isinstance(best_acc, (int, float)) and math.isfinite(float(best_acc)):
-                star_acc_sum[star_bucket] += float(best_acc)
-                star_acc_count[star_bucket] += 1
-        elif has_nf:
-            # クリアはしていないが NF プレイはある譜面
-            # print(f"NF leaderboard (星 {star_bucket})")
-            star_nf_count[star_bucket] += 1
-        elif has_ss:
-            # クリアはしていないが SS(スローソング)でのプレイはある譜面
-            # print(f"SS leaderboard (星 {star_bucket})")
-            star_ss_count[star_bucket] += 1
-        elif has_na:
-            # NA(ノーアロー)でのプレイはある譜面
-            star_na_count[star_bucket] += 1
-
-    # PP を全スコア降順でソートし、重み 0.965^(rank-1) を掛けて★別に集計
-    cleared_pp_entries: list[tuple[int, float]] = []
-    for state in per_leaderboard.values():
-        if not bool(state["clear"]):
-            continue
-        pp_val = state.get("best_pp")
-        if isinstance(pp_val, (int, float)) and math.isfinite(float(pp_val)) and float(pp_val) > 0:
-            cleared_pp_entries.append((int(state["star"]), float(pp_val)))
-    cleared_pp_entries.sort(key=lambda x: x[1], reverse=True)
-    for rank, (star_bucket, pp_val) in enumerate(cleared_pp_entries, start=1):
-        weight = 0.965 ** (rank - 1)
-        star_pp_sum[star_bucket] += pp_val * weight
-
-    # ★帯内ローカルランクで Solo PP を計算
-    star_pp_solo_sum: dict[int, float] = defaultdict(float)
-    star_pp_list: dict[int, list[float]] = defaultdict(list)
-    for star_bucket, pp_val in cleared_pp_entries:
-        star_pp_list[star_bucket].append(pp_val)
-    for star_bucket, pp_vals in star_pp_list.items():
-        for local_rank, pp_v in enumerate(sorted(pp_vals, reverse=True), start=1):
-            star_pp_solo_sum[star_bucket] += pp_v * (0.965 ** (local_rank - 1))
-
-    # 3) StarClearStat へ変換
-    # キャッシュ内の★帯 + キャッシュ外プレイがある★帯の両方を対象にする
-    all_stars = set(star_map_count.keys()) | set(star_clear_count.keys()) | set(star_nf_count.keys()) | set(star_ss_count.keys()) | set(star_na_count.keys())
-    stats: list[StarClearStat] = []
-
-    for star in sorted(all_stars):
-        map_count = star_map_count.get(star, 0)  # 0 = Ranked キャッシュ外(プレイ記録のみある)
-        clear_count = star_clear_count.get(star, 0)
-        nf_count = star_nf_count.get(star, 0)
-        ss_count = star_ss_count.get(star, 0)
-        na_count = star_na_count.get(star, 0)
-        clear_rate = (clear_count / map_count) if map_count > 0 else 0.0
-
-        avg_acc: float | None
-        cnt = star_acc_count.get(star, 0)
-        if cnt > 0:
-            avg_acc = star_acc_sum.get(star, 0.0) / cnt
-        else:
-            avg_acc = None
-
-        pp_total = star_pp_sum.get(star)
-        pp_contribution = float(pp_total) if pp_total is not None and pp_total > 0 else (0.0 if clear_count > 0 else None)
-        pp_solo_val = star_pp_solo_sum.get(star)
-        pp_solo = float(pp_solo_val) if pp_solo_val is not None and pp_solo_val > 0 else (0.0 if clear_count > 0 else None)
-
-        stats.append(
-            StarClearStat(
-                star=star,
-                map_count=map_count,
-                clear_count=clear_count,
-                nf_count=nf_count,
-                ss_count=ss_count,
-                na_count=na_count,
-                clear_rate=clear_rate,
-                average_acc=avg_acc,
-                fc_count=star_fc_count.get(star, 0),
-                pp_contribution=pp_contribution,
-                pp_solo=pp_solo,
-            )
-        )
-
-    return stats
+    return _build_scoresaber_star_stats(leaderboards, scores)
 
 def _extract_scoresaber_accuracy(score_info: dict) -> Optional[float]:
     """ScoreSaber のスコア情報から精度(%)を推定して返す。
