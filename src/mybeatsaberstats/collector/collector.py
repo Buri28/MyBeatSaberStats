@@ -27,6 +27,7 @@ from .beatleader import (
     _get_beatleader_player_scores as _bl_get_beatleader_player_scores,
     _get_beatleader_leaderboards_ranked as _bl_get_beatleader_leaderboards_ranked,
     collect_beatleader_star_stats as _bl_collect_beatleader_star_stats,
+    collect_beatleader_star_stats_from_cache as _bl_collect_beatleader_star_stats_from_cache,
 )
 from ..beatleader import BeatLeaderPlayer, fetch_player as fetch_bl_player, fetch_players_ranking
 from .map_store import MapStore
@@ -924,6 +925,12 @@ def collect_beatleader_star_stats(
         retry_failed_pages_only=retry_failed_pages_only,
         warning_callback=warning_callback,
     )
+
+
+def collect_beatleader_star_stats_from_cache(beatleader_id: str) -> list[StarClearStat]:
+    """現在の BeatLeader キャッシュだけを使って★別統計を再計算する。"""
+
+    return _bl_collect_beatleader_star_stats_from_cache(beatleader_id)
 #     except Exception:  # noqa: BLE001
 #         return None
 
