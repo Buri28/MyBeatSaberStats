@@ -60,6 +60,7 @@ from .settings_store import (
 )
 from .collector.collector import (
     collect_beatleader_star_stats,
+    collect_beatleader_star_stats_from_cache,
     create_snapshot_for_steam_id,
     ensure_global_rank_caches,
     SnapshotOptions,
@@ -2937,7 +2938,9 @@ class PlayerWindow(QMainWindow):
         # 古いスナップショットでは BeatLeader ★統計が未保存のことがあるが、
         # ここで同期再取得すると起動時やプレイヤー切り替え時にネットワーク待ちで固まる。
         # 表示は保存済みデータだけを使い、未保存なら空表示にとどめる。
-        bl_stats = list(snap.beatleader_star_stats or [])
+        bl_stats = collect_beatleader_star_stats_from_cache(bl_id) if bl_id else []
+        if not bl_stats:
+            bl_stats = list(snap.beatleader_star_stats or [])
         total_ranked_maps = sum(s.map_count for s in stats)
 
         # ScoreSaber / BeatLeader で対になる指標が一目で分かるよう、

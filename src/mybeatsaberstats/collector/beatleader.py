@@ -180,6 +180,321 @@ def _extract_leaderboard_timeset_from_score_item(item: dict) -> Optional[int]:
         return None
 
 
+def _load_cached_ranked_leaderboards(path: Path) -> list[dict]:
+    """BeatLeader ranked maps cache から leaderboard 配列を復元する。"""
+
+    pages = _load_cached_pages(path) or []
+    leaderboards: list[dict] = []
+    for page in pages:
+        if not isinstance(page, dict):
+            continue
+        data = page.get("data") or {}
+        items = data.get("data") or data.get("leaderboards") or []
+        if isinstance(items, list):
+            leaderboards.extend(lb for lb in items if isinstance(lb, dict))
+    return leaderboards
+
+
+def _build_beatleader_star_stats(
+    leaderboards: list[dict],
+    scores: list[dict],
+    progress: Optional[Callable[[str, float], None]] = None,
+) -> list[StarClearStat]:
+    """BeatLeader の ranked maps + player scores から★別統計を組み立てる。"""
+
+    def _step(message: str, fraction: float) -> None:
+        if progress is not None:
+            progress(message, max(0.0, min(1.0, fraction)))
+
+    star_map_count: dict[int, int] = defaultdict(int)
+    leaderboard_star_bucket: dict[str, int] = {}
+
+    for lb in leaderboards:
+        if not isinstance(lb, dict):
+            continue
+
+        diff = lb.get("difficulty") or {}
+
+        try:
+            status_val = int(diff.get("status", 0))
+        except (TypeError, ValueError):
+            status_val = 0
+        if status_val != 3:
+            continue
+
+        stars_value = diff.get("stars") or diff.get("difficultyRating")
+        if stars_value is None:
+            continue
+        try:
+            stars = float(stars_value)
+        except (TypeError, ValueError):
+            continue
+
+        if not (stars >= 0):
+            continue
+
+        star_bucket = int(stars)
+        if star_bucket < 0:
+            star_bucket = 0
+
+        lb_id_raw = lb.get("id") or diff.get("leaderboardId") or diff.get("id")
+        if lb_id_raw is None:
+            continue
+        lb_id = str(lb_id_raw)
+
+        leaderboard_star_bucket[lb_id] = star_bucket
+        star_map_count[star_bucket] += 1
+
+    if not star_map_count or not leaderboard_star_bucket:
+        return []
+
+    star_clear_count: dict[int, int] = defaultdict(int)
+    star_nf_count: dict[int, int] = defaultdict(int)
+    star_ss_count: dict[int, int] = defaultdict(int)
+    star_na_count: dict[int, int] = defaultdict(int)
+    star_acc_sum: dict[int, float] = defaultdict(float)
+    star_acc_count: dict[int, int] = defaultdict(int)
+    star_acc_left_sum: dict[int, float] = defaultdict(float)
+    star_acc_left_count: dict[int, int] = defaultdict(int)
+    star_acc_right_sum: dict[int, float] = defaultdict(float)
+    star_acc_right_count: dict[int, int] = defaultdict(int)
+    star_fc_count_dict: dict[int, int] = defaultdict(int)
+    star_pp_sum: dict[int, float] = defaultdict(float)
+
+    per_leaderboard: dict[str, dict] = {}
+
+    score_count = len(scores)
+    for idx, item in enumerate(scores, start=1):
+        leaderboard = item.get("leaderboard") if isinstance(item, dict) else None
+        if leaderboard is None and isinstance(item, dict):
+            leaderboard = item
+
+        if not isinstance(leaderboard, dict):
+            continue
+
+        diff = leaderboard.get("difficulty") or {}
+
+        lb_id_raw = leaderboard.get("id") or diff.get("leaderboardId") or diff.get("id")
+        if lb_id_raw is None:
+            continue
+        lb_id = str(lb_id_raw)
+
+        if lb_id not in leaderboard_star_bucket:
+            # Player 画面 / Playlist 画面の件数は current ranked maps cache 基準で揃える。
+            # 現在の ranked cache から外れた過去スコアは★帯件数へ含めない。
+            continue
+
+        star_bucket = leaderboard_star_bucket[lb_id]
+
+        state = per_leaderboard.get(lb_id)
+        if state is None:
+            state = {
+                "star": star_bucket,
+                "clear": False,
+                "nf": False,
+                "ss": False,
+                "na": False,
+                "best_acc": None,
+                "best_acc_left": None,
+                "best_acc_right": None,
+                "has_fc": False,
+                "best_pp": None,
+            }
+            per_leaderboard[lb_id] = state
+
+        score_info = item.get("score") if isinstance(item, dict) else None
+        if not isinstance(score_info, dict):
+            score_info = item if isinstance(item, dict) else None
+
+        modifiers = ""
+        if isinstance(score_info, dict):
+            modifiers = str(score_info.get("modifiers") or "")
+
+        mods_upper = modifiers.upper()
+        is_nf = "NF" in mods_upper
+        is_ss = "SS" in mods_upper
+        is_na = "NA" in mods_upper
+
+        if is_nf:
+            state["nf"] = True
+        elif is_na:
+            state["na"] = True
+        elif is_ss:
+            state["ss"] = True
+            if isinstance(score_info, dict):
+                try:
+                    pp_val = float(score_info.get("pp") or 0)
+                    if math.isfinite(pp_val) and pp_val > 0:
+                        prev_pp = state.get("best_pp")
+                        if prev_pp is None or pp_val > prev_pp:
+                            state["best_pp"] = pp_val
+                except (TypeError, ValueError):
+                    pass
+        else:
+            state["clear"] = True
+
+            if isinstance(score_info, dict) and score_info.get("fullCombo") is True:
+                state["has_fc"] = True
+
+            acc = _extract_beatleader_accuracy(score_info) if isinstance(score_info, dict) else None
+            if acc is not None:
+                best = state.get("best_acc")
+                if best is None or acc > best:
+                    state["best_acc"] = acc
+                    if isinstance(score_info, dict):
+                        al = score_info.get("accLeft")
+                        ar = score_info.get("accRight")
+                        state["best_acc_left"] = float(al) if al is not None else None
+                        state["best_acc_right"] = float(ar) if ar is not None else None
+
+            if isinstance(score_info, dict):
+                try:
+                    pp_val = float(score_info.get("pp") or 0)
+                    if math.isfinite(pp_val) and pp_val > 0:
+                        prev_pp = state.get("best_pp")
+                        if prev_pp is None or pp_val > prev_pp:
+                            state["best_pp"] = pp_val
+                except (TypeError, ValueError):
+                    pass
+
+        if score_count > 0 and (idx == 1 or idx == score_count or idx % 200 == 0):
+            _step(
+                f"Collecting BeatLeader star stats: aggregating {idx:,}/{score_count:,}",
+                0.90 + 0.10 * (idx / score_count),
+            )
+
+    for state in per_leaderboard.values():
+        star_bucket = int(state["star"])
+        has_clear = bool(state["clear"])
+        has_nf = bool(state["nf"])
+        has_ss = bool(state["ss"])
+
+        if has_clear:
+            star_clear_count[star_bucket] += 1
+            if bool(state.get("has_fc")):
+                star_fc_count_dict[star_bucket] += 1
+            best_acc = state.get("best_acc")
+            if isinstance(best_acc, (int, float)) and math.isfinite(float(best_acc)):
+                star_acc_sum[star_bucket] += float(best_acc)
+                star_acc_count[star_bucket] += 1
+                best_left = state.get("best_acc_left")
+                best_right = state.get("best_acc_right")
+                best_acc_val = float(best_acc)
+                if (
+                    best_left is not None
+                    and best_right is not None
+                    and math.isfinite(float(best_left))
+                    and math.isfinite(float(best_right))
+                ):
+                    al = float(best_left)
+                    ar = float(best_right)
+                    if al + ar > 0:
+                        l_val = 2.0 * best_acc_val * al / (al + ar)
+                        r_val = 2.0 * best_acc_val * ar / (al + ar)
+                        if math.isfinite(l_val) and math.isfinite(r_val):
+                            star_acc_left_sum[star_bucket] += l_val
+                            star_acc_right_sum[star_bucket] += r_val
+                            star_acc_left_count[star_bucket] += 1
+                            star_acc_right_count[star_bucket] += 1
+        elif has_nf:
+            star_nf_count[star_bucket] += 1
+        elif has_ss:
+            star_ss_count[star_bucket] += 1
+        elif bool(state.get("na")):
+            star_na_count[star_bucket] += 1
+
+    cleared_pp_entries_bl: list[tuple[int, float]] = []
+    for state in per_leaderboard.values():
+        if not (bool(state["clear"]) or bool(state["ss"])):
+            continue
+        pp_val = state.get("best_pp")
+        if isinstance(pp_val, (int, float)) and math.isfinite(float(pp_val)) and float(pp_val) > 0:
+            cleared_pp_entries_bl.append((int(state["star"]), float(pp_val)))
+    cleared_pp_entries_bl.sort(key=lambda x: x[1], reverse=True)
+    for rank, (star_bucket, pp_val) in enumerate(cleared_pp_entries_bl, start=1):
+        weight = 0.965 ** (rank - 1)
+        star_pp_sum[star_bucket] += pp_val * weight
+
+    star_pp_solo_sum: dict[int, float] = defaultdict(float)
+    star_pp_list_bl: dict[int, list[float]] = defaultdict(list)
+    for star_bucket, pp_val in cleared_pp_entries_bl:
+        star_pp_list_bl[star_bucket].append(pp_val)
+    for star_bucket, pp_vals in star_pp_list_bl.items():
+        for local_rank, pp_v in enumerate(sorted(pp_vals, reverse=True), start=1):
+            star_pp_solo_sum[star_bucket] += pp_v * (0.965 ** (local_rank - 1))
+
+    all_stars_bl = (
+        set(star_map_count.keys())
+        | set(star_clear_count.keys())
+        | set(star_nf_count.keys())
+        | set(star_ss_count.keys())
+        | set(star_na_count.keys())
+    )
+    stats: list[StarClearStat] = []
+    for star in sorted(all_stars_bl):
+        map_count = star_map_count.get(star, 0)
+        cleared = star_clear_count.get(star, 0)
+        nf = star_nf_count.get(star, 0)
+        ss = star_ss_count.get(star, 0)
+        na = star_na_count.get(star, 0)
+        acc_sum = star_acc_sum.get(star, 0.0)
+        acc_count = star_acc_count.get(star, 0)
+
+        avg_acc = None
+        if acc_count > 0 and math.isfinite(float(acc_sum)):
+            avg_acc = acc_sum / acc_count
+
+        avg_acc_left = None
+        left_cnt = star_acc_left_count.get(star, 0)
+        if left_cnt > 0:
+            avg_acc_left = star_acc_left_sum.get(star, 0.0) / left_cnt
+
+        avg_acc_right = None
+        right_cnt = star_acc_right_count.get(star, 0)
+        if right_cnt > 0:
+            avg_acc_right = star_acc_right_sum.get(star, 0.0) / right_cnt
+
+        fc_count = star_fc_count_dict.get(star, 0)
+        clear_rate = (cleared / map_count) if map_count > 0 else 0.0
+
+        pp_total = star_pp_sum.get(star)
+        pp_contribution = float(pp_total) if pp_total is not None and pp_total > 0 else (0.0 if cleared > 0 else None)
+        pp_solo_val = star_pp_solo_sum.get(star)
+        pp_solo = float(pp_solo_val) if pp_solo_val is not None and pp_solo_val > 0 else (0.0 if cleared > 0 else None)
+
+        stats.append(StarClearStat(
+            star=star,
+            map_count=map_count,
+            clear_count=cleared,
+            nf_count=nf,
+            ss_count=ss,
+            na_count=na,
+            clear_rate=clear_rate,
+            average_acc=avg_acc,
+            fc_count=fc_count,
+            avg_acc_left=avg_acc_left,
+            avg_acc_right=avg_acc_right,
+            pp_contribution=pp_contribution,
+            pp_solo=pp_solo,
+        ))
+
+    return stats
+
+
+def collect_beatleader_star_stats_from_cache(beatleader_id: str) -> list[StarClearStat]:
+    """現在の BeatLeader キャッシュだけを使って★別統計を再計算する。"""
+
+    if not beatleader_id:
+        return []
+
+    ranked_cache_path = CACHE_DIR / "beatleader_ranked_maps.json"
+    score_cache_path = CACHE_DIR / f"beatleader_player_scores_{beatleader_id}.json"
+
+    leaderboards = _load_cached_ranked_leaderboards(ranked_cache_path)
+    scores_dict = _load_cached_player_scores(score_cache_path) or {}
+    return _build_beatleader_star_stats(leaderboards, list(scores_dict.values()))
+
+
 def _get_beatleader_leaderboards_ranked(
     session: requests.Session,
     progress: Optional[Callable[[int, Optional[int]], None]] = None,
@@ -915,48 +1230,6 @@ def collect_beatleader_star_stats(
     if not leaderboards:
         return []
 
-    star_map_count: dict[int, int] = defaultdict(int)
-    leaderboard_star_bucket: dict[str, int] = {}
-
-    for lb in leaderboards:
-        if not isinstance(lb, dict):
-            continue
-
-        diff = lb.get("difficulty") or {}
-
-        try:
-            status_val = int(diff.get("status", 0))
-        except (TypeError, ValueError):
-            status_val = 0
-        if status_val != 3:
-            continue
-
-        stars_value = diff.get("stars") or diff.get("difficultyRating")
-        if stars_value is None:
-            continue
-        try:
-            stars = float(stars_value)
-        except (TypeError, ValueError):
-            continue
-
-        if not (stars >= 0):
-            continue
-
-        star_bucket = int(stars)
-        if star_bucket < 0:
-            star_bucket = 0
-
-        lb_id_raw = lb.get("id") or diff.get("leaderboardId") or diff.get("id")
-        if lb_id_raw is None:
-            continue
-        lb_id = str(lb_id_raw)
-
-        leaderboard_star_bucket[lb_id] = star_bucket
-        star_map_count[star_bucket] += 1
-
-    if not star_map_count or not leaderboard_star_bucket:
-        return []
-
     _step("Collecting BeatLeader star stats: scores...", 0.45)
     scores = _get_beatleader_player_scores(
         beatleader_id,
@@ -965,246 +1238,6 @@ def collect_beatleader_star_stats(
         retry_failed_pages_only=retry_failed_pages_only,
         warning_callback=warning_callback,
     )
-
-    star_clear_count: dict[int, int] = defaultdict(int)
-    star_nf_count: dict[int, int] = defaultdict(int)
-    star_ss_count: dict[int, int] = defaultdict(int)
-    star_na_count: dict[int, int] = defaultdict(int)
-    star_acc_sum: dict[int, float] = defaultdict(float)
-    star_acc_count: dict[int, int] = defaultdict(int)
-    star_acc_left_sum: dict[int, float] = defaultdict(float)
-    star_acc_left_count: dict[int, int] = defaultdict(int)
-    star_acc_right_sum: dict[int, float] = defaultdict(float)
-    star_acc_right_count: dict[int, int] = defaultdict(int)
-    star_fc_count_dict: dict[int, int] = defaultdict(int)
-    # ★別 PP 合計
-    star_pp_sum: dict[int, float] = defaultdict(float)
-
-    per_leaderboard: dict[str, dict] = {}
-
-    score_count = len(scores)
-    for idx, item in enumerate(scores, start=1):
-        leaderboard = item.get("leaderboard") if isinstance(item, dict) else None
-        if leaderboard is None and isinstance(item, dict):
-            leaderboard = item
-
-        if not isinstance(leaderboard, dict):
-            continue
-
-        diff = leaderboard.get("difficulty") or {}
-
-        lb_id_raw = leaderboard.get("id") or diff.get("leaderboardId") or diff.get("id")
-        if lb_id_raw is None:
-            continue
-        lb_id = str(lb_id_raw)
-
-        if lb_id not in leaderboard_star_bucket:
-            # キャッシュ外のマップ: pp > 0 のスコアのみ対象（API の rankedPlayCount 定義と合わせる）
-            try:
-                pp_pre = float(item.get("pp") or 0)
-            except (TypeError, ValueError):
-                pp_pre = 0.0
-            if not (math.isfinite(pp_pre) and pp_pre > 0):
-                continue
-            try:
-                stars_pre = float(diff.get("stars") or diff.get("difficultyRating") or 0)
-            except (TypeError, ValueError):
-                stars_pre = 0.0
-            if not (math.isfinite(stars_pre) and stars_pre > 0):
-                continue
-            star_bucket_pre = max(0, int(stars_pre))
-            leaderboard_star_bucket[lb_id] = star_bucket_pre
-            # star_map_count には加算しない（Maps 列はキャッシュ内の Ranked 譜面数のみ）
-
-        star_bucket = leaderboard_star_bucket[lb_id]
-
-        state = per_leaderboard.get(lb_id)
-        if state is None:
-            state = {"star": star_bucket, "clear": False, "nf": False, "ss": False, "na": False, "best_acc": None, "best_acc_left": None, "best_acc_right": None, "has_fc": False, "best_pp": None}
-            per_leaderboard[lb_id] = state
-
-        score_info = item.get("score") if isinstance(item, dict) else None
-        if not isinstance(score_info, dict):
-            score_info = item if isinstance(item, dict) else None
-
-        modifiers = ""
-        if isinstance(score_info, dict):
-            modifiers = str(score_info.get("modifiers") or "")
-
-        mods_upper = modifiers.upper()
-        is_nf = "NF" in mods_upper
-        is_ss = "SS" in mods_upper
-        is_na = "NA" in mods_upper
-
-        if is_nf:
-            state["nf"] = True
-        elif is_na:
-            state["na"] = True
-        elif is_ss:
-            state["ss"] = True
-            # BeatLeader では SS（Slower Song）も PP 対象（score.pp に MOD 補正済みで反映）
-            if isinstance(score_info, dict):
-                try:
-                    pp_val = float(score_info.get("pp") or 0)
-                    if math.isfinite(pp_val) and pp_val > 0:
-                        prev_pp = state.get("best_pp")
-                        if prev_pp is None or pp_val > prev_pp:
-                            state["best_pp"] = pp_val
-                except (TypeError, ValueError):
-                    pass
-        else:
-            state["clear"] = True
-
-            if isinstance(score_info, dict) and score_info.get("fullCombo") is True:
-                state["has_fc"] = True
-
-            acc = _extract_beatleader_accuracy(score_info) if isinstance(score_info, dict) else None
-            if acc is not None:
-                best = state.get("best_acc")
-                if best is None or acc > best:
-                    state["best_acc"] = acc
-                    if isinstance(score_info, dict):
-                        al = score_info.get("accLeft")
-                        ar = score_info.get("accRight")
-                        state["best_acc_left"] = float(al) if al is not None else None
-                        state["best_acc_right"] = float(ar) if ar is not None else None
-
-            # クリア済みスコアの pp 値を記録（最大値を保持）
-            if isinstance(score_info, dict):
-                try:
-                    pp_val = float(score_info.get("pp") or 0)
-                    if math.isfinite(pp_val) and pp_val > 0:
-                        prev_pp = state.get("best_pp")
-                        if prev_pp is None or pp_val > prev_pp:
-                            state["best_pp"] = pp_val
-                except (TypeError, ValueError):
-                    pass
-
-        if score_count > 0 and (idx == 1 or idx == score_count or idx % 200 == 0):
-            _step(
-                f"Collecting BeatLeader star stats: aggregating {idx:,}/{score_count:,}",
-                0.90 + 0.10 * (idx / score_count),
-            )
-
-    for state in per_leaderboard.values():
-        star_bucket = int(state["star"])
-        has_clear = bool(state["clear"])
-        has_nf = bool(state["nf"])
-        has_ss = bool(state["ss"])
-
-        if has_clear:
-            star_clear_count[star_bucket] += 1
-            if bool(state.get("has_fc")):
-                star_fc_count_dict[star_bucket] += 1
-            best_acc = state.get("best_acc")
-            if isinstance(best_acc, (int, float)) and math.isfinite(float(best_acc)):
-                star_acc_sum[star_bucket] += float(best_acc)
-                star_acc_count[star_bucket] += 1
-                best_left = state.get("best_acc_left")
-                best_right = state.get("best_acc_right")
-                best_acc_val = float(best_acc)
-                # L/R acc の計算: 2 * acc * accL / (accL + accR)
-                # accLeft/accRight はヒットしたノーツのみの平均点（ミス除外）なので、
-                # 単純に /115 * acc とするとミスが二重にペナルティされる。
-                # ノーツが L/R 均等と仮定すると:
-                #   acc = hit_rate * (accL + accR) / (2*115) * 100
-                #   L_acc = hit_rate * accL / 115 * 100
-                #         = 2 * acc * accL / (accL + accR)
-                # これにより avg(L_acc, R_acc) = acc が成立する。
-                if (best_left is not None and best_right is not None
-                        and math.isfinite(float(best_left))
-                        and math.isfinite(float(best_right))):
-                    al = float(best_left)
-                    ar = float(best_right)
-                    if al + ar > 0:
-                        l_val = 2.0 * best_acc_val * al / (al + ar)
-                        r_val = 2.0 * best_acc_val * ar / (al + ar)
-                        if math.isfinite(l_val) and math.isfinite(r_val):
-                            star_acc_left_sum[star_bucket] += l_val
-                            star_acc_right_sum[star_bucket] += r_val
-                            star_acc_left_count[star_bucket] += 1
-                            star_acc_right_count[star_bucket] += 1
-        elif has_nf:
-            star_nf_count[star_bucket] += 1
-        elif has_ss:
-            star_ss_count[star_bucket] += 1
-        elif bool(state.get("na")):
-            star_na_count[star_bucket] += 1
-
-    # PP を全スコア降順でソートし、重み 0.965^(rank-1) を掛けて★別に集計
-    cleared_pp_entries_bl: list[tuple[int, float]] = []
-    for state in per_leaderboard.values():
-        # SS スコアも BeatLeader では PP 対象なので clear と同様に含める
-        if not (bool(state["clear"]) or bool(state["ss"])):
-            continue
-        pp_val = state.get("best_pp")
-        if isinstance(pp_val, (int, float)) and math.isfinite(float(pp_val)) and float(pp_val) > 0:
-            cleared_pp_entries_bl.append((int(state["star"]), float(pp_val)))
-    cleared_pp_entries_bl.sort(key=lambda x: x[1], reverse=True)
-    for rank, (star_bucket, pp_val) in enumerate(cleared_pp_entries_bl, start=1):
-        weight = 0.965 ** (rank - 1)
-        star_pp_sum[star_bucket] += pp_val * weight
-
-    # ★帯内ローカルランクで Solo PP を計算
-    star_pp_solo_sum: dict[int, float] = defaultdict(float)
-    star_pp_list_bl: dict[int, list[float]] = defaultdict(list)
-    for star_bucket, pp_val in cleared_pp_entries_bl:
-        star_pp_list_bl[star_bucket].append(pp_val)
-    for star_bucket, pp_vals in star_pp_list_bl.items():
-        for local_rank, pp_v in enumerate(sorted(pp_vals, reverse=True), start=1):
-            star_pp_solo_sum[star_bucket] += pp_v * (0.965 ** (local_rank - 1))
-
-    # キャッシュ内の★帯 + キャッシュ外プレイがある★帯の両方を対象にする
-    all_stars_bl = set(star_map_count.keys()) | set(star_clear_count.keys()) | set(star_nf_count.keys()) | set(star_ss_count.keys()) | set(star_na_count.keys())
-    stats: list[StarClearStat] = []
-    for star in sorted(all_stars_bl):
-        map_count = star_map_count.get(star, 0)  # 0 = Ranked キャッシュ外(プレイ記録のみある)
-        cleared = star_clear_count.get(star, 0)
-        nf = star_nf_count.get(star, 0)
-        ss = star_ss_count.get(star, 0)
-        na = star_na_count.get(star, 0)
-        acc_sum = star_acc_sum.get(star, 0.0)
-        acc_count = star_acc_count.get(star, 0)
-
-        avg_acc = None
-        if acc_count > 0 and math.isfinite(float(acc_sum)):
-            avg_acc = acc_sum / acc_count
-
-        avg_acc_left = None
-        left_cnt = star_acc_left_count.get(star, 0)
-        if left_cnt > 0:
-            avg_acc_left = star_acc_left_sum.get(star, 0.0) / left_cnt
-
-        avg_acc_right = None
-        right_cnt = star_acc_right_count.get(star, 0)
-        if right_cnt > 0:
-            avg_acc_right = star_acc_right_sum.get(star, 0.0) / right_cnt
-
-        fc_count = star_fc_count_dict.get(star, 0)
-
-        # クリア率 (0.0-1.0): 全 Ranked 譜面に対する通常クリアの割合
-        clear_rate = (cleared / map_count) if map_count > 0 else 0.0
-
-        pp_total = star_pp_sum.get(star)
-        pp_contribution = float(pp_total) if pp_total is not None and pp_total > 0 else (0.0 if cleared > 0 else None)
-        pp_solo_val = star_pp_solo_sum.get(star)
-        pp_solo = float(pp_solo_val) if pp_solo_val is not None and pp_solo_val > 0 else (0.0 if cleared > 0 else None)
-
-        stats.append(StarClearStat(
-            star=star,
-            map_count=map_count,
-            clear_count=cleared,
-            nf_count=nf,
-            ss_count=ss,
-            na_count=na,
-            clear_rate=clear_rate,
-            average_acc=avg_acc,
-            fc_count=fc_count,
-            avg_acc_left=avg_acc_left,
-            avg_acc_right=avg_acc_right,
-            pp_contribution=pp_contribution,
-            pp_solo=pp_solo,
-        ))
-
+    stats = _build_beatleader_star_stats(leaderboards, scores, progress=progress)
     _step("Collecting BeatLeader star stats: done", 1.0)
     return stats
