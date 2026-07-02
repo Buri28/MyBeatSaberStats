@@ -2063,8 +2063,11 @@ def load_accsaber_reloaded_maps(
         if on_progress:
             on_progress(page, total, f"Fetching AccSaber Reloaded maps... {page}/{total}")
 
-    from .accsaber_reloaded import fetch_all_maps_full, load_all_maps_from_cache as _load_rl_cache
-    all_maps = _load_rl_cache()
+    from .accsaber_reloaded import (
+        fetch_all_maps_full,
+        load_all_maps_with_recent_batch_fallback as _load_rl_cache,
+    )
+    all_maps = _load_rl_cache(session=session)
     if all_maps is None:
         all_maps = fetch_all_maps_full(session=session, on_progress=_rl_progress)
     elif on_progress:

@@ -1,3 +1,9 @@
 {
-    "python.defaultInterpreterPath": "${workspaceFolder}/.venv/Scripts/python.exe"
+    "python.defaultInterpreterPath": "${workspaceFolder}/.venv/Scripts/python.exe",
+    "chat.tools.terminal.autoApprove": {
+        "/^\\$code = @'\nfrom pathlib import Path\ntext = Path\\('tmp_accsaber_main\\.js'\\)\\.read_text\\(encoding='utf-8'\\)\nfor needle in \\['async function Mi\\(', 'function oc\\(', 'async function ic\\(', 'function Vt\\('\\]:\n    idx = text\\.find\\(needle\\)\n    print\\('NEEDLE', needle, idx\\)\n    if idx >= 0:\n        print\\(text\\[idx:idx\\+3500\\]\\)\n        print\\('---'\\)\n'@; \\.\\\\\\.venv\\\\Scripts\\\\python\\.exe -c \\$code$/": {
+            "approve": true,
+            "matchCommandLine": true
+        }
+    }
 }
