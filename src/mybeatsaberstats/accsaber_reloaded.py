@@ -92,17 +92,26 @@ def _count_non_pending_map_counts(all_maps: List[Dict]) -> Dict[str, int]:
 
 def _load_map_counts_file_cache() -> Dict[str, Dict]:
     """ファイルキャッシュから前回の総譜面数を読み込む。"""
+    payload = _load_map_counts_cache_payload()
+    if not isinstance(payload, dict):
+        return {}
+
+    result: Dict[str, Dict] = {}
+    for k in ("true", "standard", "tech"):
+        entry = payload.get(k)
+        if isinstance(entry, dict):
+            count = entry.get("count")
+            if isinstance(count, (int, float)) and count > 0:
+                result[k] = {"count": int(count)}
+    return result
+
+
+def _load_map_counts_cache_payload() -> Dict:
+    """総譜面数キャッシュの生データを返す。"""
     try:
         data = json.loads(_MAP_COUNTS_CACHE_FILE.read_text(encoding="utf-8"))
         if isinstance(data, dict):
-            result: Dict[str, Dict] = {}
-            for k in ("true", "standard", "tech"):
-                entry = data.get(k)
-                if isinstance(entry, dict):
-                    count = entry.get("count")
-                    if isinstance(count, (int, float)) and count > 0:
-                        result[k] = {"count": int(count)}
-            return result
+            return data
     except Exception:  # noqa: BLE001
         pass
     return {}
@@ -120,6 +129,289 @@ def _save_map_counts_file_cache(per_cat: Dict[str, Dict]) -> None:
         )
     except Exception:  # noqa: BLE001
         pass
+
+
+def _save_map_counts_from_all_maps(all_maps: List[Dict]) -> None:
+    """全マップ一覧から総譜面数キャッシュを同期更新する。"""
+    raw_counts = {
+        k: v
+        for k, v in _count_non_pending_map_counts(all_maps).items()
+        if k != "overall"
+    }
+    per_cat: Dict[str, Dict] = {
+        cat: {"count": cnt}
+        for cat, cnt in raw_counts.items()
+        if cnt > 0
+    }
+    if per_cat:
+        _save_map_counts_file_cache(per_cat)
+
+
+def _load_all_maps_cache_payload() -> Dict:
+    """全マップキャッシュの生データを返す。"""
+    try:
+        data = json.loads(_ALL_MAPS_CACHE_FILE.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            return data
+    except Exception:  # noqa: BLE001
+        pass
+    return {}
+
+
+def _save_all_maps_cache(all_maps: List[Dict], fetched_at: Optional[str] = None) -> None:
+    """全マップキャッシュを保存し、総譜面数キャッシュも同期する。"""
+    now_z = fetched_at or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    data = {"fetched_at": now_z, "maps": all_maps}
+    _ALL_MAPS_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _ALL_MAPS_CACHE_FILE.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    _save_map_counts_from_all_maps(all_maps)
+
+
+def _parse_utc_timestamp(value: object) -> Optional[datetime]:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
+        return datetime.fromisoformat(normalized).astimezone(timezone.utc)
+    except ValueError:
+        return None
+
+
+def _count_non_pending_batch_difficulties(difficulties: List[Dict]) -> Dict[str, int]:
+    """batch difficulties から pending を除いたカテゴリ別譜面数を返す。"""
+    uuid_to_cat: Dict[str, str] = {v: k for k, v in _MAP_COUNT_CATEGORY_IDS.items()}
+    counts: Dict[str, int] = {cat: 0 for cat in _MAP_COUNT_CATEGORY_IDS}
+
+    for diff in difficulties:
+        if not isinstance(diff, dict):
+            continue
+        if not is_active_difficulty(diff):
+            continue
+        if is_pending_difficulty(diff):
+            continue
+        cat = uuid_to_cat.get(str(diff.get("categoryId") or ""))
+        if cat:
+            counts[cat] += 1
+    return counts
+
+
+def _fetch_batch_count_deltas_since(
+    since: datetime,
+    session: requests.Session,
+) -> Dict[str, int]:
+    """指定日時以後に公開された batch の譜面数差分を返す。"""
+    counts: Dict[str, int] = {cat: 0 for cat in _MAP_COUNT_CATEGORY_IDS}
+    page = 0
+    page_size = 20
+
+    while True:
+        resp = session.get(
+            f"{BASE_URL}/batches",
+            params={"page": page, "size": page_size},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        content = data.get("content", [])
+        if not isinstance(content, list) or not content:
+            break
+
+        reached_older_batch = False
+        for batch in content:
+            if not isinstance(batch, dict):
+                continue
+            released_at = _parse_utc_timestamp(batch.get("releasedAt") or batch.get("createdAt"))
+            if released_at is not None and released_at <= since:
+                reached_older_batch = True
+                continue
+
+            diff_counts = _count_non_pending_batch_difficulties(batch.get("difficulties", []))
+            for cat, value in diff_counts.items():
+                counts[cat] += value
+
+        if reached_older_batch or data.get("last", True):
+            break
+        page += 1
+
+    return counts
+
+
+def _iter_recent_batches_since(
+    since: datetime,
+    session: requests.Session,
+) -> List[Dict]:
+    """指定日時以後に公開された batch 一覧を新しい順で返す。"""
+    batches: List[Dict] = []
+    page = 0
+    page_size = 20
+
+    while True:
+        resp = session.get(
+            f"{BASE_URL}/batches",
+            params={"page": page, "size": page_size},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        content = data.get("content", [])
+        if not isinstance(content, list) or not content:
+            break
+
+        reached_older_batch = False
+        for batch in content:
+            if not isinstance(batch, dict):
+                continue
+            released_at = _parse_utc_timestamp(batch.get("releasedAt") or batch.get("createdAt"))
+            if released_at is not None and released_at <= since:
+                reached_older_batch = True
+                continue
+            batches.append(batch)
+
+        if reached_older_batch or data.get("last", True):
+            break
+        page += 1
+
+    return batches
+
+
+def _fetch_map_by_code(
+    beatsaver_code: str,
+    session: requests.Session,
+) -> Optional[Dict]:
+    """map by code endpoint から full map レコードを取得する。"""
+    code = str(beatsaver_code or "").strip()
+    if not code:
+        return None
+    resp = session.get(f"{BASE_URL}/maps/by-code/{code}", timeout=30)
+    resp.raise_for_status()
+    data = resp.json()
+    return data if isinstance(data, dict) else None
+
+
+def _merge_all_maps_with_recent_batches(
+    session: requests.Session,
+) -> Optional[List[Dict]]:
+    """全マップキャッシュを recent batch で前進させる。"""
+    payload = _load_all_maps_cache_payload()
+    if not isinstance(payload, dict):
+        return None
+
+    cached_maps = payload.get("maps")
+    fetched_at = _parse_utc_timestamp(payload.get("fetched_at"))
+    if not isinstance(cached_maps, list) or fetched_at is None:
+        return None
+
+    recent_batches = _iter_recent_batches_since(fetched_at, session)
+    if not recent_batches:
+        return cached_maps
+
+    recent_codes: List[str] = []
+    seen_codes: set[str] = set()
+    for batch in recent_batches:
+        for diff in batch.get("difficulties", []):
+            if not isinstance(diff, dict):
+                continue
+            code = str(diff.get("beatsaverCode") or "").strip()
+            if not code or code in seen_codes:
+                continue
+            seen_codes.add(code)
+            recent_codes.append(code)
+
+    if not recent_codes:
+        return cached_maps
+
+    merged_by_map_id: Dict[str, Dict] = {}
+    ordered_keys: List[str] = []
+    for song in cached_maps:
+        if not isinstance(song, dict):
+            continue
+        key = str(song.get("id") or song.get("mapId") or song.get("beatsaverCode") or "").strip()
+        if not key:
+            continue
+        if key not in merged_by_map_id:
+            ordered_keys.append(key)
+        merged_by_map_id[key] = song
+
+    changed = False
+    for code in recent_codes:
+        full_map = _fetch_map_by_code(code, session)
+        if not isinstance(full_map, dict):
+            continue
+        key = str(full_map.get("id") or full_map.get("mapId") or full_map.get("beatsaverCode") or "").strip()
+        if not key:
+            continue
+        if key not in merged_by_map_id:
+            ordered_keys.append(key)
+        if merged_by_map_id.get(key) != full_map:
+            merged_by_map_id[key] = full_map
+            changed = True
+
+    merged_maps = [merged_by_map_id[key] for key in ordered_keys if key in merged_by_map_id]
+    if changed:
+        _save_all_maps_cache(merged_maps)
+    return merged_maps
+
+
+def load_all_maps_with_recent_batch_fallback(
+    session: Optional[requests.Session] = None,
+) -> Optional[List[Dict]]:
+    """全マップキャッシュを読み込み、必要なら recent batch で補完する。"""
+    cached_maps = load_all_maps_from_cache()
+    if cached_maps is None:
+        return None
+    if session is None:
+        session = requests.Session()
+    try:
+        merged_maps = _merge_all_maps_with_recent_batches(session)
+        if isinstance(merged_maps, list):
+            return merged_maps
+    except Exception as exc:  # noqa: BLE001
+        log_api_failure(
+            "accsaber_reloaded",
+            "load_all_maps_with_recent_batch_fallback",
+            "recent batch fallback failed while updating full map cache",
+            exc,
+        )
+    return cached_maps
+
+
+def _merge_file_cache_with_recent_batches(
+    session: requests.Session,
+) -> Optional[Dict[str, int]]:
+    """/maps 失敗時に batch API から総譜面数キャッシュを前進させる。"""
+    payload = _load_map_counts_cache_payload()
+    if not isinstance(payload, dict):
+        return None
+
+    fetched_at = _parse_utc_timestamp(payload.get("fetched_at"))
+    file_cache = _load_map_counts_file_cache()
+    if fetched_at is None or not file_cache:
+        return None
+
+    counts: Dict[str, int] = {k: int(v["count"]) for k, v in file_cache.items()}
+    deltas = _fetch_batch_count_deltas_since(fetched_at, session)
+    if not any(value > 0 for value in deltas.values()):
+        overall_parts = [counts[k] for k in ("true", "standard", "tech") if k in counts]
+        if overall_parts:
+            counts["overall"] = sum(overall_parts)
+        return counts
+
+    merged_per_cat: Dict[str, Dict] = {}
+    for cat in _MAP_COUNT_CATEGORY_IDS:
+        merged = counts.get(cat, 0) + deltas.get(cat, 0)
+        if merged > 0:
+            merged_per_cat[cat] = {"count": merged}
+            counts[cat] = merged
+
+    if merged_per_cat:
+        _save_map_counts_file_cache(merged_per_cat)
+
+    overall_parts = [counts[k] for k in ("true", "standard", "tech") if k in counts]
+    if overall_parts:
+        counts["overall"] = sum(overall_parts)
+    return counts
 
 
 def fetch_reloaded_map_counts(
@@ -156,15 +448,23 @@ def fetch_reloaded_map_counts(
                 break
             page += 1
 
-        raw_counts = {k: v for k, v in _count_non_pending_map_counts(all_maps).items() if k != "overall"}
-        per_cat: Dict[str, Dict] = {cat: {"count": cnt} for cat, cnt in raw_counts.items() if cnt > 0}
-        if per_cat:
-            _save_map_counts_file_cache(per_cat)
+        _save_map_counts_from_all_maps(all_maps)
 
         return _count_non_pending_map_counts(all_maps)
 
     except Exception as exc:  # noqa: BLE001
         log_api_failure("accsaber_reloaded", "fetch_reloaded_map_counts", "request failed while fetching /maps pages", exc)
+        try:
+            batch_counts = _merge_file_cache_with_recent_batches(session)
+            if batch_counts:
+                return batch_counts
+        except Exception as batch_exc:  # noqa: BLE001
+            log_api_failure(
+                "accsaber_reloaded",
+                "fetch_reloaded_map_counts",
+                "batch fallback failed while updating cached counts",
+                batch_exc,
+            )
         # API 失敗時はファイルキャッシュにフォールバック
         return get_reloaded_map_counts_from_cache()
 
@@ -175,12 +475,15 @@ def get_reloaded_map_counts_from_cache() -> Dict[str, int]:
     戻り値: {"true": 109, "standard": ..., "tech": ..., "overall": ...}
     存在しないカテゴリのキーは含まれない。
     """
-    all_maps = load_all_maps_from_cache()
-    if isinstance(all_maps, list) and all_maps:
-        return _count_non_pending_map_counts(all_maps)
-
     file_cache = _load_map_counts_file_cache()
-    counts: Dict[str, int] = {k: v["count"] for k, v in file_cache.items()}
+    if file_cache:
+        counts: Dict[str, int] = {k: v["count"] for k, v in file_cache.items()}
+    else:
+        all_maps = load_all_maps_from_cache()
+        if isinstance(all_maps, list) and all_maps:
+            return _count_non_pending_map_counts(all_maps)
+        counts = {}
+
     overall_parts = [counts[k] for k in ("true", "standard", "tech") if k in counts]
     if overall_parts:
         counts["overall"] = sum(overall_parts)
@@ -480,17 +783,22 @@ def fetch_and_save_all_maps_cache(
             "maps": [...]
         }
     """
-    all_maps = fetch_all_maps_full(session=session, on_progress=on_progress)
-    now_z = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    data = {"fetched_at": now_z, "maps": all_maps}
     try:
-        _ALL_MAPS_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        _ALL_MAPS_CACHE_FILE.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+        all_maps = fetch_all_maps_full(session=session, on_progress=on_progress)
+        _save_all_maps_cache(all_maps)
     except Exception as exc:  # noqa: BLE001
-        log_api_failure("accsaber_reloaded", "fetch_and_save_all_maps_cache", f"cache save failed path={_ALL_MAPS_CACHE_FILE}", exc)
-        pass
+        log_api_failure("accsaber_reloaded", "fetch_and_save_all_maps_cache", f"cache refresh failed path={_ALL_MAPS_CACHE_FILE}", exc)
+        try:
+            if session is None:
+                session = requests.Session()
+            _merge_all_maps_with_recent_batches(session)
+        except Exception as batch_exc:  # noqa: BLE001
+            log_api_failure(
+                "accsaber_reloaded",
+                "fetch_and_save_all_maps_cache",
+                "recent batch fallback failed while updating full map cache",
+                batch_exc,
+            )
 
 
 def load_all_maps_from_cache() -> Optional[List[Dict]]:

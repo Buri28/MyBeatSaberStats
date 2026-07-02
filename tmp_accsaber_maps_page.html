@@ -1,0 +1,56 @@
+﻿<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AccSaber Reloaded</title>
+    <meta name="description" content="Accuracy-based leaderboard platform for Beat Saber." />
+    <meta name="theme-color" content="#0a0a0f" />
+    <link rel="icon" type="image/png" href="/favicon.png" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="manifest" href="/manifest.json" />
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="AccSaber Reloaded" />
+    <meta property="og:description" content="Accuracy-based leaderboard platform for Beat Saber." />
+    <meta property="og:image" content="https://accsaberreloaded.com/icon-512x512.png" />
+    <meta property="og:url" content="https://accsaberreloaded.com" />
+
+    <script>
+      ;(function () {
+        var root = document.documentElement
+        var t = localStorage.getItem('theme')
+        if (!t) {
+          t = window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark'
+        }
+        root.setAttribute('data-theme', t)
+        var raw = localStorage.getItem('theme:tokens')
+        if (raw) {
+          try {
+            var tokens = JSON.parse(raw)
+            if (tokens && typeof tokens === 'object') {
+              for (var k in tokens) {
+                if (Object.prototype.hasOwnProperty.call(tokens, k) && typeof tokens[k] === 'string') {
+                  root.style.setProperty('--' + k.replace(/\./g, '-'), tokens[k])
+                }
+              }
+            }
+          } catch (_) { /* ignore malformed token cache */ }
+        }
+      })()
+    </script>
+
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Poppins:wght@400;500;600;700&family=Silkscreen:wght@400;700&display=swap"
+      rel="stylesheet"
+    />
+    <script type="module" crossorigin src="/assets/main-COFZWi4z.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/main-CD4mUgNh.css">
+  </head>
+  <body><a href="https://accsaberreloaded.com/cdn-cgi/content?id=96qns83usaOGGxgKASCUXpUBoYlJFtaabwVzMyLKfN0-1782991476.7502065-1.2.1.1-UzUacbQBR1Dmse5dOZHstJ4UkE0PSmjmACjqVeBvdj0" aria-hidden="true" rel="nofollow noopener" style="display: none !important; visibility: hidden !important"></a>
+    <div id="app"></div>
+  <script>(function(){function c(){var b=a.contentDocument||a.contentWindow.document;if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'a14d48f9a8e7d5c8',t:'MTc4Mjk5MTQ3Ng=='};var a=document.createElement('script');a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script><script defer src="https://static.cloudflareinsights.com/beacon.min.js/v4513226cdae34746b4dedf0b4dfa099e1781791509496" integrity="sha512-ZE9pZaUXND66v380QUtch/5sE9tPFh2zg45pR2PB0CVkCtOREv2AJKkSidISWkysEuQ0EH8faUU5du78bx87UQ==" data-cf-beacon='{"version":"2024.11.0","token":"12f6555168fb45799b1af5e9a9bb7128","r":1,"server_timing":{"name":{"cfCacheStatus":true,"cfEdge":true,"cfExtPri":true,"cfL4":true,"cfOrigin":true,"cfSpeedBrain":true},"location_startswith":null}}' crossorigin="anonymous"></script>
+</body>
+</html>
+

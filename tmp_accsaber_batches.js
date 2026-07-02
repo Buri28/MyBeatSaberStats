@@ -1,0 +1,2 @@
+﻿import{C as s}from"./constants-DEGrlY-t.js";import{b as p}from"./mappers-uIJVFnIY.js";function m(n,i,f,c){const e=new Map;for(const o of n.difficulties){const t=p(o,i),r=t.categoryCode;e.has(r)||e.set(r,[]),e.get(r).push(t)}return Array.from(e.entries()).sort(([o],[t])=>{const r=s.indexOf(o),a=s.indexOf(t);return(r===-1?999:r)-(a===-1?999:a)}).map(([o,t])=>({categoryCode:o,accent:f(o),name:c(o),diffs:t}))}export{m as g};
+
