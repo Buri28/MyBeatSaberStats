@@ -134,6 +134,10 @@ class Snapshot:
     accsaber_true_play_count: int | None = None
     accsaber_standard_play_count: int | None = None
     accsaber_tech_play_count: int | None = None
+    accsaber_overall_total_maps: int | None = None
+    accsaber_true_total_maps: int | None = None
+    accsaber_standard_total_maps: int | None = None
+    accsaber_tech_total_maps: int | None = None
 
     # AccSaber AP (Overall / True / Standard / Tech)
     accsaber_overall_ap: float | None = None
@@ -175,21 +179,25 @@ class Snapshot:
     accsaber_reloaded_overall_rank_country: int | None = None
     accsaber_reloaded_overall_ap: float | None = None
     accsaber_reloaded_overall_ranked_plays: int | None = None
+    accsaber_reloaded_overall_total_maps: int | None = None
 
     accsaber_reloaded_true_rank: int | None = None
     accsaber_reloaded_true_rank_country: int | None = None
     accsaber_reloaded_true_ap: float | None = None
     accsaber_reloaded_true_ranked_plays: int | None = None
+    accsaber_reloaded_true_total_maps: int | None = None
 
     accsaber_reloaded_standard_rank: int | None = None
     accsaber_reloaded_standard_rank_country: int | None = None
     accsaber_reloaded_standard_ap: float | None = None
     accsaber_reloaded_standard_ranked_plays: int | None = None
+    accsaber_reloaded_standard_total_maps: int | None = None
 
     accsaber_reloaded_tech_rank: int | None = None
     accsaber_reloaded_tech_rank_country: int | None = None
     accsaber_reloaded_tech_ap: float | None = None
     accsaber_reloaded_tech_ranked_plays: int | None = None
+    accsaber_reloaded_tech_total_maps: int | None = None
 
     # AccSaber Reloaded Avg Acc (0.0-100.0)
     accsaber_reloaded_overall_avg_acc: float | None = None

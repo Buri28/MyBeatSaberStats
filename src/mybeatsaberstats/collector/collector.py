@@ -1631,6 +1631,14 @@ def create_snapshot_for_steam_id(
     acc_true_play_count: Optional[int] = None
     acc_standard_play_count: Optional[int] = None
     acc_tech_play_count: Optional[int] = None
+    acc_overall_total_maps: Optional[int] = None
+    acc_true_total_maps: Optional[int] = None
+    acc_standard_total_maps: Optional[int] = None
+    acc_tech_total_maps: Optional[int] = None
+    accsaber_reloaded_overall_total_maps: Optional[int] = None
+    accsaber_reloaded_true_total_maps: Optional[int] = None
+    accsaber_reloaded_standard_total_maps: Optional[int] = None
+    accsaber_reloaded_tech_total_maps: Optional[int] = None
     acc_overall_ap: Optional[float] = None
     acc_true_ap: Optional[float] = None
     acc_standard_ap: Optional[float] = None
@@ -1923,12 +1931,25 @@ def create_snapshot_for_steam_id(
 
         # AccSaber プレイリスト総譜面数を更新する（accsaber_playlist_counts.json）
         try:
-            get_accsaber_playlist_map_counts_with_meta(session=session)
+            _acc_playlist_counts, _, _ = get_accsaber_playlist_map_counts_with_meta(session=session)
+            acc_true_total_maps = _acc_playlist_counts.get("true")
+            acc_standard_total_maps = _acc_playlist_counts.get("standard")
+            acc_tech_total_maps = _acc_playlist_counts.get("tech")
+            _acc_total_parts = [
+                value
+                for value in (acc_true_total_maps, acc_standard_total_maps, acc_tech_total_maps)
+                if value is not None
+            ]
+            acc_overall_total_maps = sum(_acc_total_parts) if _acc_total_parts else None
         except Exception:  # noqa: BLE001
             pass
         # AccSaber Reloaded 総譜面数を更新する（accsaber_reloaded_map_counts.json）
         try:
-            _fetch_reloaded_map_counts(session=session)
+            _rl_map_counts = _fetch_reloaded_map_counts(session=session)
+            accsaber_reloaded_overall_total_maps = _rl_map_counts.get("overall")
+            accsaber_reloaded_true_total_maps = _rl_map_counts.get("true")
+            accsaber_reloaded_standard_total_maps = _rl_map_counts.get("standard")
+            accsaber_reloaded_tech_total_maps = _rl_map_counts.get("tech")
         except Exception:  # noqa: BLE001
             pass
         # AccSaber マップデータ（ranked-maps + プレイリスト）をキャッシュに保存する
@@ -2232,6 +2253,10 @@ def create_snapshot_for_steam_id(
         accsaber_standard_play_count=acc_standard_play_count,
         accsaber_tech_rank=acc_tech_rank_global,
         accsaber_tech_play_count=acc_tech_play_count,
+        accsaber_overall_total_maps=acc_overall_total_maps,
+        accsaber_true_total_maps=acc_true_total_maps,
+        accsaber_standard_total_maps=acc_standard_total_maps,
+        accsaber_tech_total_maps=acc_tech_total_maps,
         accsaber_overall_ap=acc_overall_ap,
         accsaber_true_ap=acc_true_ap,
         accsaber_standard_ap=acc_standard_ap,
@@ -2262,18 +2287,22 @@ def create_snapshot_for_steam_id(
         accsaber_reloaded_overall_rank_country=accsaber_reloaded_overall_rank_country,
         accsaber_reloaded_overall_ap=accsaber_reloaded_overall_ap,
         accsaber_reloaded_overall_ranked_plays=accsaber_reloaded_overall_ranked_plays,
+        accsaber_reloaded_overall_total_maps=accsaber_reloaded_overall_total_maps,
         accsaber_reloaded_true_rank=accsaber_reloaded_true_rank,
         accsaber_reloaded_true_rank_country=accsaber_reloaded_true_rank_country,
         accsaber_reloaded_true_ap=accsaber_reloaded_true_ap,
         accsaber_reloaded_true_ranked_plays=accsaber_reloaded_true_ranked_plays,
+        accsaber_reloaded_true_total_maps=accsaber_reloaded_true_total_maps,
         accsaber_reloaded_standard_rank=accsaber_reloaded_standard_rank,
         accsaber_reloaded_standard_rank_country=accsaber_reloaded_standard_rank_country,
         accsaber_reloaded_standard_ap=accsaber_reloaded_standard_ap,
         accsaber_reloaded_standard_ranked_plays=accsaber_reloaded_standard_ranked_plays,
+        accsaber_reloaded_standard_total_maps=accsaber_reloaded_standard_total_maps,
         accsaber_reloaded_tech_rank=accsaber_reloaded_tech_rank,
         accsaber_reloaded_tech_rank_country=accsaber_reloaded_tech_rank_country,
         accsaber_reloaded_tech_ap=accsaber_reloaded_tech_ap,
         accsaber_reloaded_tech_ranked_plays=accsaber_reloaded_tech_ranked_plays,
+        accsaber_reloaded_tech_total_maps=accsaber_reloaded_tech_total_maps,
         accsaber_reloaded_overall_avg_acc=accsaber_reloaded_overall_avg_acc,
         accsaber_reloaded_true_avg_acc=accsaber_reloaded_true_avg_acc,
         accsaber_reloaded_standard_avg_acc=accsaber_reloaded_standard_avg_acc,
