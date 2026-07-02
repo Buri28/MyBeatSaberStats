@@ -2151,16 +2151,36 @@ class SnapshotCompareDialog(QDialog):
                 return (true_pc or 0) + (standard_pc or 0) + (tech_pc or 0)
             return snap.accsaber_overall_play_count
 
-        # AccSaber プレイリスト総譜面数（xxx/yyy 表示用）
-        try:
-            _acc_playlist, _, _ = get_accsaber_playlist_map_counts_from_cache()
-        except Exception:  # noqa: BLE001
-            _acc_playlist = {}
-        _cmp_true_total: Optional[int] = _acc_playlist.get("true")
-        _cmp_standard_total: Optional[int] = _acc_playlist.get("standard")
-        _cmp_tech_total: Optional[int] = _acc_playlist.get("tech")
-        _cmp_parts = [c for c in (_cmp_true_total, _cmp_standard_total, _cmp_tech_total) if c is not None]
-        _cmp_overall_total: Optional[int] = sum(_cmp_parts) if _cmp_parts else None
+        def _acc_totals_from_snapshot(snap: Snapshot) -> tuple[Optional[int], Optional[int], Optional[int], Optional[int]]:
+            overall = snap.accsaber_overall_total_maps
+            true_total = snap.accsaber_true_total_maps
+            standard_total = snap.accsaber_standard_total_maps
+            tech_total = snap.accsaber_tech_total_maps
+            if overall is None:
+                parts = [c for c in (true_total, standard_total, tech_total) if c is not None]
+                overall = sum(parts) if parts else None
+            return overall, true_total, standard_total, tech_total
+
+        _cmp_overall_total_a, _cmp_true_total_a, _cmp_standard_total_a, _cmp_tech_total_a = _acc_totals_from_snapshot(snap_a)
+        _cmp_overall_total_b, _cmp_true_total_b, _cmp_standard_total_b, _cmp_tech_total_b = _acc_totals_from_snapshot(snap_b)
+
+        def _rl_totals_from_snapshot(snap: Snapshot) -> dict[str, Optional[int]]:
+            overall = snap.accsaber_reloaded_overall_total_maps
+            true_total = snap.accsaber_reloaded_true_total_maps
+            standard_total = snap.accsaber_reloaded_standard_total_maps
+            tech_total = snap.accsaber_reloaded_tech_total_maps
+            if overall is None:
+                parts = [c for c in (true_total, standard_total, tech_total) if c is not None]
+                overall = sum(parts) if parts else None
+            return {
+                "overall": overall,
+                "true": true_total,
+                "standard": standard_total,
+                "tech": tech_total,
+            }
+
+        _rl_totals_a = _rl_totals_from_snapshot(snap_a)
+        _rl_totals_b = _rl_totals_from_snapshot(snap_b)
 
         def _play_fmt(plays: int | None, total: Optional[int]):
             """プレイ数を (数値, 'xxx/yyy') タプルに変換する。total が不明なら数値のみ。"""
@@ -2171,11 +2191,17 @@ class SnapshotCompareDialog(QDialog):
             return (plays, f"{plays:,}/{total:,}")
 
         # Play Count バー用ヘルパー: 設定済みアイテムに ratio と色を付加する
-        def _set_play_bar(row: int, plays_a: int | None, plays_b: int | None,
-                          total: Optional[int], cat: str) -> None:
-            """Play Count 行の col 1/2 に ratio と色を UserRole で設定する。"""
+        def _set_play_bar(
+            row: int,
+            plays_a: int | None,
+            plays_b: int | None,
+            total_a: Optional[int],
+            total_b: Optional[int],
+            cat: str,
+        ) -> None:
+            """Play Count 行の col 1/2 に各セル個別の ratio と色を UserRole で設定する。"""
             color = ACC_PLAY_COLORS.get(cat, QColor(128, 128, 128, 160))
-            for col, plays in ((2, plays_a), (3, plays_b)):
+            for col, plays, total in ((2, plays_a, total_a), (3, plays_b, total_b)):
                 item = self.table_acc.item(row, col)
                 if item is None or plays is None or total is None or total == 0:
                     continue
@@ -2238,15 +2264,16 @@ class SnapshotCompareDialog(QDialog):
             _set_group_label(_grp_start, 4, "Rank")
             _grp_start = row_acc
             for _lbl, _attr, _cat, _total in (
-                ("[AS] Overall",  "accsaber_overall_play_count",  "overall",  _cmp_overall_total),
-                ("[AS] True",     "accsaber_true_play_count",     "true",     _cmp_true_total),
-                ("[AS] Standard", "accsaber_standard_play_count", "standard", _cmp_standard_total),
-                ("[AS] Tech",     "accsaber_tech_play_count",     "tech",     _cmp_tech_total),
+                ("[AS] Overall",  "accsaber_overall_play_count",  "overall",  (_cmp_overall_total_a, _cmp_overall_total_b)),
+                ("[AS] True",     "accsaber_true_play_count",     "true",     (_cmp_true_total_a, _cmp_true_total_b)),
+                ("[AS] Standard", "accsaber_standard_play_count", "standard", (_cmp_standard_total_a, _cmp_standard_total_b)),
+                ("[AS] Tech",     "accsaber_tech_play_count",     "tech",     (_cmp_tech_total_a, _cmp_tech_total_b)),
             ):
                 _pc_a = getattr(snap_a, _attr)
                 _pc_b = getattr(snap_b, _attr)
-                self._set_row(self.table_acc, row_acc, _lbl, _play_fmt(_pc_a, _total), _play_fmt(_pc_b, _total))
-                _set_play_bar(row_acc, _pc_a, _pc_b, _total, _cat)
+                _total_a, _total_b = _total
+                self._set_row(self.table_acc, row_acc, _lbl, _play_fmt(_pc_a, _total_a), _play_fmt(_pc_b, _total_b))
+                _set_play_bar(row_acc, _pc_a, _pc_b, _total_a, _total_b, _cat)
                 row_acc += 1
             _set_group_label(_grp_start, 4, "Play Count")
             _grp_start = row_acc
@@ -2265,12 +2292,6 @@ class SnapshotCompareDialog(QDialog):
                 row_acc += 1
             _set_group_label(_grp_start, 4, "Acc")
         else:
-            # AccSaber Reloaded (RL) モード — 総譜面数をキャッシュから取得
-            try:
-                _rl_totals = _get_reloaded_map_counts_from_cache()
-            except Exception:  # noqa: BLE001
-                _rl_totals = {}
-
             _xp_lv_a = snap_a.accsaber_reloaded_xp_level
             _xp_lv_b = snap_b.accsaber_reloaded_xp_level
 
@@ -2342,9 +2363,10 @@ class SnapshotCompareDialog(QDialog):
             ):
                 _pc_a = getattr(snap_a, _attr)
                 _pc_b = getattr(snap_b, _attr)
-                _rl_total = _rl_totals.get(_cat)
-                self._set_row(self.table_acc, row_acc, _lbl, _play_fmt(_pc_a, _rl_total), _play_fmt(_pc_b, _rl_total))
-                _set_play_bar(row_acc, _pc_a, _pc_b, _rl_total, _cat)
+                _rl_total_a = _rl_totals_a.get(_cat)
+                _rl_total_b = _rl_totals_b.get(_cat)
+                self._set_row(self.table_acc, row_acc, _lbl, _play_fmt(_pc_a, _rl_total_a), _play_fmt(_pc_b, _rl_total_b))
+                _set_play_bar(row_acc, _pc_a, _pc_b, _rl_total_a, _rl_total_b, _cat)
                 row_acc += 1
             _set_group_label(_grp_start, 4, "Play Count")
             _grp_start = row_acc
@@ -2523,24 +2545,18 @@ class SnapshotCompareDialog(QDialog):
 
         # AccSaber / AccSaber Reloaded (モードに応じて切り替え)
         if self._acc_mode == "RL":
-            # AccSaber Reloaded 総譜面数をキャッシュから取得
-            try:
-                _rl_map_counts = _get_reloaded_map_counts_from_cache()
-            except Exception:  # noqa: BLE001
-                _rl_map_counts = {}
-
             # グリッドテーブルに AccSaber Reloaded データを設定
             _rl_rows_a = [
-                ("Overall",  snap_a.accsaber_reloaded_overall_ap,   snap_a.accsaber_reloaded_overall_rank,   snap_a.accsaber_reloaded_overall_rank_country,   snap_a.scoresaber_country, snap_a.accsaber_reloaded_overall_ranked_plays,  _rl_map_counts.get("overall"),  snap_a.accsaber_reloaded_overall_avg_acc,   "overall"),
-                ("True",     snap_a.accsaber_reloaded_true_ap,      snap_a.accsaber_reloaded_true_rank,       snap_a.accsaber_reloaded_true_rank_country,      snap_a.scoresaber_country, snap_a.accsaber_reloaded_true_ranked_plays,     _rl_map_counts.get("true"),     snap_a.accsaber_reloaded_true_avg_acc,      "true"),
-                ("Standard", snap_a.accsaber_reloaded_standard_ap,  snap_a.accsaber_reloaded_standard_rank,   snap_a.accsaber_reloaded_standard_rank_country,  snap_a.scoresaber_country, snap_a.accsaber_reloaded_standard_ranked_plays, _rl_map_counts.get("standard"), snap_a.accsaber_reloaded_standard_avg_acc,  "standard"),
-                ("Tech",     snap_a.accsaber_reloaded_tech_ap,      snap_a.accsaber_reloaded_tech_rank,       snap_a.accsaber_reloaded_tech_rank_country,      snap_a.scoresaber_country, snap_a.accsaber_reloaded_tech_ranked_plays,     _rl_map_counts.get("tech"),     snap_a.accsaber_reloaded_tech_avg_acc,      "tech"),
+                ("Overall",  snap_a.accsaber_reloaded_overall_ap,   snap_a.accsaber_reloaded_overall_rank,   snap_a.accsaber_reloaded_overall_rank_country,   snap_a.scoresaber_country, snap_a.accsaber_reloaded_overall_ranked_plays,  _rl_totals_a.get("overall"),  snap_a.accsaber_reloaded_overall_avg_acc,   "overall"),
+                ("True",     snap_a.accsaber_reloaded_true_ap,      snap_a.accsaber_reloaded_true_rank,       snap_a.accsaber_reloaded_true_rank_country,      snap_a.scoresaber_country, snap_a.accsaber_reloaded_true_ranked_plays,     _rl_totals_a.get("true"),     snap_a.accsaber_reloaded_true_avg_acc,      "true"),
+                ("Standard", snap_a.accsaber_reloaded_standard_ap,  snap_a.accsaber_reloaded_standard_rank,   snap_a.accsaber_reloaded_standard_rank_country,  snap_a.scoresaber_country, snap_a.accsaber_reloaded_standard_ranked_plays, _rl_totals_a.get("standard"), snap_a.accsaber_reloaded_standard_avg_acc,  "standard"),
+                ("Tech",     snap_a.accsaber_reloaded_tech_ap,      snap_a.accsaber_reloaded_tech_rank,       snap_a.accsaber_reloaded_tech_rank_country,      snap_a.scoresaber_country, snap_a.accsaber_reloaded_tech_ranked_plays,     _rl_totals_a.get("tech"),     snap_a.accsaber_reloaded_tech_avg_acc,      "tech"),
             ]
             _rl_rows_b = [
-                ("Overall",  snap_b.accsaber_reloaded_overall_ap,   snap_b.accsaber_reloaded_overall_rank,   snap_b.accsaber_reloaded_overall_rank_country,   snap_b.scoresaber_country, snap_b.accsaber_reloaded_overall_ranked_plays,  _rl_map_counts.get("overall"),  snap_b.accsaber_reloaded_overall_avg_acc,   "overall"),
-                ("True",     snap_b.accsaber_reloaded_true_ap,      snap_b.accsaber_reloaded_true_rank,       snap_b.accsaber_reloaded_true_rank_country,      snap_b.scoresaber_country, snap_b.accsaber_reloaded_true_ranked_plays,     _rl_map_counts.get("true"),     snap_b.accsaber_reloaded_true_avg_acc,      "true"),
-                ("Standard", snap_b.accsaber_reloaded_standard_ap,  snap_b.accsaber_reloaded_standard_rank,   snap_b.accsaber_reloaded_standard_rank_country,  snap_b.scoresaber_country, snap_b.accsaber_reloaded_standard_ranked_plays, _rl_map_counts.get("standard"), snap_b.accsaber_reloaded_standard_avg_acc,  "standard"),
-                ("Tech",     snap_b.accsaber_reloaded_tech_ap,      snap_b.accsaber_reloaded_tech_rank,       snap_b.accsaber_reloaded_tech_rank_country,      snap_b.scoresaber_country, snap_b.accsaber_reloaded_tech_ranked_plays,     _rl_map_counts.get("tech"),     snap_b.accsaber_reloaded_tech_avg_acc,      "tech"),
+                ("Overall",  snap_b.accsaber_reloaded_overall_ap,   snap_b.accsaber_reloaded_overall_rank,   snap_b.accsaber_reloaded_overall_rank_country,   snap_b.scoresaber_country, snap_b.accsaber_reloaded_overall_ranked_plays,  _rl_totals_b.get("overall"),  snap_b.accsaber_reloaded_overall_avg_acc,   "overall"),
+                ("True",     snap_b.accsaber_reloaded_true_ap,      snap_b.accsaber_reloaded_true_rank,       snap_b.accsaber_reloaded_true_rank_country,      snap_b.scoresaber_country, snap_b.accsaber_reloaded_true_ranked_plays,     _rl_totals_b.get("true"),     snap_b.accsaber_reloaded_true_avg_acc,      "true"),
+                ("Standard", snap_b.accsaber_reloaded_standard_ap,  snap_b.accsaber_reloaded_standard_rank,   snap_b.accsaber_reloaded_standard_rank_country,  snap_b.scoresaber_country, snap_b.accsaber_reloaded_standard_ranked_plays, _rl_totals_b.get("standard"), snap_b.accsaber_reloaded_standard_avg_acc,  "standard"),
+                ("Tech",     snap_b.accsaber_reloaded_tech_ap,      snap_b.accsaber_reloaded_tech_rank,       snap_b.accsaber_reloaded_tech_rank_country,      snap_b.scoresaber_country, snap_b.accsaber_reloaded_tech_ranked_plays,     _rl_totals_b.get("tech"),     snap_b.accsaber_reloaded_tech_avg_acc,      "tech"),
             ]
             _fill_acc_cmp_table(self._icon_accsaber_rl, _rl_rows_a, _rl_rows_b)
         else:
@@ -2548,16 +2564,16 @@ class SnapshotCompareDialog(QDialog):
             overall_ap_a = _overall_ap_from_snapshot(snap_a)
             overall_ap_b = _overall_ap_from_snapshot(snap_b)
             _as_rows_a = [
-                ("Overall",  overall_ap_a,                snap_a.accsaber_overall_rank,   snap_a.accsaber_overall_rank_country,   snap_a.scoresaber_country, _overall_play_from_snapshot(snap_a), _cmp_overall_total,  snap_a.accsaber_overall_avg_acc,   "overall"),
-                ("True",     snap_a.accsaber_true_ap,     snap_a.accsaber_true_rank,      snap_a.accsaber_true_rank_country,      snap_a.scoresaber_country, snap_a.accsaber_true_play_count,     _cmp_true_total,     snap_a.accsaber_true_avg_acc,      "true"),
-                ("Standard", snap_a.accsaber_standard_ap, snap_a.accsaber_standard_rank,  snap_a.accsaber_standard_rank_country,  snap_a.scoresaber_country, snap_a.accsaber_standard_play_count, _cmp_standard_total, snap_a.accsaber_standard_avg_acc,  "standard"),
-                ("Tech",     snap_a.accsaber_tech_ap,     snap_a.accsaber_tech_rank,      snap_a.accsaber_tech_rank_country,      snap_a.scoresaber_country, snap_a.accsaber_tech_play_count,     _cmp_tech_total,     snap_a.accsaber_tech_avg_acc,      "tech"),
+                ("Overall",  overall_ap_a,                snap_a.accsaber_overall_rank,   snap_a.accsaber_overall_rank_country,   snap_a.scoresaber_country, _overall_play_from_snapshot(snap_a), _cmp_overall_total_a,  snap_a.accsaber_overall_avg_acc,   "overall"),
+                ("True",     snap_a.accsaber_true_ap,     snap_a.accsaber_true_rank,      snap_a.accsaber_true_rank_country,      snap_a.scoresaber_country, snap_a.accsaber_true_play_count,     _cmp_true_total_a,     snap_a.accsaber_true_avg_acc,      "true"),
+                ("Standard", snap_a.accsaber_standard_ap, snap_a.accsaber_standard_rank,  snap_a.accsaber_standard_rank_country,  snap_a.scoresaber_country, snap_a.accsaber_standard_play_count, _cmp_standard_total_a, snap_a.accsaber_standard_avg_acc,  "standard"),
+                ("Tech",     snap_a.accsaber_tech_ap,     snap_a.accsaber_tech_rank,      snap_a.accsaber_tech_rank_country,      snap_a.scoresaber_country, snap_a.accsaber_tech_play_count,     _cmp_tech_total_a,     snap_a.accsaber_tech_avg_acc,      "tech"),
             ]
             _as_rows_b = [
-                ("Overall",  overall_ap_b,                snap_b.accsaber_overall_rank,   snap_b.accsaber_overall_rank_country,   snap_b.scoresaber_country, _overall_play_from_snapshot(snap_b), _cmp_overall_total,  snap_b.accsaber_overall_avg_acc,   "overall"),
-                ("True",     snap_b.accsaber_true_ap,     snap_b.accsaber_true_rank,      snap_b.accsaber_true_rank_country,      snap_b.scoresaber_country, snap_b.accsaber_true_play_count,     _cmp_true_total,     snap_b.accsaber_true_avg_acc,      "true"),
-                ("Standard", snap_b.accsaber_standard_ap, snap_b.accsaber_standard_rank,  snap_b.accsaber_standard_rank_country,  snap_b.scoresaber_country, snap_b.accsaber_standard_play_count, _cmp_standard_total, snap_b.accsaber_standard_avg_acc,  "standard"),
-                ("Tech",     snap_b.accsaber_tech_ap,     snap_b.accsaber_tech_rank,      snap_b.accsaber_tech_rank_country,      snap_b.scoresaber_country, snap_b.accsaber_tech_play_count,     _cmp_tech_total,     snap_b.accsaber_tech_avg_acc,      "tech"),
+                ("Overall",  overall_ap_b,                snap_b.accsaber_overall_rank,   snap_b.accsaber_overall_rank_country,   snap_b.scoresaber_country, _overall_play_from_snapshot(snap_b), _cmp_overall_total_b,  snap_b.accsaber_overall_avg_acc,   "overall"),
+                ("True",     snap_b.accsaber_true_ap,     snap_b.accsaber_true_rank,      snap_b.accsaber_true_rank_country,      snap_b.scoresaber_country, snap_b.accsaber_true_play_count,     _cmp_true_total_b,     snap_b.accsaber_true_avg_acc,      "true"),
+                ("Standard", snap_b.accsaber_standard_ap, snap_b.accsaber_standard_rank,  snap_b.accsaber_standard_rank_country,  snap_b.scoresaber_country, snap_b.accsaber_standard_play_count, _cmp_standard_total_b, snap_b.accsaber_standard_avg_acc,  "standard"),
+                ("Tech",     snap_b.accsaber_tech_ap,     snap_b.accsaber_tech_rank,      snap_b.accsaber_tech_rank_country,      snap_b.scoresaber_country, snap_b.accsaber_tech_play_count,     _cmp_tech_total_b,     snap_b.accsaber_tech_avg_acc,      "tech"),
             ]
             _fill_acc_cmp_table(self._icon_accsaber, _as_rows_a, _as_rows_b)
 

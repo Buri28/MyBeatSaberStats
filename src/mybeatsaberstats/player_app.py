@@ -42,9 +42,7 @@ from PySide6.QtWidgets import (
 from .snapshot import Snapshot, SNAPSHOT_DIR, BASE_DIR, RESOURCES_DIR, StarClearStat, resource_path
 from .theme import table_stylesheet, toggle as _toggle_theme, is_dark, label_cell_color, label_cell_text_color, init_theme as _init_theme, button_label as _theme_button_label, current_theme_mode as _current_theme_mode, set_theme_mode as _set_theme_mode
 from .updater import StartupUpdateChecker, get_current_version
-from .accsaber import AccSaberPlayer, get_accsaber_playlist_map_counts_with_meta, get_accsaber_playlist_map_counts_from_cache, compute_effective_played_counts_from_cache
-from .accsaber_reloaded import compute_effective_played_counts_from_cache as _compute_rl_effective_played_counts_from_cache
-from .accsaber_reloaded import get_reloaded_map_counts_from_cache as _get_reloaded_map_counts_from_cache
+from .accsaber import AccSaberPlayer, get_accsaber_playlist_map_counts_with_meta
 from .accsaber_reloaded import fetch_all_maps_full as _rl_fetch_all_maps
 from .accsaber_reloaded import build_unplayed_bplist as _rl_build_unplayed_bplist
 from .accsaber_reloaded import fetch_player_all_categories as _rl_fetch_player
@@ -61,13 +59,11 @@ from .settings_store import (
 )
 from .collector.collector import (
     collect_beatleader_star_stats,
-    collect_beatleader_star_stats_from_cache,
     create_snapshot_for_steam_id,
     ensure_global_rank_caches,
     SnapshotOptions,
     _read_cache_fetched_at,
 )
-from .collector.scoresaber import collect_scoresaber_star_stats_from_cache
 from mybeatsaberstats.collector.map_store import MapStore
 from .playlist_view import PlaylistWindow, _make_playlist_cover as _make_cover, \
     load_accsaber_reloaded_maps as _rl_load_maps_with_scores, \
@@ -2932,16 +2928,8 @@ class PlayerWindow(QMainWindow):
         except Exception:  # noqa: BLE001
             taken_text = snap.taken_at
 
-        # SS ★別統計は snapshot 保存時点と現在の cache がズレやすいため、
-        # 表示はまず live cache に合わせ、cache が無い場合だけ snapshot を使う。
-        live_ss_stats = collect_scoresaber_star_stats_from_cache(snap.scoresaber_id or "")
-        stats = live_ss_stats or snap.star_stats or []
-        # 古いスナップショットでは BeatLeader ★統計が未保存のことがあるが、
-        # ここで同期再取得すると起動時やプレイヤー切り替え時にネットワーク待ちで固まる。
-        # 表示は保存済みデータだけを使い、未保存なら空表示にとどめる。
-        bl_stats = collect_beatleader_star_stats_from_cache(bl_id) if bl_id else []
-        if not bl_stats:
-            bl_stats = list(snap.beatleader_star_stats or [])
+        stats = list(snap.star_stats or [])
+        bl_stats = list(snap.beatleader_star_stats or [])
         total_ranked_maps = sum(s.map_count for s in stats)
 
         # ScoreSaber / BeatLeader で対になる指標が一目で分かるよう、
@@ -3131,28 +3119,18 @@ class PlayerWindow(QMainWindow):
                     parts.append(f"({country_code} {country_rank:,})")
             return " ".join(parts) if parts else None
 
-        # AccSaber True / Standard / Tech の対象譜面総数をファイルキャッシュから取得する。
-        # 表示目的のみ。API 更新は TakeSnapshot / Fetch Ranking Data のタイミングで行う。
-        try:
-            playlist_counts, playlist_fetched_ats, playlist_from_cache = get_accsaber_playlist_map_counts_from_cache()
-        except Exception:  # noqa: BLE001
-            playlist_counts = {}
-            playlist_fetched_ats = {}
-            playlist_from_cache = {}
-
-        true_total_maps = playlist_counts.get("true")
-        standard_total_maps = playlist_counts.get("standard")
-        tech_total_maps = playlist_counts.get("tech")
-        live_acc_play_counts = compute_effective_played_counts_from_cache(snap.scoresaber_id or "")
-        acc_true_play_count = live_acc_play_counts.get("true", snap.accsaber_true_play_count)
-        acc_standard_play_count = live_acc_play_counts.get("standard", snap.accsaber_standard_play_count)
-        acc_tech_play_count = live_acc_play_counts.get("tech", snap.accsaber_tech_play_count)
+        true_total_maps = snap.accsaber_true_total_maps
+        standard_total_maps = snap.accsaber_standard_total_maps
+        tech_total_maps = snap.accsaber_tech_total_maps
+        acc_true_play_count = snap.accsaber_true_play_count
+        acc_standard_play_count = snap.accsaber_standard_play_count
+        acc_tech_play_count = snap.accsaber_tech_play_count
         overall_total_maps: Optional[int]
-        parts = [c for c in (true_total_maps, standard_total_maps, tech_total_maps) if c is not None]
-        if parts:
-            overall_total_maps = sum(parts)
+        if snap.accsaber_overall_total_maps is not None:
+            overall_total_maps = snap.accsaber_overall_total_maps
         else:
-            overall_total_maps = None
+            parts = [c for c in (true_total_maps, standard_total_maps, tech_total_maps) if c is not None]
+            overall_total_maps = sum(parts) if parts else None
 
         def _format_play_with_total(plays: Optional[int], total_maps: Optional[int]) -> Optional[str]:
             if plays is None:
@@ -3234,16 +3212,9 @@ class PlayerWindow(QMainWindow):
         _stale_true  = _is_stale(_true_fetched,  _true_as_of,  _true_failed)
         _stale_std   = _is_stale(_std_fetched,   _std_as_of,   _std_failed)
         _stale_tech  = _is_stale(_tech_fetched,  _tech_as_of,  _tech_failed)
-        # Play Count の分母（プレイリスト）がキャッシュ使用かどうか
-        _pl_stale_true  = playlist_from_cache.get("true",     False)
-        _pl_stale_std   = playlist_from_cache.get("standard", False)
-        _pl_stale_tech  = playlist_from_cache.get("tech",     False)
-
         _ORANGE = QColor("orange")
         # col index 2=True, 3=Standard, 4=Tech
         _stale_by_col = {2: _stale_true, 3: _stale_std, 4: _stale_tech}
-        # Play Count 行(row index 2)では分母キャッシュも考慮
-        _pl_stale_by_col = {2: _pl_stale_true, 3: _pl_stale_std, 4: _pl_stale_tech}
 
         # Play Count バー用の割合 (0.0〜1.0)。分母/分子どちらかが None なら None。
         def _play_ratio(plays: Optional[int], total: Optional[int]) -> Optional[float]:
@@ -3278,7 +3249,6 @@ class PlayerWindow(QMainWindow):
         # 行=Overall/True/Standard/Tech, 列=Metric/AP/Rank/Play Count/Avg Acc
         _acc_cat_labels   = ["Overall", "True", "Standard", "Tech"]
         _acc_cat_stale    = [False, _stale_true, _stale_std, _stale_tech]
-        _acc_cat_pl_stale = [False, _pl_stale_true, _pl_stale_std, _pl_stale_tech]
         _acc_cat_colors   = [
             ACC_PLAY_COLORS["overall"], ACC_PLAY_COLORS["true"],
             ACC_PLAY_COLORS["standard"], ACC_PLAY_COLORS["tech"],
@@ -3310,7 +3280,7 @@ class PlayerWindow(QMainWindow):
             _play_val = acc_rows[2][row + 1]
             _play_txt = "" if _play_val is None else str(_play_val)
             _play_item = QTableWidgetItem(_play_txt)
-            if _row_stale or _acc_cat_pl_stale[row]:
+            if _row_stale:
                 _play_item.setForeground(_ORANGE)
             _r = _acc_play_ratios.get(row + 1)
             if _r is not None:
@@ -3335,19 +3305,12 @@ class PlayerWindow(QMainWindow):
         rl_ap_std     = snap.accsaber_reloaded_standard_ap
         rl_ap_tech    = snap.accsaber_reloaded_tech_ap
 
-        # AccSaber Reloaded 総譜面数をキャッシュから取得
-        try:
-            _rl_map_counts = _get_reloaded_map_counts_from_cache()
-        except Exception:  # noqa: BLE001
-            _rl_map_counts = {}
-
-        live_rl_play_counts = _compute_rl_effective_played_counts_from_cache(
-            snap.beatleader_id or snap.scoresaber_id or ""
-        )
-        rl_overall_play_count = live_rl_play_counts.get("overall", snap.accsaber_reloaded_overall_ranked_plays)
-        rl_true_play_count = live_rl_play_counts.get("true", snap.accsaber_reloaded_true_ranked_plays)
-        rl_standard_play_count = live_rl_play_counts.get("standard", snap.accsaber_reloaded_standard_ranked_plays)
-        rl_tech_play_count = live_rl_play_counts.get("tech", snap.accsaber_reloaded_tech_ranked_plays)
+        _rl_map_counts = {
+            "overall": snap.accsaber_reloaded_overall_total_maps,
+            "true": snap.accsaber_reloaded_true_total_maps,
+            "standard": snap.accsaber_reloaded_standard_total_maps,
+            "tech": snap.accsaber_reloaded_tech_total_maps,
+        }
 
         def _rl_play_fmt(plays: int | None, cat: str) -> str:
             if plays is None:
@@ -3367,10 +3330,10 @@ class PlayerWindow(QMainWindow):
              _format_acc_rank(snap.accsaber_reloaded_standard_rank, snap.accsaber_reloaded_standard_rank_country, acc_country_code),
              _format_acc_rank(snap.accsaber_reloaded_tech_rank,    snap.accsaber_reloaded_tech_rank_country,    acc_country_code)),
             ("Play Count",
-               _rl_play_fmt(rl_overall_play_count,  "overall"),
-               _rl_play_fmt(rl_true_play_count,     "true"),
-               _rl_play_fmt(rl_standard_play_count, "standard"),
-               _rl_play_fmt(rl_tech_play_count,     "tech")),
+                 _rl_play_fmt(snap.accsaber_reloaded_overall_ranked_plays,  "overall"),
+                 _rl_play_fmt(snap.accsaber_reloaded_true_ranked_plays,     "true"),
+                 _rl_play_fmt(snap.accsaber_reloaded_standard_ranked_plays, "standard"),
+                 _rl_play_fmt(snap.accsaber_reloaded_tech_ranked_plays,     "tech")),
         ]
         _xp = snap.accsaber_reloaded_xp
         _xp_level = snap.accsaber_reloaded_xp_level
@@ -3390,10 +3353,10 @@ class PlayerWindow(QMainWindow):
 
         # AccSaber Reloaded Play Count バー用割合
         _rl_play_ratios = {
-            1: _play_ratio(rl_overall_play_count,  _rl_map_counts.get("overall")),
-            2: _play_ratio(rl_true_play_count,     _rl_map_counts.get("true")),
-            3: _play_ratio(rl_standard_play_count, _rl_map_counts.get("standard")),
-            4: _play_ratio(rl_tech_play_count,     _rl_map_counts.get("tech")),
+            1: _play_ratio(snap.accsaber_reloaded_overall_ranked_plays,  _rl_map_counts.get("overall")),
+            2: _play_ratio(snap.accsaber_reloaded_true_ranked_plays,     _rl_map_counts.get("true")),
+            3: _play_ratio(snap.accsaber_reloaded_standard_ranked_plays, _rl_map_counts.get("standard")),
+            4: _play_ratio(snap.accsaber_reloaded_tech_ranked_plays,     _rl_map_counts.get("tech")),
         }
         _rl_avg_acc_vals = {
             0: getattr(snap, "accsaber_reloaded_overall_avg_acc", None),
@@ -3461,16 +3424,6 @@ class PlayerWindow(QMainWindow):
                 _warn_lines.append(f"AccSaber {_cat_label}: using cached data from {_fmt_date(_as_of)}")
             else:
                 _warn_lines.append(f"AccSaber {_cat_label}: using cached data")
-
-        for _cat_key, _cat_label, _pl_stale in [
-            ("true",     "True",     _pl_stale_true),
-            ("standard", "Standard", _pl_stale_std),
-            ("tech",     "Tech",     _pl_stale_tech),
-        ]:
-            if not _pl_stale:
-                continue
-            _pl_fat = playlist_fetched_ats.get(_cat_key)
-            _warn_lines.append(f"Playlist ({_cat_label}): using cached count as of {_fmt_date(_pl_fat)}")
 
         pass  # _warn_lines は警告ラベル廃止により未使用
 
