@@ -1,4 +1,7 @@
 import json
+from typing import cast
+
+import requests
 
 from mybeatsaberstats.accsaber_reloaded import (
     build_unplayed_bplist,
@@ -241,7 +244,7 @@ def test_fetch_reloaded_map_counts_uses_batch_fallback_when_maps_api_fails(monke
         encoding="utf-8",
     )
 
-    counts = mod.fetch_reloaded_map_counts(session=_FakeSession())
+    counts = mod.fetch_reloaded_map_counts(session=cast(requests.Session, _FakeSession()))
 
     assert counts == {
         "true": 123,
@@ -337,7 +340,7 @@ def test_load_all_maps_with_recent_batch_fallback_merges_full_maps(monkeypatch, 
         encoding="utf-8",
     )
 
-    maps = mod.load_all_maps_with_recent_batch_fallback(session=_FakeSession())
+    maps = mod.load_all_maps_with_recent_batch_fallback(session=cast(requests.Session, _FakeSession()))
 
     assert maps is not None
     assert len(maps) == 2
