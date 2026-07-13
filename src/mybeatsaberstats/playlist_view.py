@@ -6,6 +6,7 @@ AccSaber / AccSaber Reloaded は API から取得するためネットワーク�
 from __future__ import annotations
 
 import base64
+import copy
 import hashlib
 import html
 import json
@@ -57,6 +58,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
     QProgressDialog,
+    QProgressBar,
     QApplication,
     QCheckBox,
     QMenu,
@@ -1380,6 +1382,7 @@ def load_beatsaver_maps(
     unranked_only: bool = True,
     exclude_ai: bool = True,
     on_progress: Optional[Callable[[int, int, str], None]] = None,
+    on_batch: Optional[Callable[[List[MapEntry]], None]] = None,
     session: Optional[requests.Session] = None,
 ) -> List[MapEntry]:
     """BeatSaver 検索条件から Maps タブ向けの一覧を取得する。"""
@@ -1395,6 +1398,7 @@ def load_beatsaver_maps(
         unranked_only=unranked_only,
         exclude_ai=exclude_ai,
         on_progress=on_progress,
+        on_batch=on_batch,
         session=session,
     )
 
@@ -2233,6 +2237,12 @@ class _LoadSignals(QObject):
     finished = Signal(list)        # List[MapEntry]
     error = Signal(str)            # エラーメッセージ
     progress = Signal(int, int, str)  # done, total, label
+    batch = Signal(int, list)      # 段階表示用: (generation, 1 ページ分の List[MapEntry])
+
+
+class _SnapshotRefreshSignals(QObject):
+    # 復元後にサービス列を最新化した結果を返す: (generation, refreshed List[MapEntry])
+    done = Signal(int, list)
 
 
 class _PreviewSignals(QObject):
@@ -3268,6 +3278,37 @@ class PlaylistWindow(QMainWindow):
         _selection_status_layout.addWidget(self._btn_mapper_top)
         _selection_status_layout.addStretch()
 
+        # ステータスバー埋め込み型の進捗表示（Search 等をモーダルにせず操作可能にする）。
+        self._inline_progress_label = QLabel("")
+        self._inline_progress_label.setStyleSheet("color: #aaa;")
+        self._inline_progress_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self._inline_progress_label.setVisible(False)
+        self._inline_progress_bar = QProgressBar()
+        self._inline_progress_bar.setFixedWidth(120)
+        self._inline_progress_bar.setFixedHeight(16)
+        self._inline_progress_bar.setTextVisible(False)
+        self._inline_progress_bar.setVisible(False)
+        self._inline_progress_cancel = QPushButton("✖")
+        self._inline_progress_cancel.setToolTip("読み込みをキャンセル")
+        self._inline_progress_cancel.setFixedSize(20, 20)
+        # 共通の secondary スタイルに上書きされないよう、登録せず専用スタイルを当てる。
+        self._inline_progress_cancel.setStyleSheet(
+            "QPushButton {"
+            " padding: 0px; font-weight: bold; color: #ffffff;"
+            " background-color: #c0392b; border: none; border-radius: 3px;"
+            " }"
+            "QPushButton:hover { background-color: #e74c3c; }"
+        )
+        self._inline_progress_cancel.setVisible(False)
+        self._inline_progress_cancel.clicked.connect(self._cancel_inline_load)
+        self._inline_progress_active = False
+        _selection_status_layout.addWidget(self._inline_progress_label)
+        _selection_status_layout.addSpacing(6)
+        _selection_status_layout.addWidget(self._inline_progress_bar)
+        _selection_status_layout.addSpacing(4)
+        _selection_status_layout.addWidget(self._inline_progress_cancel)
+        _selection_status_layout.addSpacing(10)
+
         self._btn_row_height_up = QPushButton("▲")
         self._btn_row_height_up.setToolTip("行の高さを大きくする")
         self._btn_row_height_up.setFixedWidth(28)
@@ -3393,6 +3434,12 @@ class PlaylistWindow(QMainWindow):
         _preview_link_row2.setContentsMargins(0, 0, 0, 0)
         _preview_link_rows.addLayout(_preview_link_row2)
 
+        # ── 3行目: リプレイビューア切り替え（BL / Arc） ──
+        _preview_link_row3 = QHBoxLayout()
+        _preview_link_row3.setSpacing(4)
+        _preview_link_row3.setContentsMargins(0, 0, 0, 0)
+        _preview_link_rows.addLayout(_preview_link_row3)
+
         self._preview_text_col = QWidget()
         _preview_text_layout = QVBoxLayout(self._preview_text_col)
         _preview_text_layout.setSpacing(4)
@@ -3429,6 +3476,27 @@ class PlaylistWindow(QMainWindow):
         self._btn_preview_download.clicked.connect(self._download_selected_preview_entry)
         self._register_secondary_buttons(self._btn_preview_download)
         _preview_link_row1.addWidget(self._btn_preview_download)
+
+        # ScoreSaber のリプレイ（自分 / Global #1）。
+        self._btn_preview_ss_replay = QPushButton("")
+        self._btn_preview_ss_replay.setIcon(QIcon(str(RESOURCES_DIR / "ss_replay_btn.png")))
+        self._btn_preview_ss_replay.setIconSize(QSize(18, 18))
+        self._btn_preview_ss_replay.setEnabled(False)
+        self._btn_preview_ss_replay.setToolTip("My Replay on ScoreSaber")
+        self._btn_preview_ss_replay.setFixedWidth(34)
+        self._btn_preview_ss_replay.clicked.connect(self._open_selected_preview_url)
+        self._register_secondary_buttons(self._btn_preview_ss_replay)
+        _preview_link_row1.addWidget(self._btn_preview_ss_replay)
+
+        self._btn_preview_ss1_replay = QPushButton("")
+        self._btn_preview_ss1_replay.setIcon(QIcon(str(RESOURCES_DIR / "ss_no1_replay_btn.png")))
+        self._btn_preview_ss1_replay.setIconSize(QSize(18, 18))
+        self._btn_preview_ss1_replay.setEnabled(False)
+        self._btn_preview_ss1_replay.setToolTip("Global #1 Replay on ScoreSaber")
+        self._btn_preview_ss1_replay.setFixedWidth(34)
+        self._btn_preview_ss1_replay.clicked.connect(self._open_selected_preview_url)
+        self._register_secondary_buttons(self._btn_preview_ss1_replay)
+        _preview_link_row1.addWidget(self._btn_preview_ss1_replay)
 
         self._btn_preview_bl = QPushButton("")
         self._btn_preview_bl.setEnabled(False)
@@ -3469,6 +3537,20 @@ class PlaylistWindow(QMainWindow):
         self._btn_preview_local1_replay.clicked.connect(self._open_selected_preview_url)
         self._register_secondary_buttons(self._btn_preview_local1_replay)
         _preview_link_row2.addWidget(self._btn_preview_local1_replay)
+
+        # リプレイを開くビューアの切り替え（BeatLeader / ArcViewer）。3行目の左に配置。
+        self._replay_viewer_group = QButtonGroup(self)
+        self._rb_replay_bl = QRadioButton("BL")
+        self._rb_replay_bl.setToolTip("リプレイを BeatLeader のビューアで開く")
+        self._rb_replay_arc = QRadioButton("Arc")
+        self._rb_replay_arc.setToolTip("リプレイを ArcViewer で開く")
+        self._replay_viewer_group.addButton(self._rb_replay_bl)
+        self._replay_viewer_group.addButton(self._rb_replay_arc)
+        self._rb_replay_bl.setChecked(True)
+        self._rb_replay_bl.toggled.connect(self._on_replay_viewer_changed)
+        _preview_link_row3.addWidget(self._rb_replay_bl)
+        _preview_link_row3.addWidget(self._rb_replay_arc)
+        _preview_link_row3.addStretch(1)
 
         _preview_media_layout.addStretch(1)
         _preview_layout.addWidget(_preview_content, 1)
@@ -3646,6 +3728,8 @@ class PlaylistWindow(QMainWindow):
         self._maps_loaded_steam_id = None
         self._pending_load_source_key = ""
         self._pending_load_maps_tab = False
+        # 検索ごとに増える世代番号。段階表示のバッチが古いロード由来でないか判定する。
+        self._load_generation = 0
         self._snapshot_last_load_text = "Last Loaded: -"
         self._maps_last_load_text = "Last Searched: -"
         self._snapshot_sort_mode = "status_desc"
@@ -3656,6 +3740,11 @@ class PlaylistWindow(QMainWindow):
         self._load_signals.finished.connect(self._on_load_finished)
         self._load_signals.error.connect(self._on_load_error)
         self._load_signals.progress.connect(self._on_load_progress)
+        self._load_signals.batch.connect(self._on_load_batch)
+        # 復元後のサービス列最新化（バックグラウンド）用。
+        self._snapshot_refresh_signals = _SnapshotRefreshSignals()
+        self._snapshot_refresh_signals.done.connect(self._on_snapshot_service_refresh_done)
+        self._snapshot_restore_generation = 0
         self._preview_signals = _PreviewSignals()
         self._preview_signals.loaded.connect(self._on_preview_loaded)
         self._preview_signals.error.connect(self._on_preview_error)
@@ -3695,9 +3784,13 @@ class PlaylistWindow(QMainWindow):
         self._bl_mapper_stats_silent = False
         self._deferred_maps_restore_scheduled = False
         self._bl_api_session = requests.Session()
+        self._replay_viewer_mode = "bl"  # "bl" | "arc"
         self._bl_top_replay_cache = {}
         self._bl_preview_replay_index = None
         self._bl_preview_leaderboard_index = None
+        # ScoreSaber リプレイ用: (hash, mode, diff) -> (leaderboard_id, own_score_id)
+        self._ss_preview_score_index = None
+        self._ss_top_replay_cache = {}
         self._beatsaver_meta_pending_hashes = []
         self._beatsaver_meta_pending_set = set()
         self._beatsaver_meta_pending_seed_map = {}
@@ -3713,6 +3806,7 @@ class PlaylistWindow(QMainWindow):
         self._initial_source_tab = initial_source_tab
         self._initial_restore_started = False
         self._skip_initial_snapshot_restore = False
+        self._skip_maps_restore = False
         self._initial_center_pending = True
 
     def _build_base_layout(self) -> QVBoxLayout:
@@ -4240,6 +4334,10 @@ class PlaylistWindow(QMainWindow):
             self.select_source_tab(self._initial_source_tab)
             if not skip_snapshot_restore:
                 self._restore_saved_snapshot_state()
+            if self._skip_maps_restore:
+                # Maps ボタンから直接開いた場合は、保存済み一覧の復元をせず
+                # 空の Maps タブを即座に表示する（すぐ Search するため）。
+                self._restored_maps_state = None
             if self._is_maps_tab() and self._restored_maps_state:
                 self._show_load_progress_dialog("Restoring Maps view...")
                 self._schedule_deferred_maps_restore()
@@ -4669,6 +4767,7 @@ class PlaylistWindow(QMainWindow):
             payload["last_load_text_maps"] = self._maps_last_load_text
             payload["highest_diff_only_snapshot"] = self._highest_diff_only_snapshot
             payload["highest_diff_only_maps"] = self._highest_diff_only_maps
+            payload["replay_viewer_mode"] = self._replay_viewer_mode
             snapshot_state = self._build_list_state_payload(
                 self._snapshot_all_entries,
                 self._snapshot_source_key,
@@ -4721,6 +4820,15 @@ class PlaylistWindow(QMainWindow):
             self._highest_diff_only_snapshot = highest_diff_only_snapshot
         if isinstance(highest_diff_only_maps, bool):
             self._highest_diff_only_maps = highest_diff_only_maps
+        replay_viewer_mode = data.get("replay_viewer_mode")
+        if replay_viewer_mode in ("bl", "arc"):
+            self._replay_viewer_mode = replay_viewer_mode
+            self._rb_replay_bl.blockSignals(True)
+            self._rb_replay_arc.blockSignals(True)
+            self._rb_replay_arc.setChecked(replay_viewer_mode == "arc")
+            self._rb_replay_bl.setChecked(replay_viewer_mode == "bl")
+            self._rb_replay_bl.blockSignals(False)
+            self._rb_replay_arc.blockSignals(False)
         snapshot_state = data.get("snapshot_state")
         if isinstance(snapshot_state, dict):
             self._restored_snapshot_state = snapshot_state
@@ -5061,8 +5169,11 @@ class PlaylistWindow(QMainWindow):
         if not restored_entries:
             return
 
+        # 保存済みエントリは既に全サービス列の値を持っている（to_dict=asdict）。
+        # ここで巨大なスコアキャッシュ（数十MB）を同期パースして再計算すると
+        # 「Loading saved view...」が長時間ブロックするため、まず保存値のまま即描画し、
+        # サービス列の最新化はバックグラウンドで行って完了後に静かに差し替える。
         self._snapshot_all_entries = _enrich_entries_with_beatsaver_cache(restored_entries)
-        _refresh_snapshot_entries_service_columns(self._snapshot_all_entries, self._steam_id)
         self._snapshot_filtered = list(self._snapshot_all_entries)
         self._snapshot_loaded_source_key = self._snapshot_source_key
         self._snapshot_loaded_steam_id = self._steam_id
@@ -5070,6 +5181,48 @@ class PlaylistWindow(QMainWindow):
             self._activate_table_for_tab(self._source_tab_snapshot_idx)
             self._apply_saved_sort_for_current_tab()
             self._apply_filter()
+        self._start_snapshot_service_refresh()
+
+    def _start_snapshot_service_refresh(self) -> None:
+        """復元済み Snapshot のサービス列を、UI をブロックせずに最新化する。"""
+        entries = self._snapshot_all_entries
+        if not entries:
+            return
+        self._snapshot_restore_generation += 1
+        generation = self._snapshot_restore_generation
+        steam_id = self._steam_id
+        # スレッド側でのミューテーションが表示中のオブジェクトに干渉しないよう複製で処理する。
+        entries_copy = [copy.copy(entry) for entry in entries]
+
+        def _task() -> None:
+            try:
+                _refresh_snapshot_entries_service_columns(entries_copy, steam_id)
+            except Exception:  # noqa: BLE001
+                import traceback
+                traceback.print_exc()
+                return
+            self._snapshot_refresh_signals.done.emit(generation, entries_copy)
+
+        threading.Thread(target=_task, daemon=True).start()
+
+    def _on_snapshot_service_refresh_done(self, generation: int, entries: List[MapEntry]) -> None:
+        """バックグラウンドで最新化した Snapshot エントリを表示へ反映する。"""
+        # 復元後にユーザーが別ソースを Load 済みなら世代が進んでおり、反映しない。
+        if generation != self._snapshot_restore_generation:
+            return
+        if self._snapshot_loaded_steam_id != self._steam_id:
+            return
+        try:
+            self._snapshot_all_entries = entries
+            self._snapshot_filtered = list(entries)
+            if not self._is_maps_tab():
+                # アクティブなバッファも新しいリストへ差し替えてから再フィルタ／再描画する。
+                self._all_entries = self._snapshot_all_entries
+                self._apply_filter()
+                self._sync_active_table_state()
+        except Exception:  # noqa: BLE001
+            import traceback
+            traceback.print_exc()
 
     def _restore_saved_maps_state(self) -> None:
         """保存済み Maps 一覧状態を読み戻して必要なら表示へ反映する。"""
@@ -5790,8 +5943,12 @@ class PlaylistWindow(QMainWindow):
         self._btn_load.setEnabled(False)
         self._installed_beatsaber_dir = ""
         self._reset_beatsaver_cache_status()
+        self._load_generation += 1
+        load_generation = self._load_generation
         self._pending_load_source_key = self._current_source_key()
         self._pending_load_maps_tab = self._is_maps_tab()
+        # Maps タブ（Search）はモーダルにせず、ステータスバー埋め込みの進捗にする。
+        self._inline_progress_active = self._pending_load_maps_tab
         worker_fn = None
         pending_title = ""
         pending_open_path: Optional[Path] = None
@@ -5830,7 +5987,7 @@ class PlaylistWindow(QMainWindow):
                 "unranked_only": self._cb_bs_unranked.isChecked(),
                 "exclude_ai": self._cb_bs_no_ai.isChecked(),
             }
-            worker_fn = lambda sig, opts=beatsaver_opts: self._run_load_beatsaver(sig, steam_id, opts)
+            worker_fn = lambda sig, opts=beatsaver_opts, gen=load_generation: self._run_load_beatsaver(sig, steam_id, opts, gen)
 
         elif self._rb_open.isChecked():
             file_path_str = self._open_edit.text().strip()
@@ -5877,7 +6034,13 @@ class PlaylistWindow(QMainWindow):
         self._start_async_load(worker_fn)
 
     def _show_load_progress_dialog(self, label: str = "Loading...") -> None:
-        """共通のロード進捗ダイアログを生成または再表示する。"""
+        """共通のロード進捗表示（モーダルダイアログ or ステータスバー埋め込み）を出す。"""
+        if self._inline_progress_active:
+            self._inline_progress_label.setText(label)
+            self._inline_progress_label.setVisible(True)
+            self._inline_progress_bar.setVisible(True)
+            self._inline_progress_cancel.setVisible(True)
+            return
         dlg = self._progress_dlg
         if dlg is not None:
             dlg.setLabelText(label)
@@ -5895,15 +6058,28 @@ class PlaylistWindow(QMainWindow):
         QApplication.processEvents()
 
     def _close_load_progress_dialog(self) -> None:
-        """表示中のロード進捗ダイアログを閉じる。"""
+        """表示中のロード進捗表示を閉じる。"""
+        if self._inline_progress_active:
+            self._inline_progress_active = False
+            self._inline_progress_bar.setVisible(False)
+            self._inline_progress_label.setVisible(False)
+            self._inline_progress_cancel.setVisible(False)
+            # 埋め込み中に無効化していたタブ切替を戻す。
+            self._source_tabs.tabBar().setEnabled(True)
         dlg = self._progress_dlg
         self._progress_dlg = None
         if dlg is not None:
             dlg.close()
 
     def _update_load_progress_dialog(self, done: int, total: int, label: str) -> None:
-        """ロード進捗ダイアログの値と表示文言を更新する。"""
+        """ロード進捗表示の値と文言を更新する。"""
         self._show_load_progress_dialog(label)
+        if self._inline_progress_active:
+            bar = self._inline_progress_bar
+            bar.setRange(0, max(1, total))
+            bar.setValue(max(0, min(done, total)))
+            self._inline_progress_label.setText(label)
+            return
         dlg = self._progress_dlg
         if dlg is None:
             return
@@ -5912,14 +6088,26 @@ class PlaylistWindow(QMainWindow):
         dlg.setLabelText(label)
         QApplication.processEvents()
 
+    def _cancel_inline_load(self) -> None:
+        """ステータスバー埋め込み進捗のキャンセルボタン押下時の処理。"""
+        # 世代番号を進めて、以降に届く段階表示バッチ / 完了通知を無視させる。
+        self._load_generation += 1
+        self._close_load_progress_dialog()
+        self._btn_load.setEnabled(True)
+
     def _start_async_load(self, worker_fn) -> None:
-        """API 取得をスレッドで実行してプログレスダイアログを表示する。"""
+        """API 取得をスレッドで実行して進捗表示を出す。"""
         self._show_load_progress_dialog("Loading...")
-        dlg = self._progress_dlg
-        if dlg is None:
-            self._btn_load.setEnabled(True)
-            return
-        dlg.setRange(0, 0)
+        if self._inline_progress_active:
+            # 埋め込み中はタブ切替だけ止めて、それ以外の操作は許可する。
+            self._source_tabs.tabBar().setEnabled(False)
+            self._inline_progress_bar.setRange(0, 0)
+        else:
+            dlg = self._progress_dlg
+            if dlg is None:
+                self._btn_load.setEnabled(True)
+                return
+            dlg.setRange(0, 0)
 
         sigs = self._load_signals
 
@@ -5931,12 +6119,17 @@ class PlaylistWindow(QMainWindow):
 
         t = threading.Thread(target=_task, daemon=True)
 
-        def _on_cancel() -> None:
-            # キャンセルボタンは UI を閉じるだけ（スレッドは自然終了を待つ）
-            self._close_load_progress_dialog()
-            self._btn_load.setEnabled(True)
+        if not self._inline_progress_active:
+            def _on_cancel() -> None:
+                # キャンセルボタンは UI を閉じるだけ（スレッドは自然終了を待つ）。
+                # 世代番号を進めて、以降に届く段階表示バッチを無視させる。
+                self._load_generation += 1
+                self._close_load_progress_dialog()
+                self._btn_load.setEnabled(True)
 
-        dlg.canceled.connect(_on_cancel)
+            dlg = self._progress_dlg
+            if dlg is not None:
+                dlg.canceled.connect(_on_cancel)
         t.start()
 
     def _show_bl_mapper_progress_dialog(self, label: str) -> None:
@@ -6130,10 +6323,13 @@ class PlaylistWindow(QMainWindow):
         except Exception as exc:
             sigs.error.emit(str(exc))
 
-    def _run_load_beatsaver(self, sigs: _LoadSignals, steam_id: Optional[str], opts: Dict[str, object]) -> None:
+    def _run_load_beatsaver(self, sigs: _LoadSignals, steam_id: Optional[str], opts: Dict[str, object], generation: int = 0) -> None:
         """BeatSaver 検索条件を解釈して Maps 用一覧を非同期読み込みする。"""
         def _progress(done: int, total: int, label: str) -> None:
             sigs.progress.emit(done, total, label)
+
+        def _batch(chunk: List[MapEntry]) -> None:
+            sigs.batch.emit(generation, list(chunk))
         try:
             query = str(opts.get("query") or "")
             date_mode = str(opts.get("date_mode") or "days")
@@ -6170,13 +6366,39 @@ class PlaylistWindow(QMainWindow):
                 unranked_only=bool(opts.get("unranked_only", True)),
                 exclude_ai=bool(opts.get("exclude_ai", True)),
                 on_progress=_progress,
+                on_batch=_batch,
             )
             entries = _cache_beatsaver_meta_from_entries(entries)
             sigs.finished.emit(entries)
         except Exception as exc:
             sigs.error.emit(str(exc))
 
+    def _on_load_batch(self, generation: int, entries: List[MapEntry]) -> None:
+        """段階表示: 進行中の BeatSaver 検索のページ結果を順次テーブルへ反映する。"""
+        # 古い（キャンセル済み / 別の）ロード由来のバッチは無視する。
+        if generation != self._load_generation:
+            return
+        if not self._pending_load_maps_tab or not self._is_maps_tab() or not entries:
+            return
+        try:
+            for entry in entries:
+                _apply_beatsaver_meta(entry, None)
+            self._all_entries.extend(entries)
+            self._apply_filter()
+            self._sync_active_table_state()
+            self._count_label.setText(f"{len(self._filtered):,} maps")
+        except Exception:  # noqa: BLE001
+            import traceback
+            traceback.print_exc()
+
     def _on_load_progress(self, done: int, total: int, label: str) -> None:
+        if self._inline_progress_active:
+            bar = self._inline_progress_bar
+            if total > 0:
+                bar.setMaximum(total)
+                bar.setValue(done)
+            self._inline_progress_label.setText(label)
+            return
         dlg = self._progress_dlg
         if dlg is not None and not dlg.wasCanceled():
             if total > 0:
@@ -6185,6 +6407,26 @@ class PlaylistWindow(QMainWindow):
             dlg.setLabelText(label)
 
     def _on_load_finished(self, entries: List[MapEntry]) -> None:
+        # 埋め込み進捗（Maps/Search）がキャンセル済みなら、遅れて届いた完了通知は無視する。
+        if self._pending_load_maps_tab and not self._inline_progress_active:
+            return
+        # PySide6 ではシグナル経由で呼ばれるスロット内で未捕捉の例外が出ると
+        # プロセスごと即座に終了（クラッシュ）してしまう。Search 直後に落ちる事象を
+        # 防ぐため、ここで例外を捕まえてダイアログ表示に留める。
+        try:
+            self._on_load_finished_impl(entries)
+        except Exception as exc:  # noqa: BLE001
+            import traceback
+            traceback.print_exc()
+            self._close_load_progress_dialog()
+            self._btn_load.setEnabled(True)
+            QMessageBox.critical(
+                self,
+                "Load Error",
+                f"読み込み結果の反映中にエラーが発生しました:\n{exc}",
+            )
+
+    def _on_load_finished_impl(self, entries: List[MapEntry]) -> None:
         should_auto_mapper_load_new = bool(
             self._pending_load_maps_tab
             and self._steam_id
@@ -6327,6 +6569,11 @@ class PlaylistWindow(QMainWindow):
         self._btn_preview_local1_replay.setProperty("url", "")
         self._btn_preview_local1_replay.setProperty("leaderboard_id", "")
         self._btn_preview_local1_replay.setProperty("countries", "")
+        self._btn_preview_ss_replay.setEnabled(False)
+        self._btn_preview_ss_replay.setProperty("url", "")
+        self._btn_preview_ss1_replay.setEnabled(False)
+        self._btn_preview_ss1_replay.setProperty("url", "")
+        self._btn_preview_ss1_replay.setProperty("ss_leaderboard_id", "")
 
     def _resolve_bl_top_replay_url(self, leaderboard_id: str, countries: str = "") -> str:
         cache_key = (leaderboard_id, countries.upper())
@@ -6376,6 +6623,36 @@ class PlaylistWindow(QMainWindow):
     def _invalidate_bl_preview_link_indices(self) -> None:
         self._bl_preview_replay_index = None
         self._bl_preview_leaderboard_index = None
+        self._ss_preview_score_index = None
+
+    def _load_ss_preview_score_index(self) -> Dict[Tuple[str, str, str], Tuple[str, str]]:
+        """ScoreSaber の自分スコアから (hash, mode, diff) -> (lb_id, replay付き score_id) を作る。"""
+        if self._ss_preview_score_index is None:
+            index: Dict[Tuple[str, str, str], Tuple[str, str]] = {}
+            steam_id = self._steam_id
+            if steam_id:
+                sp = _CACHE_DIR / f"scoresaber_player_scores_{steam_id}.json"
+                if sp.exists():
+                    try:
+                        sd = json.loads(sp.read_text(encoding="utf-8"))
+                        for lb_id_str, item in (sd.get("scores", {}) or {}).items():
+                            lb = item.get("leaderboard", {}) or {}
+                            song_hash = (lb.get("songHash") or "").upper()
+                            if not song_hash:
+                                continue
+                            diff_info = lb.get("difficulty", {}) or {}
+                            diff_name = _diff_from_raw(
+                                diff_info.get("difficultyRaw") or "",
+                                int(diff_info.get("difficulty") or 0),
+                            )
+                            mode = _mode_from_gamemode(diff_info.get("gameMode") or "SoloStandard")
+                            score = item.get("score", {}) or {}
+                            score_id = str(score.get("id") or "") if score.get("hasReplay") else ""
+                            index[(song_hash, mode, diff_name)] = (str(lb_id_str), score_id)
+                    except Exception:
+                        index = {}
+            self._ss_preview_score_index = index
+        return self._ss_preview_score_index
 
     def _refresh_maps_entries_from_player_caches(self) -> None:
         changed_hashes = _refresh_entries_from_cached_player_scores(self._maps_all_entries, self._steam_id)
@@ -6466,6 +6743,24 @@ class PlaylistWindow(QMainWindow):
         self._btn_preview_replay.setProperty("url", entry.beatleader_replay_url)
         self._btn_preview_download.setEnabled(self._can_download_beatsaver_entry(entry))
         self._btn_preview_download.setProperty("url", entry.beatsaver_download_url)
+
+        # ScoreSaber リプレイ（自分 / Global #1）
+        ss_index = self._load_ss_preview_score_index()
+        ss_lb_id, ss_own_score_id = ss_index.get((song_hash, song_mode, song_diff), ("", ""))
+        if not ss_lb_id:
+            if entry.ss_leaderboard_id:
+                ss_lb_id = str(entry.ss_leaderboard_id)
+            elif entry.source == "scoresaber" and entry.leaderboard_id:
+                ss_lb_id = str(entry.leaderboard_id)
+        ss_own_url = f"https://watch.scoresaber.com/?ssScoreId={ss_own_score_id}" if ss_own_score_id else ""
+        self._btn_preview_ss_replay.setEnabled(bool(ss_own_url))
+        self._btn_preview_ss_replay.setProperty("url", ss_own_url)
+        self._btn_preview_ss1_replay.setEnabled(bool(ss_lb_id or song_hash))
+        self._btn_preview_ss1_replay.setProperty("url", "")
+        self._btn_preview_ss1_replay.setProperty("ss_leaderboard_id", ss_lb_id)
+        self._btn_preview_ss1_replay.setProperty("song_hash", song_hash)
+        self._btn_preview_ss1_replay.setProperty("song_mode", song_mode)
+        self._btn_preview_ss1_replay.setProperty("song_diff", song_diff)
         bl_leaderboard_id = ""
         if entry.source in ("beatsaver", "beatleader"):
             bl_leaderboard_id = entry.leaderboard_id
@@ -6703,6 +6998,28 @@ class PlaylistWindow(QMainWindow):
             self._thumbnail_active_url = ""
         self._pump_thumbnail_queue()
 
+    def _on_replay_viewer_changed(self, _checked: bool = False) -> None:
+        """リプレイビューアの選択（BeatLeader / ArcViewer）を保存する。"""
+        self._replay_viewer_mode = "arc" if self._rb_replay_arc.isChecked() else "bl"
+        self._save_window_state()
+
+    def _transform_replay_url_for_viewer(self, url: str) -> str:
+        """選択中のビューアに合わせて BeatLeader リプレイ URL を変換する。
+
+        BeatLeader: https://replay.beatleader.com/?scoreId=<id>
+        ArcViewer:  https://allpoland.github.io/ArcViewer/?scoreID=<id>
+        （scoreId は同一。ArcViewer 側はクエリキーが scoreID）
+        """
+        if not url:
+            return url
+        match = re.search(r"[?&]scoreId=(\d+)", url, re.IGNORECASE)
+        if not match:
+            return url
+        score_id = match.group(1)
+        if self._replay_viewer_mode == "arc":
+            return f"https://allpoland.github.io/ArcViewer/?scoreID={score_id}"
+        return f"https://replay.beatleader.com/?scoreId={score_id}"
+
     def _open_selected_preview_url(self) -> None:
         sender = self.sender()
         url = str(sender.property("url") if sender is not None else self._btn_preview_open.property("url") or "")
@@ -6742,8 +7059,70 @@ class PlaylistWindow(QMainWindow):
                         entry.beatleader_global1_replay_url = url
                     else:
                         entry.beatleader_local1_replay_url = url
+        if not url and sender is self._btn_preview_ss1_replay:
+            ss_lb_id = str(sender.property("ss_leaderboard_id") or "")
+            if not ss_lb_id:
+                h = str(sender.property("song_hash") or "")
+                m = str(sender.property("song_mode") or "Standard")
+                d = str(sender.property("song_diff") or "ExpertPlus")
+                if h:
+                    ss_lb_id = self._resolve_ss_leaderboard_id_by_hash(h, m, d)
+                    if ss_lb_id:
+                        sender.setProperty("ss_leaderboard_id", ss_lb_id)
+            if ss_lb_id:
+                url = self._resolve_ss_top_replay_url(ss_lb_id)
+                sender.setProperty("url", url)
+            if not url:
+                QMessageBox.information(
+                    self,
+                    "ScoreSaber Replay",
+                    "この譜面の ScoreSaber #1 リプレイが見つかりませんでした。",
+                )
+        # リプレイ系ボタンは選択中のビューア（BeatLeader / ArcViewer）に合わせて変換する。
+        if url and sender in (
+            self._btn_preview_replay,
+            self._btn_preview_global1_replay,
+            self._btn_preview_local1_replay,
+        ):
+            url = self._transform_replay_url_for_viewer(url)
         if url:
             QDesktopServices.openUrl(QUrl(url))
+
+    def _resolve_ss_leaderboard_id_by_hash(self, song_hash: str, mode: str, difficulty: str) -> str:
+        """ScoreSaber API から hash + 難易度で leaderboard id を引く。"""
+        diff_num = {"Easy": 1, "Normal": 3, "Hard": 5, "Expert": 7, "ExpertPlus": 9}.get(difficulty, 9)
+        game_mode = f"Solo{mode}" if mode else "SoloStandard"
+        try:
+            resp = self._bl_api_session.get(
+                f"https://scoresaber.com/api/leaderboard/by-hash/{song_hash}/info",
+                params={"difficulty": diff_num, "gameMode": game_mode},
+                timeout=15,
+            )
+            resp.raise_for_status()
+            return str((resp.json() or {}).get("id") or "")
+        except Exception:
+            return ""
+
+    def _resolve_ss_top_replay_url(self, leaderboard_id: str) -> str:
+        """ScoreSaber leaderboard の上位からリプレイ付き最上位スコアの視聴 URL を得る。"""
+        if leaderboard_id in self._ss_top_replay_cache:
+            return self._ss_top_replay_cache[leaderboard_id]
+        url = ""
+        try:
+            resp = self._bl_api_session.get(
+                f"https://scoresaber.com/api/leaderboard/by-id/{leaderboard_id}/scores",
+                params={"page": 1},
+                timeout=15,
+            )
+            resp.raise_for_status()
+            for score in (resp.json() or {}).get("scores") or []:
+                if score.get("hasReplay") and score.get("id"):
+                    url = f"https://watch.scoresaber.com/?ssScoreId={score['id']}"
+                    break
+        except Exception:
+            url = ""
+        self._ss_top_replay_cache[leaderboard_id] = url
+        return url
 
     def _resolve_beatsaver_download_url(self, entry: MapEntry) -> str:
         url = str(entry.beatsaver_download_url or "").strip()

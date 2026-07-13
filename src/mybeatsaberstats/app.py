@@ -1592,6 +1592,8 @@ class MainWindow(QMainWindow):
 
 
 def run() -> None:
+    from .crash_guard import install_crash_guard
+    install_crash_guard()
     app = QApplication(sys.argv)
     _init_theme(app)  # 保存済み設定 or Windows システム設定でテーマを初期化
     window = MainWindow()

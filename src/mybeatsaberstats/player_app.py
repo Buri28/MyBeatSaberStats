@@ -1003,7 +1003,12 @@ class _ClickableColHover(QObject):
         table.setItemDelegateForColumn(col, self._delegate)
 
     def eventFilter(self, obj, event) -> bool:  # type: ignore[override]
-        if obj is self._table.viewport():
+        try:
+            viewport = self._table.viewport()
+        except RuntimeError:
+            # 基となる QTableWidget が既に破棄されている場合は何もしない。
+            return False
+        if obj is viewport:
             etype = event.type()
             if etype == QEvent.Type.MouseMove:
                 pos = event.position().toPoint()
@@ -1027,12 +1032,16 @@ class _ClickableColHover(QObject):
     def _repaint(self, row: int) -> None:
         if row < 0:
             return
-        model = self._table.model()
-        if model is None:
+        try:
+            model = self._table.model()
+            if model is None:
+                return
+            rect = self._table.visualRect(model.index(row, self._col))
+            if rect.isValid():
+                self._table.viewport().update(rect)
+        except RuntimeError:
+            # 基となる QTableWidget が既に破棄されている場合は無視する。
             return
-        rect = self._table.visualRect(model.index(row, self._col))
-        if rect.isValid():
-            self._table.viewport().update(rect)
 
 
 class _AvatarFetchSignals(QObject):
@@ -3839,6 +3848,7 @@ class PlayerWindow(QMainWindow):
         *,
         show_window: bool = True,
         show_progress: bool = True,
+        skip_maps_restore: bool = False,
     ) -> None:
         steam_id = self._current_player_id()
         progress = self._show_playlist_open_progress("Opening Playlist / Maps...") if show_progress else None
@@ -3849,6 +3859,8 @@ class PlayerWindow(QMainWindow):
                     initial_source_tab=initial_source_tab,
                     parent=None,
                 )
+                # Maps ボタンから開く場合は保存済み一覧の復元をスキップして即表示する。
+                self._playlist_window._skip_maps_restore = skip_maps_restore
             else:
                 if progress is not None:
                     progress.setLabelText("Preparing Playlist / Maps...")
@@ -3871,8 +3883,12 @@ class PlayerWindow(QMainWindow):
         self._show_playlist_window("snapshot")
 
     def open_maps(self) -> None:
-        """Playlist 画面を Maps タブ選択状態で開く。"""
-        self._show_playlist_window("maps")
+        """Playlist 画面を Maps タブ選択状態で開く。
+
+        Maps を開くのは新しい譜面を落とすために直後に Search する用途がほとんどで、
+        保存済み一覧の復元に時間がかかるため、その復元は行わず空の状態で開く。
+        """
+        self._show_playlist_window("maps", skip_maps_restore=True)
 
     def open_settings(self) -> None:
         try:
@@ -4201,6 +4217,8 @@ class PlayerWindow(QMainWindow):
 
 
 def run() -> None:
+    from .crash_guard import install_crash_guard
+    install_crash_guard()
     app: QApplication = QApplication.instance() or QApplication([])  # type: ignore[assignment]
     _init_theme(app)  # 保存済み設定 or Windows システム設定でテーマを初期化
     # アプリ共通アイコンを設定（全ウィンドウのタイトルバー・タスクバーに反映）
