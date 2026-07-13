@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
@@ -45,6 +46,41 @@ def _fetch_bl_leaderboards_by_hash(session: requests.Session, song_hash: str) ->
         if leaderboard_id:
             result[(mode, difficulty)] = leaderboard_id
     return result
+
+
+def _prefetch_bl_leaderboards_for_docs(
+    session: requests.Session,
+    docs: List[dict],
+    cache: Dict[str, Dict[Tuple[str, str], str]],
+    max_workers: int = 16,
+) -> None:
+    """docs に含まれる song hash の BeatLeader leaderboard を並列取得して cache へ格納する。"""
+    hashes: List[str] = []
+    seen: set = set()
+    for doc in docs:
+        versions = doc.get("versions") or []
+        version = next(
+            (item for item in versions if item.get("hash") or item.get("key")),
+            versions[0] if versions else {},
+        )
+        song_hash = (version.get("hash") or "").upper()
+        if song_hash and song_hash not in seen and song_hash not in cache:
+            seen.add(song_hash)
+            hashes.append(song_hash)
+    if not hashes:
+        return
+    workers = max(1, min(max_workers, len(hashes)))
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {
+            executor.submit(_fetch_bl_leaderboards_by_hash, session, h): h
+            for h in hashes
+        }
+        for future in as_completed(futures):
+            song_hash = futures[future]
+            try:
+                cache[song_hash] = future.result()
+            except Exception:
+                cache[song_hash] = {}
 
 
 def _fetch_bl_top_replay_url(session: requests.Session, leaderboard_id: str, countries: str = "") -> str:
@@ -192,11 +228,18 @@ def load_beatsaver_maps(
     unranked_only: bool = True,
     exclude_ai: bool = True,
     on_progress: Optional[Callable[[int, int, str], None]] = None,
+    on_batch: Optional[Callable[[List[MapEntry]], None]] = None,
     session: Optional[requests.Session] = None,
+    bl_lookup_workers: int = 16,
 ) -> List[MapEntry]:
-    """BeatSaver 検索 API とローカル score cache を突き合わせて Maps 一覧を構築する。"""
+    """BeatSaver 検索 API とローカル score cache を突き合わせて Maps 一覧を構築する。
+
+    on_batch: 指定すると 1 ページ処理し終えるごとに、そのページ分の MapEntry 一覧を
+        渡す。UI 側で段階的に描画するために使う（体感速度の改善用）。
+    bl_lookup_workers: BeatLeader leaderboard 取得を並列化する際のワーカー数。
+    """
     if on_progress:
-        on_progress(0, 1, "Preparing BeatSaver search... loading local score caches")
+        on_progress(0, 1, "Preparing... score caches")
     no_date_filter = days == 0 and from_dt is None and to_dt is None
     now = datetime.now(timezone.utc)
     if no_date_filter:
@@ -243,7 +286,7 @@ def load_beatsaver_maps(
     bl_replay_idx = _build_bl_replay_hash_index(bl_scores_raw)
     bl_leaderboard_idx = _build_bl_leaderboard_hash_index(bl_scores_raw)
     if on_progress:
-        on_progress(0, 1, "Preparing BeatSaver search... loading BeatLeader ranked map index")
+        on_progress(0, 1, "Preparing... BL ranked index")
     bl_ranked_idx = _build_bl_hash_index(load_bl_maps())
 
     session = session or requests.Session()
@@ -256,7 +299,7 @@ def load_beatsaver_maps(
         if max_maps is not None and len(entries) >= max_maps:
             break
         if on_progress:
-            on_progress(page, max(pages, 1), f"Searching BeatSaver page {page + 1}/{max(pages, 1)}... requesting API")
+            on_progress(page, max(pages, 1), f"Search: page {page + 1}/{max(pages, 1)}...")
         search_params: Dict[str, str] = {
             "q": search_query,
             "pageSize": str(100 if max_maps is None else min(100, max_maps)),
@@ -280,16 +323,23 @@ def load_beatsaver_maps(
         if not docs:
             break
         if on_progress:
-            on_progress(page, max(pages, 1), f"Searching BeatSaver page {page + 1}/{max(pages, 1)}... processing {len(docs)} results")
+            on_progress(page, max(pages, 1), f"Search: page {page + 1}/{max(pages, 1)} ({len(docs)})")
 
+        # このページに含まれる譜面の BeatLeader leaderboard を並列で先読みしておく。
+        # 以前は 1 譜面ごとに直列で API を叩いていたため非常に遅かった。
+        _prefetch_bl_leaderboards_for_docs(
+            session, docs, bl_api_hash_cache, max_workers=bl_lookup_workers
+        )
+
+        page_entries: List[MapEntry] = []
         for doc_index, doc in enumerate(docs, start=1):
-            if max_maps is not None and len(entries) >= max_maps:
+            if max_maps is not None and len(entries) + len(page_entries) >= max_maps:
                 break
             if on_progress and (doc_index == 1 or doc_index % 10 == 0 or doc_index == len(docs)):
                 on_progress(
                     page,
                     max(pages, 1),
-                    f"Searching BeatSaver page {page + 1}/{max(pages, 1)}... matching leaderboards {doc_index}/{len(docs)}",
+                    f"Search: page {page + 1}/{max(pages, 1)} ({doc_index}/{len(docs)})",
                 )
             if unranked_only and any(doc.get(flag) for flag in ("ranked", "qualified", "blRanked", "blQualified")):
                 continue
@@ -333,9 +383,7 @@ def load_beatsaver_maps(
                 ss_match = ss_score_idx.get(key)
                 bl_match = bl_score_idx.get(key)
                 bl_entry = bl_ranked_idx.get(key)
-                if song_hash not in bl_api_hash_cache:
-                    bl_api_hash_cache[song_hash] = _fetch_bl_leaderboards_by_hash(session, song_hash)
-                bl_leaderboard_id = bl_leaderboard_idx.get(key) or (bl_entry.leaderboard_id if bl_entry else "") or bl_api_hash_cache[song_hash].get((characteristic, difficulty), "")
+                bl_leaderboard_id = bl_leaderboard_idx.get(key) or (bl_entry.leaderboard_id if bl_entry else "") or bl_api_hash_cache.get(song_hash, {}).get((characteristic, difficulty), "")
                 bl_page_url = f"https://beatleader.com/leaderboard/global/{bl_leaderboard_id}" if bl_leaderboard_id else ""
                 bl_replay_url = bl_replay_idx.get(key, "")
 
@@ -356,7 +404,7 @@ def load_beatsaver_maps(
                 if best_match is not None:
                     _, cleared, nf_clear, _, _, _, played_at_ts = best_match
 
-                entries.append(MapEntry(
+                page_entries.append(MapEntry(
                     song_name=metadata.get("songName") or doc.get("name") or "",
                     song_author=metadata.get("songAuthorName") or "",
                     mapper=metadata.get("levelAuthorName") or (doc.get("uploader") or {}).get("name") or "",
@@ -396,6 +444,11 @@ def load_beatsaver_maps(
                     beatleader_attempts=bl_entry.beatleader_attempts if bl_entry else 0,
                     beatleader_replays_watched=bl_entry.beatleader_replays_watched if bl_entry else 0,
                 ))
+
+        entries.extend(page_entries)
+        # 1 ページ処理し終えた時点で UI 側へ渡し、段階的に描画できるようにする。
+        if on_batch and page_entries:
+            on_batch(page_entries)
         if page + 1 >= pages:
             break
 
