@@ -7,6 +7,7 @@ from ..ranking_view import _load_player_index
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
 import json
+import threading
 from pathlib import Path
 from typing import Optional, Dict, TypedDict, Callable
 
@@ -1165,6 +1166,41 @@ def _get_beatleader_player_stats(player_id: str, session: requests.Session) -> d
 #     return stats
 
 
+class _BackgroundFetch:
+    """独立した API フェッチをバックグラウンドスレッドで実行する小さなヘルパー。
+
+    - スレッド間で requests.Session を共有しないよう、専用 Session を持つ
+    - progress は (page, max_pages) を保持するだけで、UI への反映は
+      メインスレッド側が wait() の pump 経由で行う（Qt をスレッドから触らない）
+    - 例外は exc に保持し、呼び出し側が従来どおりベストエフォートで処理する
+    """
+
+    def __init__(self, fn: Callable[["_BackgroundFetch"], None]) -> None:
+        self.exc: Optional[Exception] = None
+        self.progress_state: tuple[int, Optional[int]] = (0, None)
+        self.session = requests.Session()
+
+        def _run() -> None:
+            try:
+                fn(self)
+            except Exception as exc:  # noqa: BLE001
+                self.exc = exc
+
+        self._thread = threading.Thread(target=_run, daemon=True)
+        self._thread.start()
+
+    def on_page(self, page: int, max_pages: Optional[int]) -> None:
+        self.progress_state = (page, max_pages)
+
+    def wait(self, pump: Optional[Callable[[int, Optional[int]], None]] = None) -> None:
+        """完了までメインスレッドで待機する。pump は定期的に呼ばれる（キャンセル例外はそのまま伝播）。"""
+        while self._thread.is_alive():
+            self._thread.join(0.2)
+            if pump is not None:
+                page, max_pages = self.progress_state
+                pump(page, max_pages)
+
+
 def create_snapshot_for_steam_id(
     steam_id: str,
     session: Optional[requests.Session] = None,
@@ -1247,6 +1283,35 @@ def create_snapshot_for_steam_id(
     
     # ScoreSaber / BeatLeader の Ranked Maps キャッシュを先に更新しておく。
     # 初回は全件取得、2回目以降は差分（ScoreSaber）またはメタデータの増分検知（BeatLeader）のみ。
+    # BeatLeader 側は ScoreSaber 側と完全に独立（別ホスト・別キャッシュファイル）なので、
+    # バックグラウンドで並行取得して所要時間を短縮する。
+    bl_ranked_bg: Optional[_BackgroundFetch] = None
+    _bl_ranked_cache_path = CACHE_DIR / "beatleader_ranked_maps.json"
+    _bl_ranked_before_ids: set[str] = set()
+    if options.fetch_bl_ranked_maps:
+        try:
+            _bl_ranked_before_ids = _load_beatleader_ranked_ids(_bl_ranked_cache_path)
+            print("3. BeatLeader Ranked Maps キャッシュ更新（バックグラウンドで並行実行）...")
+            if options.bl_ranked_until is not None:
+                bl_ranked_until = options.bl_ranked_until
+            else:
+                bl_last_fetched = _read_cache_fetched_at(_bl_ranked_cache_path)
+                if bl_last_fetched is not None:
+                    # 月次更新でrankedTime相当フィールドが変わる可能性があるため、前回取得日時より60日前から再取得する
+                    bl_ranked_until = bl_last_fetched - timedelta(days=60)
+                    print(f"BeatLeader Ranked Maps 前回取得日時: {bl_last_fetched.strftime('%Y-%m-%d %H:%M:%S')} UTC → 60日遡り: {bl_ranked_until.strftime('%Y-%m-%d %H:%M:%S')} UTC")
+                else:
+                    bl_ranked_until = None
+                    print("BeatLeader Ranked Maps: 初回取得のため全件取得")
+
+            def _bl_ranked_task(task: _BackgroundFetch, _until=bl_ranked_until) -> None:
+                _get_beatleader_leaderboards_ranked(task.session, progress=task.on_page, fetch_until=_until)
+
+            bl_ranked_bg = _BackgroundFetch(_bl_ranked_task)
+        except Exception as exc:  # noqa: BLE001
+            _rethrow_if_cancelled(exc)
+            bl_ranked_bg = None
+
     if options.fetch_ss_ranked_maps:
         try:
             _ss_ranked_cache_path = CACHE_DIR / "scoresaber_ranked_maps.json"
@@ -1291,11 +1356,8 @@ def create_snapshot_for_steam_id(
         print("2. ScoreSaber Ranked Maps 取得スキップ（オプションが無効）")
         _step(0.05, "Skipping ScoreSaber Ranked Maps...")
 
-    if options.fetch_bl_ranked_maps:
+    if bl_ranked_bg is not None:
         try:
-            _bl_ranked_cache_path = CACHE_DIR / "beatleader_ranked_maps.json"
-            _bl_ranked_before_ids = _load_beatleader_ranked_ids(_bl_ranked_cache_path)
-
             def _bl_leaderboard_progress(page: int, max_pages: Optional[int]) -> None:
                 if max_pages and max_pages > 0:
                     phase_frac = max(0.0, min(1.0, page / max_pages))
@@ -1307,28 +1369,20 @@ def create_snapshot_for_steam_id(
                 phase_percent = int(phase_frac * 100)
                 msg = f"Updating BeatLeader Ranked Maps ({phase_percent}%, page {page_text})..."
                 _step(global_ratio, msg)
-            print("3. BeatLeader Ranked Maps キャッシュ更新...")
-            if options.bl_ranked_until is not None:
-                bl_ranked_until = options.bl_ranked_until
+
+            print("3.1 BeatLeader Ranked Maps バックグラウンド取得の完了待ち...")
+            _step(0.05, "Updating BeatLeader Ranked Maps...")
+            bl_ranked_bg.wait(_bl_leaderboard_progress)
+            if bl_ranked_bg.exc is not None:
+                print(f"BeatLeader Ranked Maps 取得エラー（続行）: {bl_ranked_bg.exc}")
             else:
-                bl_last_fetched = _read_cache_fetched_at(CACHE_DIR / "beatleader_ranked_maps.json")
-                if bl_last_fetched is not None:
-                    # 月次更新でrankedTime相当フィールドが変わる可能性があるため、前回取得日時より60日前から再取得する
-                    bl_ranked_until = bl_last_fetched - timedelta(days=60)
-                    print(f"BeatLeader Ranked Maps 前回取得日時: {bl_last_fetched.strftime('%Y-%m-%d %H:%M:%S')} UTC → 60日遡り: {bl_ranked_until.strftime('%Y-%m-%d %H:%M:%S')} UTC")
-                else:
-                    bl_ranked_until = None
-                    print("BeatLeader Ranked Maps: 初回取得のため全件取得")
-            fetch_label = bl_ranked_until.strftime('%Y-%m-%d %H:%M') if bl_ranked_until else "full"
-            _step(0.05, f"Updating BeatLeader Ranked Maps (last fetch: {fetch_label})...")
-            _get_beatleader_leaderboards_ranked(session, progress=_bl_leaderboard_progress, fetch_until=bl_ranked_until)
-            bl_new_ranked_ids = _load_beatleader_ranked_ids(_bl_ranked_cache_path) - _bl_ranked_before_ids
-            if bl_new_ranked_ids:
-                print(f"BeatLeader Ranked Maps: 新規 ranked 譜面 {len(bl_new_ranked_ids)} 件")
+                bl_new_ranked_ids = _load_beatleader_ranked_ids(_bl_ranked_cache_path) - _bl_ranked_before_ids
+                if bl_new_ranked_ids:
+                    print(f"BeatLeader Ranked Maps: 新規 ranked 譜面 {len(bl_new_ranked_ids)} 件")
         except Exception as exc:  # noqa: BLE001
             _rethrow_if_cancelled(exc)
             pass
-    else:
+    elif not options.fetch_bl_ranked_maps:
         print("3. BeatLeader Ranked Maps 取得スキップ（オプションが無効）")
         _step(0.08, "Skipping BeatLeader Ranked Maps...")
 
@@ -1409,6 +1463,10 @@ def create_snapshot_for_steam_id(
     scoresaber_total_play_count: Optional[int] = None
     scoresaber_ranked_play_count: Optional[int] = None
 
+    # ScoreSaber player scores はキャッシュファイル書き込みのみで後続処理と独立なため、
+    # バックグラウンドで取得しつつ BeatLeader 側の処理を並行して進める。
+    ss_scores_bg: Optional[_BackgroundFetch] = None
+
     if scoresaber_id:
         if options.fetch_scoresaber:
             # まず ScoreSaber の基本情報（PP / ランク）を最新化しておく。
@@ -1434,19 +1492,11 @@ def create_snapshot_for_steam_id(
                     pass
 
             # スナップショット取得時にプレイヤースコアキャッシュも更新しておく。
+            # 取得自体はバックグラウンドで開始し、BeatLeader 側の処理と並行させる
+            # （完了待ちは BeatLeader プレイヤーデータ取得後に行う）。
             try:
                 _step(0.15, "Fetching ScoreSaber player scores (page 1/?)...")
-
-                def _ss_scores_progress(page: int, max_pages: Optional[int]) -> None:
-                    if max_pages and max_pages > 0:
-                        frac = max(0.0, min(1.0, page / max_pages))
-                        msg = f"Fetching ScoreSaber player scores (page {page}/{max_pages})..."
-                    else:
-                        frac = 0.0
-                        msg = f"Fetching ScoreSaber player scores (page {page}/?)..."
-                    _step(0.15 + 0.05 * frac, msg)
-
-                print("5. ScoreSaber プレイヤースコアキャッシュ更新...")
+                print("5. ScoreSaber プレイヤースコアキャッシュ更新（バックグラウンドで並行実行）...")
                 _ss_effective_until = datetime(2000, 1, 1) if options.ss_fetch_all else options.ss_fetch_until
                 if options.ss_fetch_all:
                     print("ScoreSaber: 全スコア再取得モード (fetch_all=True)")
@@ -1466,9 +1516,11 @@ def create_snapshot_for_steam_id(
                     print("ScoreSaberプレイヤースコア: 初回取得")
                     _ss_score_label = "new"
                 _step(0.15, f"Fetching ScoreSaber player scores (last fetch: {_ss_score_label}, page 1/?)...")
-                _get_scoresaber_player_scores(scoresaber_id, session, progress=_ss_scores_progress, fetch_until=_ss_effective_until)
-                if options.ss_fetch_all:
-                    _set_service_reconcile_state("scoresaber", steam_id, full_scan_at=_dt_to_utc_z(datetime.utcnow()))
+
+                def _ss_scores_task(task: _BackgroundFetch, _sid=scoresaber_id, _until=_ss_effective_until) -> None:
+                    _get_scoresaber_player_scores(_sid, task.session, progress=task.on_page, fetch_until=_until)
+
+                ss_scores_bg = _BackgroundFetch(_ss_scores_task)
             except Exception as exc:  # noqa: BLE001
                 _rethrow_if_cancelled(exc)
                 pass
@@ -1616,6 +1668,28 @@ def create_snapshot_for_steam_id(
         else:
             print("7-8. BeatLeader プレイヤーデータ取得スキップ（オプションが無効）")
             _step(0.35, "Skipping BeatLeader player data...")
+
+    # バックグラウンドで開始した ScoreSaber player scores 取得の完了を待つ。
+    if ss_scores_bg is not None:
+        try:
+            def _ss_scores_pump(page: int, max_pages: Optional[int]) -> None:
+                if max_pages and max_pages > 0:
+                    frac = max(0.0, min(1.0, page / max_pages))
+                    msg = f"Fetching ScoreSaber player scores (page {page}/{max_pages})..."
+                else:
+                    frac = 0.0
+                    msg = f"Fetching ScoreSaber player scores (page {page}/?)..."
+                _step(0.35 + 0.02 * frac, msg)
+
+            print("5.1 ScoreSaber プレイヤースコア バックグラウンド取得の完了待ち...")
+            ss_scores_bg.wait(_ss_scores_pump)
+            if ss_scores_bg.exc is not None:
+                print(f"ScoreSaber プレイヤースコア取得エラー（続行）: {ss_scores_bg.exc}")
+            elif options.ss_fetch_all:
+                _set_service_reconcile_state("scoresaber", steam_id, full_scan_at=_dt_to_utc_z(datetime.utcnow()))
+        except Exception as exc:  # noqa: BLE001
+            _rethrow_if_cancelled(exc)
+            pass
 
     # AccSaber ランク / プレイ回数: まずは Overall のキャッシュから紐付け。
     # *_rank_global にグローバル順位、*_rank_country に国別順位を保持する。
