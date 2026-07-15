@@ -6263,6 +6263,9 @@ class PlaylistWindow(QMainWindow):
             sigs.progress.emit(done, total, label)
         try:
             entries = load_bplist_maps(bplist_path, "accsaber_rl", steam_id, on_progress=_progress)
+            _progress(0, 1, "Refreshing service columns...")
+            _refresh_snapshot_entries_service_columns(entries, steam_id)
+            _progress(1, 1, "Refreshing service columns...")
             sigs.finished.emit(entries)
         except Exception as exc:
             sigs.error.emit(str(exc))
@@ -6272,9 +6275,11 @@ class PlaylistWindow(QMainWindow):
         def _progress(done: int, total: int, label: str) -> None:
             sigs.progress.emit(done, total, label)
         try:
-            _progress(0, 1, "Loading ScoreSaber cache...")
+            _progress(0, 2, "Loading ScoreSaber cache...")
             entries = load_ss_maps(steam_id)
-            _progress(1, 1, "Loading ScoreSaber cache...")
+            _progress(1, 2, "Refreshing service columns...")
+            _refresh_snapshot_entries_service_columns(entries, steam_id)
+            _progress(2, 2, "Refreshing service columns...")
             sigs.finished.emit(entries)
         except Exception as exc:
             sigs.error.emit(str(exc))
@@ -6284,9 +6289,11 @@ class PlaylistWindow(QMainWindow):
         def _progress(done: int, total: int, label: str) -> None:
             sigs.progress.emit(done, total, label)
         try:
-            _progress(0, 1, "Loading BeatLeader cache...")
+            _progress(0, 2, "Loading BeatLeader cache...")
             entries = load_bl_maps(steam_id)
-            _progress(1, 1, "Loading BeatLeader cache...")
+            _progress(1, 2, "Refreshing service columns...")
+            _refresh_snapshot_entries_service_columns(entries, steam_id)
+            _progress(2, 2, "Refreshing service columns...")
             sigs.finished.emit(entries)
         except Exception as exc:
             sigs.error.emit(str(exc))
@@ -6296,9 +6303,11 @@ class PlaylistWindow(QMainWindow):
         def _progress(done: int, total: int, label: str) -> None:
             sigs.progress.emit(done, total, label)
         try:
-            _progress(0, 1, f"Loading {bplist_path.name}...")
+            _progress(0, 2, f"Loading {bplist_path.name}...")
             entries = load_bplist_maps(bplist_path, service, steam_id)
-            _progress(1, 1, f"Loading {bplist_path.name}...")
+            _progress(1, 2, "Refreshing service columns...")
+            _refresh_snapshot_entries_service_columns(entries, steam_id)
+            _progress(2, 2, "Refreshing service columns...")
             sigs.finished.emit(entries)
         except Exception as exc:
             sigs.error.emit(str(exc))
@@ -6309,6 +6318,9 @@ class PlaylistWindow(QMainWindow):
             sigs.progress.emit(done, total, label)
         try:
             entries = load_accsaber_maps(steam_id, category, on_progress=_progress)
+            _progress(0, 1, "Refreshing service columns...")
+            _refresh_snapshot_entries_service_columns(entries, steam_id)
+            _progress(1, 1, "Refreshing service columns...")
             sigs.finished.emit(entries)
         except Exception as exc:
             sigs.error.emit(str(exc))
@@ -6319,6 +6331,9 @@ class PlaylistWindow(QMainWindow):
             sigs.progress.emit(done, total, label)
         try:
             entries = load_accsaber_reloaded_maps(steam_id, category, on_progress=_progress)
+            _progress(0, 1, "Refreshing service columns...")
+            _refresh_snapshot_entries_service_columns(entries, steam_id)
+            _progress(1, 1, "Refreshing service columns...")
             sigs.finished.emit(entries)
         except Exception as exc:
             sigs.error.emit(str(exc))
@@ -6434,8 +6449,9 @@ class PlaylistWindow(QMainWindow):
         )
         self._update_load_progress_dialog(0, 3, "Applying loaded data...")
         self._btn_load.setEnabled(True)
-        if not self._pending_load_maps_tab:
-            _refresh_snapshot_entries_service_columns(entries, self._steam_id)
+        # Snapshot 系ソースのサービス列補完（_refresh_snapshot_entries_service_columns）は
+        # 巨大キャッシュの同期パースで UI を長時間ブロックするため、各 _run_load_* の
+        # ワーカースレッド側で実行済み。ここでは反映のみ行う。
         self._all_entries = entries
         if self._pending_load_maps_tab:
             self._maps_loaded_steam_id = self._steam_id
