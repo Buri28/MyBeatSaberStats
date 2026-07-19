@@ -9,8 +9,6 @@ from typing import TYPE_CHECKING
 
 # Public API exposed via package-level import
 __all__ = [
-    "rebuild_player_index_from_global",
-    "ensure_global_rank_caches",
     "collect_beatleader_star_stats",
     "create_snapshot_for_steam_id",
     "SnapshotOptions",
@@ -19,8 +17,6 @@ __all__ = [
 if TYPE_CHECKING:
     # Import names only for static analysis/type checkers to avoid runtime import side-effects
     from .collector import (
-        rebuild_player_index_from_global,
-        ensure_global_rank_caches,
         collect_beatleader_star_stats,
         create_snapshot_for_steam_id,
         SnapshotOptions,

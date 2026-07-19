@@ -1,16 +1,10 @@
 from __future__ import annotations
 
-import json
-from pathlib import Path
 from typing import Optional
 
 import requests
 
-from ..snapshot import BASE_DIR
 from ..accsaber import AccSaberPlayer, fetch_overall, ACCSABER_MIN_AP_SKILL
-
-CACHE_DIR = BASE_DIR / "cache"
-
 
 def _accsaber_profile_exists(steam_id: str, session: requests.Session) -> bool:
     """指定した SteamID の AccSaber プロフィールが存在するかを確認する。
@@ -33,37 +27,13 @@ def _accsaber_profile_exists(steam_id: str, session: requests.Session) -> bool:
     return True
 
 
-def _load_list_cache(path: Path, cls):
-    if not path.exists():
-        return []
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-        # 新形式: {"fetched_at": ..., "data": [...]}
-        if isinstance(raw, dict):
-            data = raw.get("data") or []
-        else:
-            data = raw  # 旧形式: plain list
-        if isinstance(data, list):
-            return [cls(**item) for item in data if isinstance(item, dict)]
-    except Exception:
-        return []
-    return []
-
-
 def _find_accsaber_for_scoresaber_id(
     scoresaber_id: str,
     session: Optional[requests.Session] = None,
 ) -> Optional[AccSaberPlayer]:
+    """Overall リーダーボードをページング検索して指定 ID のプレイヤーを返す。"""
+
     if not scoresaber_id:
-        return None
-
-    acc_path = CACHE_DIR / "accsaber_ranking.json"
-    players = _load_list_cache(acc_path, AccSaberPlayer)
-    for p in players:
-        if getattr(p, "scoresaber_id", None) == scoresaber_id:
-            return p
-
-    if session is None:
         return None
 
     try:

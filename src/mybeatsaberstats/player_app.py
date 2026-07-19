@@ -42,7 +42,6 @@ from PySide6.QtWidgets import (
 from .snapshot import Snapshot, SNAPSHOT_DIR, BASE_DIR, RESOURCES_DIR, StarClearStat, resource_path
 from .theme import table_stylesheet, toggle as _toggle_theme, is_dark, label_cell_color, label_cell_text_color, init_theme as _init_theme, button_label as _theme_button_label, current_theme_mode as _current_theme_mode, set_theme_mode as _set_theme_mode
 from .updater import StartupUpdateChecker, get_current_version
-from .accsaber import AccSaberPlayer, get_accsaber_playlist_map_counts_with_meta
 from .accsaber_reloaded import fetch_all_maps_full as _rl_fetch_all_maps
 from .accsaber_reloaded import build_unplayed_bplist as _rl_build_unplayed_bplist
 from .accsaber_reloaded import fetch_player_all_categories as _rl_fetch_player
@@ -50,7 +49,6 @@ from .accsaber_reloaded import fetch_player_scored_diff_ids as _rl_fetch_scored_
 from .accsaber_reloaded import CATEGORY_IDS as _RL_CATEGORY_IDS
 from .snapshot_view import SnapshotCompareDialog, AccPlayCountBarDelegate, ACC_PLAY_COLORS, ACC_PLAY_COL_CATS
 from .snapshot_graph import SnapshotGraphDialog
-from .app import MainWindow as RankingWindow
 from .settings_store import (
     load_export_all_after_snapshot as _load_export_all_after_snapshot_setting,
     load_mapper_load_new_after_maps as _load_mapper_load_new_after_maps_setting,
@@ -60,7 +58,6 @@ from .settings_store import (
 from .collector.collector import (
     collect_beatleader_star_stats,
     create_snapshot_for_steam_id,
-    ensure_global_rank_caches,
     SnapshotOptions,
     _read_cache_fetched_at,
 )
@@ -273,8 +270,7 @@ class TakeSnapshotDialog(QDialog):
             (self._cb_bl_ranked_maps, _fmt_fetched_with_name(_cache_dir / "beatleader_ranked_maps.json"), []),
             (self._cb_scoresaber,     _fmt_fetched_with_name(_cache_dir / f"scoresaber_player_scores_{_ss_id}.json") if _ss_id else "N/A", []),
             (self._cb_beatleader,     _fmt_fetched_with_name(_cache_dir / f"beatleader_player_scores_{_bl_id}.json") if _bl_id else "N/A", []),
-            (self._cb_accsaber,       _fmt_fetched_with_name(_cache_dir / "accsaber_ranking.json"), [
-                ("　　Ranking Data(players index):", _fmt_fetched_with_name(_cache_dir / "players_index.json")),
+            (self._cb_accsaber,       "", [
                 ("　　True Playlist:",     _fmt_playlist_fetched_with_name("true")),
                 ("　　Standard Playlist:", _fmt_playlist_fetched_with_name("standard")),
                 ("　　Tech Playlist:",     _fmt_playlist_fetched_with_name("tech")),
@@ -1348,23 +1344,7 @@ class PlayerWindow(QMainWindow):
         self.snapshot_latest_button.setToolTip("最新のスナップショットを選択します")
         snapshot_row.addWidget(self.snapshot_latest_button)
 
-        snapshot_row.addSpacing(12) 
-
-        # ランキング表示ボタン（キャッシュされたランキングJSONから統合ランキングを表示）
-        self.ranking_button = QPushButton("🏆 Ranking")
-        self.ranking_button.clicked.connect(self.open_ranking)
-        self.ranking_button.setFixedWidth(86)
-        self.ranking_button.setFixedHeight(_header_control_h)
-        self.ranking_button.setToolTip("キャッシュされたランキングJSONから統合ランキングを表示します")
-        snapshot_row.addWidget(self.ranking_button)
-
-        # ランク情報キャッシュを取得/更新するボタン
-        self.fetch_ranking_button = QPushButton("⬇️ Ranking Data")
-        self.fetch_ranking_button.clicked.connect(self._fetch_ranking_data)
-        self.fetch_ranking_button.setFixedWidth(148)
-        self.fetch_ranking_button.setFixedHeight(_header_control_h)
-        self.fetch_ranking_button.setToolTip("ランク情報キャッシュを取得/更新します")
-        snapshot_row.addWidget(self.fetch_ranking_button)
+        snapshot_row.addSpacing(12)
 
         self._header_buttons = [
             self.snapshot_button,
@@ -1379,8 +1359,6 @@ class PlayerWindow(QMainWindow):
             self.btn_default_layout,
             self.update_button,
             self.snapshot_latest_button,
-            self.ranking_button,
-            self.fetch_ranking_button,
         ]
         self._header_combos = [self.player_combo, self.snapshot_combo]
         self._apply_header_control_style()
@@ -1766,10 +1744,8 @@ class PlayerWindow(QMainWindow):
         # データ
         self._snapshots_by_player: Dict[str, List[Snapshot]] = defaultdict(list)
         self._ss_country_by_id: Dict[str, str] = {}
-        self._acc_players: List[AccSaberPlayer] = []
 
         self._load_player_index_countries()
-        self._load_accsaber_players()
 
         # 前回表示していたプレイヤーIDをキャッシュから復元しておく
         self._last_player_id: Optional[str] = self._load_last_player_id()
@@ -2367,269 +2343,31 @@ class PlayerWindow(QMainWindow):
         return list(stats)
 
     def _load_player_index_countries(self) -> None:
-        """players_index.json から ScoreSaber ID ごとの国コードを読み込む。
+        """players_index.json から ScoreSaber ID ごとの国コードを読み込む。"""
 
-        players_index.json に登録されていないプレイヤー（BL-only として登録されているが
-        実際は SS にも存在するプレイヤー等）は、scoresaber_ranking.json からも補完する。
-        """
-
-        cache_dir = self._cache_dir()
-        path = cache_dir / "players_index.json"
+        path = self._cache_dir() / "players_index.json"
         self._ss_country_by_id.clear()
-
-        if path.exists():
-            try:
-                data = json.loads(path.read_text(encoding="utf-8"))
-                for row in data:
-                    if not isinstance(row, dict):
-                        continue
-                    ss = row.get("scoresaber")
-                    if not isinstance(ss, dict):
-                        continue
-                    sid = str(ss.get("id") or "")
-                    country = str(ss.get("country") or "").upper()
-                    if sid and country:
-                        self._ss_country_by_id[sid] = country
-            except Exception:  # noqa: BLE001
-                pass
-
-        # players_index に無い SS プレイヤーを scoresaber_ranking.json から補完
-        # （BL-only として登録されているが実際は SS にも存在するプレイヤー対応）
-        for ss_cache in ["scoresaber_ranking.json", "scoresaber_JP.json", "scoresaber_ALL.json"]:
-            ss_path = cache_dir / ss_cache
-            if not ss_path.exists():
-                continue
-            try:
-                ss_data = json.loads(ss_path.read_text(encoding="utf-8"))
-                for item in ss_data:
-                    if not isinstance(item, dict):
-                        continue
-                    sid = str(item.get("id") or "")
-                    country = str(item.get("country") or "").upper()
-                    if sid and country and sid not in self._ss_country_by_id:
-                        self._ss_country_by_id[sid] = country
-            except Exception:  # noqa: BLE001
-                continue
-
-        # BeatLeader キャッシュからも補完する。
-        # BL にしか存在しない（SS キャッシュに未登録の）プレイヤーでも
-        # AccSaber に登録されている場合、国コードを特定するために必要。
-        # app.py の _populate_table と同じ方針。
-        for bl_cache in ["beatleader_ranking.json", "beatleader_JP.json"]:
-            bl_path = cache_dir / bl_cache
-            if not bl_path.exists():
-                continue
-            try:
-                bl_data = json.loads(bl_path.read_text(encoding="utf-8"))
-                for item in bl_data:
-                    if not isinstance(item, dict):
-                        continue
-                    sid = str(item.get("id") or "")
-                    country = str(item.get("country") or "").upper()
-                    if sid and country and sid not in self._ss_country_by_id:
-                        self._ss_country_by_id[sid] = country
-            except Exception:  # noqa: BLE001
-                continue
-
-    def _load_accsaber_players(self) -> None:
-        """AccSaber の overall キャッシュからプレイヤー一覧を読み込む。"""
-
-        path = self._cache_dir() / "accsaber_ranking.json"
-        self._acc_players = []
 
         if not path.exists():
             return
 
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
+            # 新形式: {"fetched_at": ..., "rows": [...]} / 旧形式: plain list
+            if isinstance(data, dict):
+                data = data.get("rows") or []
+            for row in data:
+                if not isinstance(row, dict):
+                    continue
+                ss = row.get("scoresaber")
+                if not isinstance(ss, dict):
+                    continue
+                sid = str(ss.get("id") or "")
+                country = str(ss.get("country") or "").upper()
+                if sid and country:
+                    self._ss_country_by_id[sid] = country
         except Exception:  # noqa: BLE001
-            return
-
-        players: List[AccSaberPlayer] = []
-        for item in data:
-            if not isinstance(item, dict):
-                continue
-            try:
-                players.append(AccSaberPlayer(**item))
-            except TypeError:
-                continue
-
-        self._acc_players = players
-
-    def _fetch_ranking_data(self) -> None:
-        """現在選択中のプレイヤーの国に対するランキングキャッシュを取得する。"""
-
-        steam_id = self._current_player_id()
-        if not steam_id:
-            QMessageBox.warning(self, "Fetch Ranking Data", "No player selected.")
-            return
-
-        progress = QProgressDialog("Fetching ranking data...", "Cancel", 0, 100, self)
-        progress.setWindowTitle("Fetch Ranking Data")
-        progress.setWindowModality(Qt.WindowModality.ApplicationModal)
-        progress.setAutoClose(True)
-        progress.setAutoReset(True)
-        progress.show()
-
-        cancelled = False
-
-        def _on_progress(message: str, fraction: float) -> None:
-            nonlocal cancelled
-            if progress.wasCanceled():
-                cancelled = True
-                raise RuntimeError("RANKING_FETCH_CANCELLED")
-            value = int(max(0.0, min(1.0, fraction)) * 100)
-            progress.setValue(value)
-            progress.setLabelText(message)
-            QApplication.processEvents()
-
-        try:
-            ensure_global_rank_caches(progress=_on_progress, steam_id=steam_id)
-        except RuntimeError as exc:
-            if "RANKING_FETCH_CANCELLED" in str(exc):
-                # ユーザーキャンセル時は特にメッセージを出さない
-                pass
-            else:
-                QMessageBox.warning(self, "Fetch Ranking Data", f"Failed to fetch ranking data:\n{exc}")
-        except Exception as exc:  # noqa: BLE001
-            QMessageBox.warning(self, "Fetch Ranking Data", f"Failed to fetch ranking data:\n{exc}")
-        finally:
-            progress.close()
-
-    def open_ranking(self) -> None:
-        """Ranking ボタン押下時に、Stats 画面で表示中プレイヤーの国籍を使ってランキング画面を開く。"""
-
-        steam_id = self._current_player_id()
-        if not steam_id:
-            QMessageBox.warning(self, "Ranking", "プレイヤーが選択されていません。")
-            return
-
-        # Stats 画面で表示しているプレイヤーの国コードを推定
-        country_code = self._current_player_country_code()
-
-        cache_dir = BASE_DIR / "cache"
-        ss_path = cache_dir / "scoresaber_ranking.json"
-        acc_path = cache_dir / "accsaber_ranking.json"
-
-        # 必要なランキングキャッシュが無ければ案内を出す
-        if not ss_path.exists() or not acc_path.exists():
-            QMessageBox.warning(
-                self,
-                "Ranking",
-                "ランキングキャッシュが存在しません。\n"
-                '先に "Fetch Ranking Data" ボタンでランキングデータを取得してください。',
-            )
-            return
-
-        # main.py 側のランキング画面(MainWindow)を Stats から開き、現在プレイヤーの行へスクロール
-        if not hasattr(self, "_ranking_window") or getattr(self, "_ranking_window", None) is None:
-            self._ranking_window = RankingWindow(
-                initial_steam_id=steam_id,
-                initial_country_code=country_code,
-            )
-            # ランキングの画面サイズ
-            self._ranking_window.resize(1650, 800)
-            # ランキング画面でテーマを切り替えたとき Stats 画面の UI も同期する
-            self._ranking_window.dark_mode_button.clicked.connect(self._sync_ui_after_ranking_theme_change)
-        else:
-            win = self._ranking_window
-            try:
-                # 国選択を反映
-                if country_code is None:
-                    win.country_combo.setCurrentIndex(0)
-                else:
-                    matched = False
-                    for i in range(win.country_combo.count()):
-                        data = win.country_combo.itemData(i)
-                        if isinstance(data, str) and data.upper() == country_code:
-                            win.country_combo.setCurrentIndex(i)
-                            matched = True
-                            break
-                    # コンボボックスに項目が無い国コードの場合は、編集テキストとして直接設定
-                    if not matched and len(country_code) == 2:
-                        win.country_combo.setEditText(country_code)
-                        # 手動でテーブルを更新
-                        win._load_all_caches_for_current_country()  # type: ignore[attr-defined]
-                        cc = win._current_country_code()            # type: ignore[attr-defined]
-                        win._populate_table(win.acc_players, win.ss_players, cc)  # type: ignore[attr-defined]
-
-                # フォーカス対象のプレイヤーを更新
-                win._initial_steam_id = steam_id  # type: ignore[attr-defined]
-                win.focus_on_steam_id(steam_id)   # type: ignore[attr-defined]
-            except Exception:
-                pass
-
-        self._ranking_window.show()
-
-    def _compute_acc_country_ranks(self, scoresaber_id: Optional[str]) -> tuple[Optional[int], Optional[int], Optional[int], Optional[int]]:
-        """AccSaber Overall / True / Standard / Tech の Country Rank を計算する。
-
-        players_index.json にある ScoreSaber の国コードと、accsaber_ranking.json の AP を使って、
-        指定 scoresaber_id の国別順位を算出する。該当データが無ければ None。
-        戻り値は (overall, true, standard, tech) のタプル。
-        """
-
-        if not scoresaber_id or not self._acc_players or not self._ss_country_by_id:
-            return (None, None, None, None)
-
-        country = self._ss_country_by_id.get(scoresaber_id)
-        if not country:
-            return (None, None, None, None)
-
-        def _parse_ap(text: str) -> float:
-            if not text:
-                return 0.0
-            t = text.replace(",", "")
-            import re as _re
-
-            m = _re.search(r"[-+]?\d*\.?\d+", t)
-            if not m:
-                return 0.0
-            try:
-                return float(m.group(0))
-            except ValueError:
-                return 0.0
-
-        # 同一国のプレイヤーだけを集める
-        same_country_players: List[AccSaberPlayer] = []
-        for p in self._acc_players:
-            sid = getattr(p, "scoresaber_id", None)
-            if not sid:
-                continue
-            sid_str = str(sid)
-            cc = self._ss_country_by_id.get(sid_str)
-            if cc != country:
-                continue
-            same_country_players.append(p)
-
-        if not same_country_players:
-            return (None, None, None, None)
-
-        def _rank_for(get_ap, skip_zero: bool = False) -> Optional[int]:
-            pool = same_country_players
-            if skip_zero:
-                # AP が 0 / 空のプレイヤーは母集団から除外する
-                # (ランキング画面の app.py と同じ方針)
-                pool = [p for p in pool if _parse_ap(get_ap(p)) > 0.0]
-            players_sorted = sorted(
-                pool,
-                key=lambda p: _parse_ap(get_ap(p)),
-                reverse=True,
-            )
-            rank_val = 1
-            for p in players_sorted:
-                sid = getattr(p, "scoresaber_id", None)
-                if str(sid) == scoresaber_id:
-                    return rank_val
-                rank_val += 1
-            return None
-
-        overall_rank  = _rank_for(lambda p: getattr(p, "total_ap",   ""), skip_zero=False)
-        true_rank     = _rank_for(lambda p: getattr(p, "true_ap",     ""), skip_zero=True)
-        standard_rank = _rank_for(lambda p: getattr(p, "standard_ap", ""), skip_zero=True)
-        tech_rank     = _rank_for(lambda p: getattr(p, "tech_ap",     ""), skip_zero=True)
-
-        return (overall_rank, true_rank, standard_rank, tech_rank)
+            pass
 
     def _sync_ui_after_theme_change(self) -> None:
         """現在のテーマ状態に合わせて Stats 画面側の UI を更新する。"""
@@ -2643,13 +2381,6 @@ class PlayerWindow(QMainWindow):
         self._top_row.setSpacing(2)
         self._update_view()
 
-        rw = getattr(self, "_ranking_window", None)
-        if rw is not None:
-            rw.table.setStyleSheet(table_stylesheet())
-            rw._control_row.setSpacing(2)
-            rw.dark_mode_button.setChecked(dark)
-            rw.dark_mode_button.setText(_theme_button_label())
-
         pw = getattr(self, "_playlist_window", None)
         if pw is not None:
             pw.apply_theme()
@@ -2658,10 +2389,6 @@ class PlayerWindow(QMainWindow):
         pw = getattr(self, "_playlist_window", None)
         if pw is not None:
             pw._export_dir = _load_playlist_export_dir()
-
-    def _sync_ui_after_ranking_theme_change(self) -> None:
-        """ランキング画面でテーマが切り替わったとき Stats 画面側の UI を更新する。"""
-        self._sync_ui_after_theme_change()
 
     def _apply_header_control_style(self) -> None:
         """ヘッダーのコントロール余白をテーマ非依存で揃える。"""
@@ -2718,13 +2445,6 @@ class PlayerWindow(QMainWindow):
         self._top_row.setSpacing(2)
         # ラベルセルの色はテーブル再描画時に反映されるのでビューを再構築する
         self._update_view()
-        # ランキング画面が開いていれば、そちらのテーブルも更新する
-        rw = getattr(self, "_ranking_window", None)
-        if rw is not None:
-            rw.table.setStyleSheet(table_stylesheet())
-            rw._control_row.setSpacing(2)
-            rw.dark_mode_button.setChecked(dark)
-            rw.dark_mode_button.setText(_theme_button_label())
         # プレイリスト画面が開いていれば更新する
         pw = getattr(self, "_playlist_window", None)
         if pw is not None:

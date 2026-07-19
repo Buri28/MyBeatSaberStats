@@ -780,7 +780,7 @@ def _default_cli_install_dir() -> Path:
 
 
 def _default_cli_exe_path(install_dir: Path) -> Path | None:
-    preferred_names = ("MyBeatSaberStats.exe", "MyBeatSaberRanking.exe")
+    preferred_names = ("MyBeatSaberStats.exe",)
     for name in preferred_names:
         candidate = install_dir / name
         if candidate.exists():
