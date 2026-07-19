@@ -714,7 +714,7 @@ static class UpdateInstaller
         if (string.IsNullOrEmpty(installDir) || !Directory.Exists(installDir))
             return null;
 
-        foreach (string name in new[] { "MyBeatSaberStats.exe", "MyBeatSaberRanking.exe" })
+        foreach (string name in new[] { "MyBeatSaberStats.exe" })
         {
             string candidate = Path.Combine(installDir, name);
             if (File.Exists(candidate))

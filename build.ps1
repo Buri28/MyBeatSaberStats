@@ -1,18 +1,12 @@
 ﻿#!/usr/bin/env pwsh
 <#
 .SYNOPSIS
-    MyBeatSaberStats / MyBeatSaberRanking の配布用ビルドスクリプト。
+    MyBeatSaberStats の配布用ビルドスクリプト。
 
 .DESCRIPTION
     PyInstaller で --onedir ビルドを行い、配布フォルダ (release/) を生成する。
     ビルド後に version.json と resources/ を配布フォルダへコピーする。
     -Version を指定すると version.json を更新してからビルドする。
-
-.PARAMETER Target
-    ビルド対象を選択する。
-      "stats"   → MyBeatSaberStats.exe のみ (デフォルト)
-      "ranking" → MyBeatSaberRanking.exe のみ
-      "all"     → 両方ビルド
 
 .PARAMETER Version
     リリースバージョン (例: 1.0.1)。指定すると version.json を更新する。
@@ -22,21 +16,23 @@
     ビルド前に build/ dist/ __pycache__ を削除する。
 
 .EXAMPLE
-    .\.build.ps1                          # Stats 画面だけビルド (バージョン変更なし)
+    .\.build.ps1                          # ビルド (バージョン変更なし)
     .\.build.ps1 -Version 1.0.1           # version.json を 1.0.1 に更新してビルド
-    .\.build.ps1 -Version 1.0.1 -Target all -Clean  # クリーンビルド
+    .\.build.ps1 -Version 1.0.1 -Clean    # クリーンビルド
 #>
 
 param(
-    [ValidateSet("stats", "ranking", "all")]
-    [string]$Target = "stats",
-
     [string]$Version = "",
 
     [switch]$Clean
 )
 
 $ErrorActionPreference = "Stop"
+if ($PSVersionTable.PSVersion.Major -ge 7) {
+    # PowerShell 7 の新しい引数エスケープ規則は csc.exe への手動クォート済み引数 (/win32icon:"...") を
+    # 壊してしまうため、旧来の互換モードに戻す。
+    $PSNativeCommandArgumentPassing = "Legacy"
+}
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Python    = Join-Path $ScriptDir ".venv\Scripts\python.exe"
 $ReleaseDir = Join-Path $ScriptDir "release"
@@ -130,7 +126,6 @@ if (-not (Test-Path $Python)) {
 
 Write-Host ""
 Write-Host "===  MyBeatSaberStats Build  ===" -ForegroundColor Cyan
-Write-Host "Target : $Target"
 Write-Host "Python : $Python"
 Write-Host "Release: $ReleaseDir"
 Write-Host ""
@@ -251,24 +246,17 @@ function Build-CSharpWinExe {
 Write-Host ""
 Write-Host "[2/4] PyInstaller ビルド中..." -ForegroundColor Yellow
 
-if ($Target -eq "stats" -or $Target -eq "all") {
-    Build-Spec "MyBeatSaberStats.spec" "MyBeatSaberStats"
-}
-if ($Target -eq "ranking" -or $Target -eq "all") {
-    Build-Spec "MyBeatSaberRanking.spec" "MyBeatSaberRanking"
-}
-if ($Target -eq "stats" -or $Target -eq "ranking" -or $Target -eq "all") {
-    Build-CSharpWinExe `
-        (Join-Path $ScriptDir "Update.cs") `
-        "Update" `
-        @(
-            "System.Windows.Forms.dll",
-            "System.Drawing.dll",
-            "System.IO.Compression.dll",
-            "System.IO.Compression.FileSystem.dll",
-            "System.Web.Extensions.dll"
-        )
-}
+Build-Spec "MyBeatSaberStats.spec" "MyBeatSaberStats"
+Build-CSharpWinExe `
+    (Join-Path $ScriptDir "Update.cs") `
+    "Update" `
+    @(
+        "System.Windows.Forms.dll",
+        "System.Drawing.dll",
+        "System.IO.Compression.dll",
+        "System.IO.Compression.FileSystem.dll",
+        "System.Web.Extensions.dll"
+    )
 
 # ─────────────────────────────────────────────
 # 共通ファイルのコピー (version.json)
@@ -294,15 +282,12 @@ function Copy-CommonFiles {
     }
 
     # ユーザーに紐づかないキャッシュファイルを release/<ExeName>/cache/ にコピーする
-    # （ランキングデータや譜面数など。プレイヤースコアや設定ファイルは除外）
+    # （譜面数など。プレイヤースコアや設定ファイルは除外）
     $CacheSharedFiles = @(
         "accsaber_playlist_counts.json",
-        "accsaber_ranking.json",
         "beatleader_ranked_maps.json",
-        "beatleader_ranking.json",
         "players_index.json",
-        "scoresaber_ranked_maps.json",
-        "scoresaber_ranking.json"
+        "scoresaber_ranked_maps.json"
     )
     $srcCacheDir  = Join-Path $ScriptDir "cache"
     $destCacheDir = Join-Path $ReleaseDir "$ExeName\cache"
@@ -319,12 +304,7 @@ function Copy-CommonFiles {
     }
 }
 
-if ($Target -eq "stats" -or $Target -eq "all") {
-    Copy-CommonFiles "MyBeatSaberStats"
-}
-if ($Target -eq "ranking" -or $Target -eq "all") {
-    Copy-CommonFiles "MyBeatSaberRanking"
-}
+Copy-CommonFiles "MyBeatSaberStats"
 
 # ─────────────────────────────────────────────
 # 完了メッセージ
@@ -333,18 +313,10 @@ Write-Host ""
 Write-Host "[4/4] ビルド完了！" -ForegroundColor Green
 Write-Host ""
 
-if ($Target -eq "stats" -or $Target -eq "all") {
-    $path = Join-Path $ReleaseDir "MyBeatSaberStats"
-    $size = (Get-ChildItem $path -Recurse -File | Measure-Object -Property Length -Sum).Sum
-    Write-Host ("  MyBeatSaberStats  : {0:N0} MB" -f ($size / 1MB)) -ForegroundColor Cyan
-    Write-Host "    フォルダ: $path"
-}
-if ($Target -eq "ranking" -or $Target -eq "all") {
-    $path = Join-Path $ReleaseDir "MyBeatSaberRanking"
-    $size = (Get-ChildItem $path -Recurse -File | Measure-Object -Property Length -Sum).Sum
-    Write-Host ("  MyBeatSaberRanking: {0:N0} MB" -f ($size / 1MB)) -ForegroundColor Cyan
-    Write-Host "    フォルダ: $path"
-}
+$path = Join-Path $ReleaseDir "MyBeatSaberStats"
+$size = (Get-ChildItem $path -Recurse -File | Measure-Object -Property Length -Sum).Sum
+Write-Host ("  MyBeatSaberStats  : {0:N0} MB" -f ($size / 1MB)) -ForegroundColor Cyan
+Write-Host "    フォルダ: $path"
 
 Write-Host ""
 Write-Host "配布する際は release\ フォルダ内の各フォルダを ZIP 等で圧縮してください。" -ForegroundColor Yellow

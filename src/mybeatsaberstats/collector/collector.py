@@ -2,7 +2,6 @@
 from __future__ import annotations
 def _is_steam_id(value: str | None) -> bool:
     return isinstance(value, str) and value.isdigit() and len(value) == 17
-from ..ranking_view import _load_player_index
 
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
@@ -17,7 +16,7 @@ from collections import defaultdict
 import requests
 
 from ..snapshot import BASE_DIR, SNAPSHOT_DIR, StarClearStat, Snapshot
-from ..scoresaber import ScoreSaberPlayer, fetch_players
+from ..scoresaber import ScoreSaberPlayer
 from .scoresaber import _collect_star_stats_from_scoresaber
 from .scoresaber import _get_scoresaber_player_scores
 from .scoresaber import _get_scoresaber_leaderboards_ranked
@@ -30,16 +29,14 @@ from .beatleader import (
     collect_beatleader_star_stats as _bl_collect_beatleader_star_stats,
     collect_beatleader_star_stats_from_cache as _bl_collect_beatleader_star_stats_from_cache,
 )
-from ..beatleader import BeatLeaderPlayer, fetch_player as fetch_bl_player, fetch_players_ranking
+from ..beatleader import BeatLeaderPlayer, fetch_player as fetch_bl_player
 from .map_store import MapStore
 
 from ..accsaber import (
     AccSaberPlayer,
-    fetch_overall,
     fetch_true,
     fetch_standard,
     fetch_tech,
-    ACCSABER_MIN_AP_GLOBAL,
     ACCSABER_MIN_AP_SKILL,
     get_accsaber_playlist_map_counts_with_meta,
     fetch_and_save_accsaber_maps_cache as _fetch_and_save_accsaber_maps,
@@ -47,7 +44,6 @@ from ..accsaber import (
     compute_effective_played_counts_from_cache as _compute_acc_effective_played_counts,
 )
 from .accsaber import (
-    _load_list_cache,
     _find_accsaber_for_scoresaber_id,
     _find_accsaber_skill_for_scoresaber_id,
 )
@@ -90,9 +86,6 @@ class SnapshotOptions:
     ss_fetch_all: bool = False  # ScoreSaber: 全スコアを最初から再取得 (キャッシュ差分を無視)
     bl_fetch_all: bool = False  # BeatLeader: 全スコアを最初から再取得 (キャッシュ差分を無視)
 
-
-SCORESABER_MIN_PP_GLOBAL = 4000.0
-BEATLEADER_MIN_PP_GLOBAL = 5000.0
 
 # SCORESABER_LEADERBOARDS_URL = "https://scoresaber.com/api/leaderboards"
 # SCORESABER_PLAYER_SCORES_URL = "https://scoresaber.com/api/player/{player_id}/scores"
@@ -276,15 +269,52 @@ def _resolve_reconcile_fetch_until(service: str, steam_id: str) -> tuple[Optiona
     )
 
 
+def _load_player_index() -> Dict[str, Dict[str, object]]:
+    """players_index.json を読み込んで辞書形式で返す。壊れていれば空 dict。"""
+
+    path = CACHE_DIR / "players_index.json"
+    if not path.exists():
+        return {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        # 新形式: {"fetched_at": ..., "rows": [...]}
+        if isinstance(raw, dict):
+            raw = raw.get("rows") or []
+        index: Dict[str, Dict[str, object]] = {}
+        if isinstance(raw, list):
+            for row in raw:
+                if not isinstance(row, dict):
+                    continue
+                sid = str(row.get("steam_id") or "")
+                if not sid:
+                    continue
+                entry: Dict[str, object] = {}
+                ss = row.get("scoresaber")
+                bl = row.get("beatleader")
+                if isinstance(ss, dict):
+                    try:
+                        entry["scoresaber"] = ScoreSaberPlayer(**ss)
+                    except TypeError:
+                        pass
+                if isinstance(bl, dict):
+                    try:
+                        entry["beatleader"] = BeatLeaderPlayer(**bl)
+                    except TypeError:
+                        pass
+                if entry:
+                    index[sid] = entry
+        return index
+    except Exception:  # noqa: BLE001
+        return {}
+
+
 def _save_player_index(
     index: Dict[str, Dict[str, object]],
     update_fetched_at: bool = True,
 ) -> None:
-    """players_index.json を app.MainWindow と同一フォーマットで保存する。
+    """players_index.json を保存する。
 
     update_fetched_at=False の場合は既存ファイルの fetched_at を維持する。
-    全件再構築（ensure_global_rank_caches など）では True を、
-    スナップショット時の個別プレイヤー情報更新では False を渡す。
     """
 
     path = CACHE_DIR / "players_index.json"
@@ -315,100 +345,6 @@ def _save_player_index(
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception:  # noqa: BLE001
         return
-
-
-def _save_list_cache(path: Path, items) -> None:
-    """汎用のリストキャッシュセーバー。dataclass のリストを JSON に保存する。"""
-
-    try:
-        CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        serializable = [asdict(x) for x in items]
-        payload = {
-            "fetched_at": datetime.utcnow().isoformat() + "Z",
-            "data": serializable,
-        }
-        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    except Exception:  # noqa: BLE001
-        return
-
-
-def rebuild_player_index_from_global() -> None:
-    """scoresaber_ALL / beatleader_ALL から players_index.json を再構築する。
-
-    app.MainWindow._rebuild_player_index_from_global と同等の処理を
-    GUI 非依存の関数として切り出したもの。
-    """
-
-    def _norm_name(name: str) -> str:
-        return "".join(ch for ch in name.lower() if ch.isalnum())
-
-    # ScoreSaber グローバル
-    ss_global_path = CACHE_DIR / "scoresaber_ranking.json"
-    ss_global: list[ScoreSaberPlayer] = []
-    if ss_global_path.exists():
-        try:
-            ss_global = _load_list_cache(ss_global_path, ScoreSaberPlayer)
-        except Exception:  # noqa: BLE001
-            ss_global = []
-
-    # BeatLeader グローバル
-    bl_global_path = CACHE_DIR / "beatleader_ranking.json"
-    bl_global: list[BeatLeaderPlayer] = []
-    if bl_global_path.exists():
-        try:
-            bl_global = _load_list_cache(bl_global_path, BeatLeaderPlayer)
-        except Exception:  # noqa: BLE001
-            bl_global = []
-
-    index: Dict[str, Dict[str, object]] = {}
-
-    # ScoreSaber プレイヤーを steam_id でインデックス化
-    for p in ss_global:
-        if not p.id:
-            continue
-        index[str(p.id)] = {"scoresaber": p}
-
-    # BeatLeader プレイヤーを id (SteamID) で突き合わせ
-    # BL の id == SS の id == SteamID なので直接マッチング可能
-    bl_by_id: Dict[str, BeatLeaderPlayer] = {}
-    for p in bl_global:
-        if p.id:
-            bl_by_id[str(p.id)] = p
-
-    # 名前+国コードでフォールバックマッチング用マップ
-    ss_by_name_country: Dict[tuple[str, str], list[ScoreSaberPlayer]] = {}
-    for p in ss_global:
-        if not p.name or not p.country:
-            continue
-        key = (_norm_name(p.name), p.country.upper())
-        ss_by_name_country.setdefault(key, []).append(p)
-
-    for bl_id, bl_p in bl_by_id.items():
-        if bl_id in index:
-            # SS と直接 ID 一致 → BL 情報を追加
-            index[bl_id]["beatleader"] = bl_p
-        else:
-            # SS に対応する ID がない場合、名前+国でフォールバック
-            if bl_p.name and bl_p.country:
-                key = (_norm_name(bl_p.name), bl_p.country.upper())
-                ss_candidates = ss_by_name_country.get(key, [])
-                if len(ss_candidates) == 1:
-                    ss_id = str(ss_candidates[0].id)
-                    index.setdefault(ss_id, {"scoresaber": ss_candidates[0]})
-                    index[ss_id]["beatleader"] = bl_p
-                else:
-                    # SS に存在しない BL プレイヤーもインデックスに追加（BL-only）
-                    index[bl_id] = {"beatleader": bl_p}
-
-    _save_player_index(index)
-
-
-
-def _load_accsaber_players() -> list[AccSaberPlayer]:
-    """AccSaber グローバルリーダーボードキャッシュをすべて読み込む。"""
-
-    acc_path = CACHE_DIR / "accsaber_ranking.json"
-    return _load_list_cache(acc_path, AccSaberPlayer)
 
 
 def _find_last_successful_accsaber_snapshot(
@@ -504,274 +440,6 @@ def _save_cached_pages(path: Path, pages: list[dict]) -> None:
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
-def _fetch_and_save_accsaber_ranking(
-    session: requests.Session,
-    progress: Optional[Callable[[str, float], None]] = None,
-) -> bool:
-    """AccSaber の Overall + True/Standard/Tech ランキングを全件取得して accsaber_ranking.json に保存する。
-
-    progress(message, fraction) は 0.0–1.0 の相対進捗コールバック（省略可）。
-    保存に成功したら True、失敗したら False を返す。
-    RuntimeError（SNAPSHOT_CANCELLED 等）は呼び出し元へ再スローする。
-    """
-    import re as _re
-
-    acc_rank_path = CACHE_DIR / "accsaber_ranking.json"
-
-    def _step(ratio: float, message: str) -> None:
-        if progress is not None:
-            progress(message, max(0.0, min(1.0, ratio)))
-
-    def _parse_ap_local(text: str | None) -> float:
-        if not text:
-            return 0.0
-        t = text.replace(",", "")
-        m = _re.search(r"[-+]?\d*\.?\d+", t)
-        if not m:
-            return 0.0
-        try:
-            return float(m.group(0))
-        except ValueError:
-            return 0.0
-
-    try:
-        acc_players: list[AccSaberPlayer] = []
-        max_pages = 200
-
-        for page in range(1, max_pages + 1):
-            phase_frac = min(1.0, page / max_pages)
-            _step(0.60 * phase_frac, f"Fetching AccSaber overall ranking... (page {page})")
-
-            page_players = fetch_overall(country=None, page=page, session=session)
-            if not page_players:
-                break
-            for p in page_players:
-                ap_value = _parse_ap_local(getattr(p, "total_ap", ""))
-                if ap_value >= ACCSABER_MIN_AP_GLOBAL:
-                    acc_players.append(p)
-
-            last_ap = _parse_ap_local(getattr(page_players[-1], "total_ap", ""))
-            if last_ap < ACCSABER_MIN_AP_GLOBAL:
-                break
-
-        by_id: dict[str, AccSaberPlayer] = {}
-        for p in acc_players:
-            sid = getattr(p, "scoresaber_id", None)
-            if not sid:
-                continue
-            by_id[str(sid)] = p
-
-        def _enrich_skill(leaderboard_fetch, attr_name: str, label: str, base_ratio: float) -> None:
-            max_pages_skill = 200
-            for sk_page in range(1, max_pages_skill + 1):
-                _step(base_ratio, f"Fetching AccSaber {label} AP... (page {sk_page})")
-                try:
-                    skill_players = leaderboard_fetch(country=None, page=sk_page, session=session)
-                except Exception:  # noqa: BLE001
-                    break
-                if not skill_players:
-                    break
-                for sp in skill_players:
-                    sid = getattr(sp, "scoresaber_id", None)
-                    if not sid:
-                        continue
-                    sid_str = str(sid)
-                    if sid_str in by_id:
-                        setattr(by_id[sid_str], attr_name, getattr(sp, "total_ap", ""))
-                    else:
-                        new_p = AccSaberPlayer(
-                            rank=getattr(sp, "rank", 0),
-                            name=getattr(sp, "name", ""),
-                            total_ap="0",
-                            average_acc=getattr(sp, "average_acc", ""),
-                            plays=getattr(sp, "plays", ""),
-                            top_play_pp=getattr(sp, "top_play_pp", ""),
-                            scoresaber_id=sid_str,
-                        )
-                        setattr(new_p, attr_name, getattr(sp, "total_ap", ""))
-                        acc_players.append(new_p)
-                        by_id[sid_str] = new_p
-
-        try:
-            _enrich_skill(fetch_true, "true_ap", "True", 0.65)
-            _enrich_skill(fetch_standard, "standard_ap", "Standard", 0.75)
-            _enrich_skill(fetch_tech, "tech_ap", "Tech", 0.85)
-        except Exception:  # noqa: BLE001
-            pass
-
-        map_store_instance = MapStore()
-        map_store_instance.acc_players = {p.scoresaber_id: p for p in acc_players if p.scoresaber_id}
-        _save_list_cache(acc_rank_path, acc_players)
-        return True
-    except RuntimeError:
-        raise  # SNAPSHOT_CANCELLED などは呼び出し元へ伝播させる
-    except Exception:  # noqa: BLE001
-        return False
-
-
-def ensure_global_rank_caches(
-    session: Optional[requests.Session] = None,
-    progress: Optional[Callable[[str, float], None]] = None,
-    steam_id: Optional[str] = None,
-) -> None:
-    """ScoreSaber / BeatLeader / AccSaber のランキングキャッシュを用意する。
-
-    steam_id が指定されている場合は、以下のフローでキャッシュを構築する:
-
-    1. AccSaber の Overall ランキングから 10000AP 以上を accsaber_ranking.json に保存
-    2. steam_id から国籍 (country) を特定する
-    3. 特定した国籍の ScoreSaber ランクから 4000pp 以上を scoresaber_ranking.json に保存
-    4. 特定した国籍の BeatLeader ランクから 5000pp 以上を beatleader_ranking.json に保存
-    5. 上記キャッシュから players_index.json を再構築
-
-    steam_id が None の場合は、従来どおりグローバルランキング (ALL) を対象にキャッシュを構築する。
-    """
-
-    if session is None:
-        session = requests.Session()
-
-    def _step(ratio: float, message: str) -> None:
-        if progress is not None:
-            progress(message, max(0.0, min(1.0, ratio)))
-
-    ss_rank_path = CACHE_DIR / "scoresaber_ranking.json"
-    bl_rank_path = CACHE_DIR / "beatleader_ranking.json"
-    acc_rank_path = CACHE_DIR / "accsaber_ranking.json"
-
-    # AccSaber overall (10000AP 以上) を最新化する
-    _acc_ok = _fetch_and_save_accsaber_ranking(
-        session,
-        progress=lambda msg, frac: _step(frac * 0.30, msg),
-    )
-    if not _acc_ok:
-        _step(0.30, "Failed to fetch AccSaber ranking (continuing)...")
-
-    # steam_id から国籍を特定する (あれば大文字 2 文字コード)
-    target_country: Optional[str] = None
-    if steam_id:
-        try:
-            existing_index = _load_player_index()
-        except Exception:  # noqa: BLE001
-            existing_index = {}
-
-        entry = existing_index.get(steam_id)
-        if isinstance(entry, dict):
-            ss_entry = entry.get("scoresaber")
-            if isinstance(ss_entry, ScoreSaberPlayer) and ss_entry.country:
-                target_country = ss_entry.country.upper()
-            else:
-                bl_entry = entry.get("beatleader")
-                if isinstance(bl_entry, BeatLeaderPlayer) and bl_entry.country:
-                    target_country = bl_entry.country.upper()
-
-        # players_index に無い場合は、API から直接プレイヤー情報を取得して国籍を推定する
-        if not target_country and _is_steam_id(steam_id):
-            try:
-                ss_basic = _fetch_scoresaber_player_basic(steam_id, session)
-            except Exception:  # noqa: BLE001
-                ss_basic = None
-            if ss_basic is not None and ss_basic.country:
-                target_country = ss_basic.country.upper()
-            map_store_instance = MapStore()
-            map_store_instance.ss_basic_info[steam_id] = ss_basic
-
-            if not target_country:
-                try:
-                    bl_basic = fetch_bl_player(steam_id, session=session)
-                except Exception:  # noqa: BLE001
-                    bl_basic = None
-                if bl_basic is not None and bl_basic.country:
-                    target_country = bl_basic.country.upper()
-                map_store_instance = MapStore()
-                map_store_instance.bl_basic_info[steam_id] = bl_basic
-
-    # ScoreSaber (4000pp 以上) - target_country があればその国に絞る
-    try:
-        label_country = target_country or "ALL"
-        _step(0.30, f"Fetching ScoreSaber rankings ({label_country})... (page 1)")
-        ss_players: list[ScoreSaberPlayer] = []
-        max_pages_ss = 200
-        for page in range(1, max_pages_ss + 1):
-            page_players = fetch_players(country=target_country, page=page, session=session)
-            if not page_players:
-                break
-
-            for p in page_players:
-                # 念のため country フィルタもローカル側で確認する
-                if target_country and (p.country or "").upper() != target_country:
-                    continue
-                if p.pp >= SCORESABER_MIN_PP_GLOBAL:
-                    ss_players.append(p)
-
-            if page_players[-1].pp < SCORESABER_MIN_PP_GLOBAL:
-                break
-
-            # 0.30〜0.65 を ScoreSaber フェーズとして使う
-            phase_frac = min(1.0, page / max_pages_ss)
-            _step(0.30 + 0.35 * phase_frac, f"Fetching ScoreSaber rankings ({label_country})... (page {page})")
-
-        _save_list_cache(ss_rank_path, ss_players)
-    except Exception:  # noqa: BLE001
-        _step(0.65, "Failed to fetch ScoreSaber rankings (continuing)...")
-
-    # BeatLeader (5000pp 以上) - target_country があればローカルフィルタで絞る
-    try:
-        bl_all_players = fetch_players_ranking(
-            min_pp=BEATLEADER_MIN_PP_GLOBAL,
-            session=session,
-            progress=lambda page, max_pages: _step(
-                0.65 + 0.25 * min(1.0, page / float(max_pages or 1)),
-                f"Fetching BeatLeader rankings... (page {page})",
-            ),
-        )
-
-        if target_country:
-            bl_players = [
-                p for p in bl_all_players if (p.country or "").upper() == target_country
-            ]
-        else:
-            bl_players = bl_all_players
-
-        _save_list_cache(bl_rank_path, bl_players)
-    except Exception:  # noqa: BLE001
-        _step(0.90, "Failed to fetch BeatLeader rankings (continuing)...")
-
-    # プレイヤーインデックスを再構築
-    try:
-        _step(0.95, "Rebuilding player index...")
-        rebuild_player_index_from_global()
-        _step(1.0, "Ranking caches ready.")
-    except Exception:  # noqa: BLE001
-        _step(1.0, "Failed to rebuild player index.")
-
-    # AccSaber プレイリスト総譜面数を更新する（accsaber_playlist_counts.json）
-    try:
-        get_accsaber_playlist_map_counts_with_meta(session=session)
-    except Exception:  # noqa: BLE001
-        pass
-
-    # AccSaber Reloaded 総譜面数を更新する（accsaber_reloaded_map_counts.json）
-    try:
-        _fetch_reloaded_map_counts(session=session)
-    except Exception:  # noqa: BLE001
-        pass
-
-    # AccSaber マップデータ（ranked-maps + プレイリスト）をキャッシュに保存する
-    try:
-        _fetch_and_save_accsaber_maps(session=session)
-    except Exception:  # noqa: BLE001
-        pass
-
-    # AccSaber Reloaded 全マップデータをキャッシュに保存する
-    try:
-        _fetch_and_save_rl_maps(session=session)
-    except Exception:  # noqa: BLE001
-        pass
-
-
-
 
 
 def _get_beatleader_leaderboards_ranked(
@@ -1211,8 +879,7 @@ def create_snapshot_for_steam_id(
 ) -> Snapshot:
     """指定 SteamID(または players_index のキー)の現在ステータスから Snapshot を生成する。
 
-    事前に GUI 側の Full Sync などで players_index.json / accsaber_ranking.json を
-    用意しておく前提。
+    players_index.json に無いプレイヤーは ScoreSaber / BeatLeader API から直接取得して補完する。
     options で各データソースの取得を個別にスキップできる。
     """
     # options が None の場合はすべて取得
@@ -1254,33 +921,6 @@ def create_snapshot_for_steam_id(
         session = requests.Session()
     assert session is not None
 
-    # 条件: accsaber_ranking.json / scoresaber_ranking.json / beatleader_ranking.json のうち
-    # いずれか1つでも存在しない場合のみランキング取得を行う。
-    ss_rank_path = CACHE_DIR / "scoresaber_ranking.json"
-    bl_rank_path = CACHE_DIR / "beatleader_ranking.json"
-    acc_rank_path = CACHE_DIR / "accsaber_ranking.json"
-
-    # ランキングキャッシュが全て揃っているか確認
-    # コメントは日本語、画面の表示は英語
-    print("1.1 ランキングキャッシュの確認...")
-    need_ranking_fetch = not (ss_rank_path.exists() and bl_rank_path.exists() and acc_rank_path.exists())
-
-    # ensure_global_rank_caches が AccSaber を再フェッチした場合は True になる
-    _acc_ranking_refreshed = False
-
-    if need_ranking_fetch:
-        try:
-            def _fullsync_progress(message: str, frac: float) -> None:
-                # 0.00 → 0.02 を Full Sync 用に使う
-                _step(0.02 * frac, message)
-            print("1.1.1 ランキングキャッシュ作成...")
-            ensure_global_rank_caches(session=session, progress=_fullsync_progress, steam_id=steam_id)
-            _acc_ranking_refreshed = True
-        except Exception as exc:  # noqa: BLE001
-            _rethrow_if_cancelled(exc)
-            # ランキングキャッシュの準備に失敗しても、可能な範囲でスナップショット作成を続行する
-            pass
-    
     # ScoreSaber / BeatLeader の Ranked Maps キャッシュを先に更新しておく。
     # 初回は全件取得、2回目以降は差分（ScoreSaber）またはメタデータの増分検知（BeatLeader）のみ。
     # BeatLeader 側は ScoreSaber 側と完全に独立（別ホスト・別キャッシュファイル）なので、
@@ -1391,16 +1031,6 @@ def create_snapshot_for_steam_id(
     _step(0.08, "Loading player index...")
     player_index = _load_player_index()
     print("4.1 プレイヤーインデックスの確認完了。")
-    # players_index.json がまだ無い / 空の場合は、可能であれば
-    # scoresaber_ALL / beatleader_ALL からインデックスを自動再構築する。
-    if not player_index:
-        try:
-            rebuild_player_index_from_global()
-            player_index = _load_player_index()
-            print("4.2 プレイヤーインデックスの再構築完了。")
-        except Exception as exc:  # noqa: BLE001
-            _rethrow_if_cancelled(exc)
-            player_index = {}
     map_store = MapStore()
     map_store.player_index = player_index
     
@@ -1760,21 +1390,10 @@ def create_snapshot_for_steam_id(
 
     if options.fetch_accsaber:
         print("9. AccSaber プレイヤーステータス取得...")
-        # AccSaber ランキングキャッシュが未更新の場合は再フェッチして fetched_at を最新化する
-        if not _acc_ranking_refreshed:
-            print("9.0 AccSaber ランキングキャッシュ再フェッチ...")
-            _step(0.40, "Fetching AccSaber overall ranking...")
-            try:
-                _fetch_and_save_accsaber_ranking(
-                    session,
-                    progress=lambda msg, frac: _step(0.40 + frac * 0.03, msg),
-                )
-            except Exception as exc:  # noqa: BLE001
-                _rethrow_if_cancelled(exc)
-        _step(0.43, "Loading AccSaber overall cache...")
+        _step(0.43, "Fetching AccSaber overall leaderboard...")
         acc_overall = _find_accsaber_for_scoresaber_id(scoresaber_id, session=session) if scoresaber_id else None
 
-        # Overall はキャッシュから rank / plays を取得（rank はグローバル順位）
+        # Overall のリーダーボード検索結果から rank / plays を取得（rank はグローバル順位）
         if acc_overall is not None:
             acc_overall_rank_global = acc_overall.rank
             acc_overall_play_count = _parse_acc_plays(getattr(acc_overall, "plays", ""))
@@ -1901,107 +1520,6 @@ def create_snapshot_for_steam_id(
                     _msg = "AccSaber Tech: API fetch failed"
                 print(f"9.3 {_msg}")
                 _add_warning(_msg)
-
-            # JP 国内順位は accsaber_ranking.json 全体と players_index.json を使って計算する
-            try:
-                print("9.4 AccSaber 国内ランク計算...")
-                _step(0.60, "Loading AccSaber players for JP ranks...")
-                acc_players = _load_accsaber_players()
-            except Exception:  # noqa: BLE001
-                acc_players = []
-
-            if acc_players and scoresaber_country:
-                ss_country_by_id: dict[str, str] = {}
-                try:
-                    index_all = _load_player_index()
-                except Exception:  # noqa: BLE001
-                    index_all = {}
-
-                for entry_all in index_all.values():
-                    ss_player = entry_all.get("scoresaber")
-                    if isinstance(ss_player, ScoreSaberPlayer) and ss_player.id and ss_player.country:
-                        ss_country_by_id[str(ss_player.id)] = str(ss_player.country).upper()
-
-                # BeatLeader キャッシュを先に処理する（app.py と同じ優先順位）。
-                # BL の id は Steam ID (= ScoreSaber ID) と共通。
-                # scoresaber_ranking.json に古い国コードが残っている場合でも
-                # BL の最新データが優先されるよう、SS ファイルループより前に処理する。
-                for bl_cache_name in ["beatleader_JP.json", "beatleader_ranking.json"]:
-                    bl_cache_path = CACHE_DIR / bl_cache_name
-                    if not bl_cache_path.exists():
-                        continue
-                    try:
-                        bl_cache_data = json.loads(bl_cache_path.read_text(encoding="utf-8"))
-                        for bl_item in bl_cache_data:
-                            if not isinstance(bl_item, dict):
-                                continue
-                            bl_id = str(bl_item.get("id") or "")
-                            bl_cc = str(bl_item.get("country") or "").upper()
-                            if bl_id and bl_cc and bl_id not in ss_country_by_id:
-                                ss_country_by_id[bl_id] = bl_cc
-                    except Exception:  # noqa: BLE001
-                        continue
-
-                # players_index に無い SS プレイヤーを scoresaber_ranking.json から補完
-                # （BL-only として登録されているが実際は SS にも存在するプレイヤー対応）
-                for ss_cache_name in ["scoresaber_ranking.json", "scoresaber_JP.json", "scoresaber_ALL.json"]:
-                    ss_cache_path = CACHE_DIR / ss_cache_name
-                    if not ss_cache_path.exists():
-                        continue
-                    try:
-                        ss_cache_data = json.loads(ss_cache_path.read_text(encoding="utf-8"))
-                        for ss_item in ss_cache_data:
-                            if not isinstance(ss_item, dict):
-                                continue
-                            sid_c = str(ss_item.get("id") or "")
-                            cc_c = str(ss_item.get("country") or "").upper()
-                            if sid_c and cc_c and sid_c not in ss_country_by_id:
-                                ss_country_by_id[sid_c] = cc_c
-                    except Exception:  # noqa: BLE001
-                        continue
-
-                country = str(scoresaber_country).upper()
-                same_country_players: list[AccSaberPlayer] = []
-                for p in acc_players:
-                    sid = getattr(p, "scoresaber_id", None)
-                    if not sid:
-                        continue
-                    sid_str = str(sid)
-                    cc = ss_country_by_id.get(sid_str)
-                    if cc != country:
-                        continue
-                    same_country_players.append(p)
-
-                if same_country_players:
-                    def _rank_for(get_ap, skip_zero: bool = False) -> Optional[int]:
-                        # Overall は全員を母集団にする。
-                        # True / Standard / Tech は AP > 0 のプレイヤーのみを母集団にする。
-                        # ランキング画面 (app.py の _build_skill_country_ranks) と同じ方針。
-                        pool = [
-                            p for p in same_country_players
-                            if not skip_zero or _parse_ap(get_ap(p)) > 0.0
-                        ]
-                        if not pool:
-                            return None
-                        players_sorted = sorted(
-                            pool,
-                            key=lambda p: _parse_ap(get_ap(p)),
-                            reverse=True,
-                        )
-                        rank_val = 1
-                        for p in players_sorted:
-                            sid = getattr(p, "scoresaber_id", None)
-                            if not sid:
-                                continue  # sid なしは順位にカウントしない (app.py と同じ挙動)
-                            if str(sid) == scoresaber_id:
-                                return rank_val
-                            rank_val += 1
-                        return None
-
-                    acc_overall_rank_country  = _rank_for(lambda p: getattr(p, "total_ap",   ""), skip_zero=False)
-                    acc_true_rank_country     = _rank_for(lambda p: getattr(p, "true_ap",     ""), skip_zero=True)
-                    acc_standard_rank_country = _rank_for(lambda p: getattr(p, "standard_ap", ""), skip_zero=True)
-                    acc_tech_rank_country     = _rank_for(lambda p: getattr(p, "tech_ap",     ""), skip_zero=True)
 
         # AccSaber プレイリスト総譜面数を更新する（accsaber_playlist_counts.json）
         try:
