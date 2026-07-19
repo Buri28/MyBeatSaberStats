@@ -32,21 +32,6 @@ from .beatleader import (
 from ..beatleader import BeatLeaderPlayer, fetch_player as fetch_bl_player
 from .map_store import MapStore
 
-from ..accsaber import (
-    AccSaberPlayer,
-    fetch_true,
-    fetch_standard,
-    fetch_tech,
-    ACCSABER_MIN_AP_SKILL,
-    get_accsaber_playlist_map_counts_with_meta,
-    fetch_and_save_accsaber_maps_cache as _fetch_and_save_accsaber_maps,
-    fetch_and_save_player_scores_cache as _fetch_and_save_acc_player_scores,
-    compute_effective_played_counts_from_cache as _compute_acc_effective_played_counts,
-)
-from .accsaber import (
-    _find_accsaber_for_scoresaber_id,
-    _find_accsaber_skill_for_scoresaber_id,
-)
 from ..accsaber_reloaded import fetch_player_all_categories as _fetch_accsaber_reloaded
 from ..accsaber_reloaded import fetch_player_xp as _fetch_accsaber_reloaded_xp
 from ..accsaber_reloaded import fetch_reloaded_map_counts as _fetch_reloaded_map_counts
@@ -75,8 +60,7 @@ class SnapshotOptions:
     fetch_bl_ranked_maps: bool = True    # BeatLeader Ranked Maps
     fetch_scoresaber: bool = True        # ScoreSaber プレイヤー情報・スコア・統計
     fetch_beatleader: bool = True        # BeatLeader プレイヤー情報・スコア・統計
-    fetch_accsaber: bool = True          # AccSaber ランク情報
-    fetch_accsaber_reloaded: bool = True # AccSaber Reloaded ランク情報
+    fetch_accsaber_reloaded: bool = True # AccSaber (Reloaded) ランク情報
     fetch_ss_star_stats: bool = True     # ScoreSaber ★別クリア統計
     fetch_bl_star_stats: bool = True     # BeatLeader ★別クリア統計
     ss_fetch_until: Optional[datetime] = None  # ScoreSaber スコア取得の遡り期限 (None=自動)
@@ -346,92 +330,6 @@ def _save_player_index(
     except Exception:  # noqa: BLE001
         return
 
-
-def _find_last_successful_accsaber_snapshot(
-    steam_id: str,
-    category: str,  # "true", "standard", "tech"
-) -> Optional["Snapshot"]:
-    """過去のスナップショットから、指定カテゴリの API 取得成功スナップショットを最新順で返す。
-
-    fetched フラグが True のもの、またはフラグ未記録でもカテゴリの AP データが
-    存在するもの（fetched フィールドが追加される前の旧フォーマット）を対象とする。
-    """
-    snap_dir = BASE_DIR / "snapshots"
-    if not snap_dir.exists():
-        return None
-    flag_field = f"accsaber_{category}_fetched"
-    ap_field = f"accsaber_{category}_ap"
-    candidates = sorted(snap_dir.glob(f"{steam_id}_*.json"), reverse=True)
-    for path in candidates:
-        try:
-            snap = Snapshot.load(path)
-            fetched = getattr(snap, flag_field, False)
-            ap_val = getattr(snap, ap_field, None)
-            # fetched=True、または旧フォーマット（フィールド未記録）でも AP がある場合は有効
-            if fetched or (ap_val is not None):
-                return snap
-        except Exception:  # noqa: BLE001
-            continue
-    return None
-
-
-def _find_accsaber_skill_for_scoresaber_id(
-    scoresaber_id: str,
-    fetch_func,
-    session: Optional[requests.Session] = None,
-    max_pages: int = 200,
-) -> Optional[AccSaberPlayer]:
-    """AccSaber の True / Standard / Tech リーダーボードから、指定IDのプレイヤーを探す。
-
-    fetch_func には fetch_true / fetch_standard / fetch_tech のいずれかを渡す想定。
-    見つからなければ None。
-    """
-
-    if not scoresaber_id:
-        return None
-
-    # 単一プレイヤーの AP / Playcount を取る用途なので、
-    # 指定された max_pages の範囲でページング検索する。
-    # ただし、そのリーダーボードの末尾プレイヤーの AP が
-    # ACCSABER_MIN_AP_SKILL を下回った時点で、それ以降のページには
-    # しきい値以上のプレイヤーが存在しないとみなして打ち切る。
-
-    def _parse_ap(text: str | None) -> float:
-        if not text:
-            return 0.0
-        import re as _re
-
-        t = text.replace(",", "")
-        m = _re.search(r"[-+]?\d*\.?\d+", t)
-        if not m:
-            return 0.0
-        try:
-            return float(m.group(0))
-        except ValueError:
-            return 0.0
-
-    for page in range(1, max_pages + 1):
-        try:
-            players = fetch_func(country=None, page=page, session=session)
-        except Exception:  # noqa: BLE001
-            if page == 1:
-                raise  # 1 ページ目の失敗は呼び出し元に伝播させる
-            break
-
-        if not players:
-            break
-
-        for p in players:
-            if getattr(p, "scoresaber_id", None) == scoresaber_id:
-                return p
-
-        # 末尾プレイヤーの AP が 3000 未満になったら、
-        # それ以降のページには 3000AP 以上のプレイヤーはいないとみなして打ち切る。
-        last_ap = _parse_ap(getattr(players[-1], "total_ap", ""))
-        if last_ap < ACCSABER_MIN_AP_SKILL:
-            break
-
-    return None
 
 def _save_cached_pages(path: Path, pages: list[dict]) -> None:
     payload = {
@@ -1321,221 +1219,12 @@ def create_snapshot_for_steam_id(
             _rethrow_if_cancelled(exc)
             pass
 
-    # AccSaber ランク / プレイ回数: まずは Overall のキャッシュから紐付け。
-    # *_rank_global にグローバル順位、*_rank_country に国別順位を保持する。
-    acc_overall_rank_global: Optional[int] = None
-    acc_true_rank_global: Optional[int] = None
-    acc_standard_rank_global: Optional[int] = None
-    acc_tech_rank_global: Optional[int] = None
-    acc_overall_rank_country: Optional[int] = None
-    acc_true_rank_country: Optional[int] = None
-    acc_standard_rank_country: Optional[int] = None
-    acc_tech_rank_country: Optional[int] = None
-    acc_overall_play_count: Optional[int] = None
-    acc_true_play_count: Optional[int] = None
-    acc_standard_play_count: Optional[int] = None
-    acc_tech_play_count: Optional[int] = None
-    acc_overall_total_maps: Optional[int] = None
-    acc_true_total_maps: Optional[int] = None
-    acc_standard_total_maps: Optional[int] = None
-    acc_tech_total_maps: Optional[int] = None
     accsaber_reloaded_overall_total_maps: Optional[int] = None
     accsaber_reloaded_true_total_maps: Optional[int] = None
     accsaber_reloaded_standard_total_maps: Optional[int] = None
     accsaber_reloaded_tech_total_maps: Optional[int] = None
-    acc_overall_ap: Optional[float] = None
-    acc_true_ap: Optional[float] = None
-    acc_standard_ap: Optional[float] = None
-    acc_tech_ap: Optional[float] = None
-    acc_overall_avg_acc: Optional[float] = None
-    acc_true_avg_acc: Optional[float] = None
-    acc_standard_avg_acc: Optional[float] = None
-    acc_tech_avg_acc: Optional[float] = None
-    accsaber_true_fetched: bool = False
-    accsaber_standard_fetched: bool = False
-    accsaber_tech_fetched: bool = False
-    accsaber_true_fetch_failed: bool = False
-    accsaber_standard_fetch_failed: bool = False
-    accsaber_tech_fetch_failed: bool = False
-    accsaber_true_data_as_of: Optional[str] = None
-    accsaber_standard_data_as_of: Optional[str] = None
-    accsaber_tech_data_as_of: Optional[str] = None
-
-    def _parse_ap(text: str | None) -> float:
-        """AccSaber の AP 文字列から数値を抽出して float に変換する。"""
-        if not text:
-            return 0.0
-        t = text.replace(",", "")
-        import re as _re
-        m = _re.search(r"[-+]?\d*\.?\d+", t)
-        if not m:
-            return 0.0
-        try:
-            return float(m.group(0))
-        except ValueError:
-            return 0.0
-
-    def _parse_acc_plays(text: str | None) -> Optional[int]:
-        if not text:
-            return None
-        import re as _re
-        t = text.replace(",", "")
-        m = _re.search(r"[-+]?\d+", t)
-        if not m:
-            return None
-        try:
-            return int(m.group(0))
-        except ValueError:
-            return None
-
-    if options.fetch_accsaber:
-        print("9. AccSaber プレイヤーステータス取得...")
-        _step(0.43, "Fetching AccSaber overall leaderboard...")
-        acc_overall = _find_accsaber_for_scoresaber_id(scoresaber_id, session=session) if scoresaber_id else None
-
-        # Overall のリーダーボード検索結果から rank / plays を取得（rank はグローバル順位）
-        if acc_overall is not None:
-            acc_overall_rank_global = acc_overall.rank
-            acc_overall_play_count = _parse_acc_plays(getattr(acc_overall, "plays", ""))
-            acc_overall_ap = _parse_ap(getattr(acc_overall, "total_ap", ""))
-            _oavg = getattr(acc_overall, "average_acc", "")
-            if _oavg:
-                try:
-                    acc_overall_avg_acc = float(str(_oavg).replace(",", "")) * 100.0
-                except (ValueError, TypeError):
-                    pass
-
-        # True / Standard / Tech は必要になったときだけ API 経由で取得（ベストエフォート）。
-        if scoresaber_id:
-            _true_api_err = False
-            try:
-                print("9.1 AccSaber True プレイヤーステータス取得...")
-                _step(0.45, "Fetching AccSaber True leaderboard...")
-                acc_true = _find_accsaber_skill_for_scoresaber_id(scoresaber_id, fetch_true, session=session)
-            except Exception:  # noqa: BLE001
-                acc_true = None
-                _true_api_err = True
-            if acc_true is not None:
-                acc_true_rank_global = acc_true.rank
-                acc_true_play_count = _parse_acc_plays(getattr(acc_true, "plays", ""))
-                acc_true_ap = _parse_ap(getattr(acc_true, "total_ap", ""))
-                _tavg = getattr(acc_true, "average_acc", "")
-                if _tavg:
-                    try:
-                        acc_true_avg_acc = float(str(_tavg).replace(",", "")) * 100.0
-                    except (ValueError, TypeError):
-                        pass
-                accsaber_true_fetched = True
-            elif _true_api_err:
-                accsaber_true_fetch_failed = True
-                _prev_true = _find_last_successful_accsaber_snapshot(steam_id, "true")
-                if _prev_true is not None:
-                    acc_true_rank_global = _prev_true.accsaber_true_rank
-                    acc_true_play_count = _prev_true.accsaber_true_play_count
-                    acc_true_ap = _prev_true.accsaber_true_ap
-                    accsaber_true_data_as_of = _prev_true.taken_at
-                    _msg = f"AccSaber True: API fetch failed, using data from previous snapshot ({_prev_true.taken_at[:10]})"
-                elif acc_overall is not None:
-                    _cached_true_ap = _parse_ap(getattr(acc_overall, "true_ap", ""))
-                    if _cached_true_ap:
-                        acc_true_ap = _cached_true_ap
-                    _msg = "AccSaber True: API fetch failed, no previous snapshot found"
-                else:
-                    _msg = "AccSaber True: API fetch failed"
-                print(f"9.1 {_msg}")
-                _add_warning(_msg)
-
-            _std_api_err = False
-            try:
-                print("9.2 AccSaber Standard プレイヤーステータス取得...")
-                _step(0.50, "Fetching AccSaber Standard leaderboard...")
-                acc_standard = _find_accsaber_skill_for_scoresaber_id(scoresaber_id, fetch_standard, session=session)
-            except Exception:  # noqa: BLE001
-                acc_standard = None
-                _std_api_err = True
-            if acc_standard is not None:
-                acc_standard_rank_global = acc_standard.rank
-                acc_standard_play_count = _parse_acc_plays(getattr(acc_standard, "plays", ""))
-                acc_standard_ap = _parse_ap(getattr(acc_standard, "total_ap", ""))
-                _savg = getattr(acc_standard, "average_acc", "")
-                if _savg:
-                    try:
-                        acc_standard_avg_acc = float(str(_savg).replace(",", "")) * 100.0
-                    except (ValueError, TypeError):
-                        pass
-                accsaber_standard_fetched = True
-            elif _std_api_err:
-                accsaber_standard_fetch_failed = True
-                _prev_std = _find_last_successful_accsaber_snapshot(steam_id, "standard")
-                if _prev_std is not None:
-                    acc_standard_rank_global = _prev_std.accsaber_standard_rank
-                    acc_standard_play_count = _prev_std.accsaber_standard_play_count
-                    acc_standard_ap = _prev_std.accsaber_standard_ap
-                    accsaber_standard_data_as_of = _prev_std.taken_at
-                    _msg = f"AccSaber Standard: API fetch failed, using data from previous snapshot ({_prev_std.taken_at[:10]})"
-                elif acc_overall is not None:
-                    _cached_standard_ap = _parse_ap(getattr(acc_overall, "standard_ap", ""))
-                    if _cached_standard_ap:
-                        acc_standard_ap = _cached_standard_ap
-                    _msg = "AccSaber Standard: API fetch failed, no previous snapshot found"
-                else:
-                    _msg = "AccSaber Standard: API fetch failed"
-                print(f"9.2 {_msg}")
-                _add_warning(_msg)
-
-            _tech_api_err = False
-            try:
-                print("9.3 AccSaber Tech プレイヤーステータス取得...")
-                _step(0.55, "Fetching AccSaber Tech leaderboard...")
-                acc_tech = _find_accsaber_skill_for_scoresaber_id(scoresaber_id, fetch_tech, session=session)
-            except Exception:  # noqa: BLE001
-                acc_tech = None
-                _tech_api_err = True
-            if acc_tech is not None:
-                acc_tech_rank_global = acc_tech.rank
-                acc_tech_play_count = _parse_acc_plays(getattr(acc_tech, "plays", ""))
-                acc_tech_ap = _parse_ap(getattr(acc_tech, "total_ap", ""))
-                _techavg = getattr(acc_tech, "average_acc", "")
-                if _techavg:
-                    try:
-                        acc_tech_avg_acc = float(str(_techavg).replace(",", "")) * 100.0
-                    except (ValueError, TypeError):
-                        pass
-                accsaber_tech_fetched = True
-            elif _tech_api_err:
-                accsaber_tech_fetch_failed = True
-                _prev_tech = _find_last_successful_accsaber_snapshot(steam_id, "tech")
-                if _prev_tech is not None:
-                    acc_tech_rank_global = _prev_tech.accsaber_tech_rank
-                    acc_tech_play_count = _prev_tech.accsaber_tech_play_count
-                    acc_tech_ap = _prev_tech.accsaber_tech_ap
-                    accsaber_tech_data_as_of = _prev_tech.taken_at
-                    _msg = f"AccSaber Tech: API fetch failed, using data from previous snapshot ({_prev_tech.taken_at[:10]})"
-                elif acc_overall is not None:
-                    _cached_tech_ap = _parse_ap(getattr(acc_overall, "tech_ap", ""))
-                    if _cached_tech_ap:
-                        acc_tech_ap = _cached_tech_ap
-                    _msg = "AccSaber Tech: API fetch failed, no previous snapshot found"
-                else:
-                    _msg = "AccSaber Tech: API fetch failed"
-                print(f"9.3 {_msg}")
-                _add_warning(_msg)
-
-        # AccSaber プレイリスト総譜面数を更新する（accsaber_playlist_counts.json）
-        try:
-            _acc_playlist_counts, _, _ = get_accsaber_playlist_map_counts_with_meta(session=session)
-            acc_true_total_maps = _acc_playlist_counts.get("true")
-            acc_standard_total_maps = _acc_playlist_counts.get("standard")
-            acc_tech_total_maps = _acc_playlist_counts.get("tech")
-            _acc_total_parts = [
-                value
-                for value in (acc_true_total_maps, acc_standard_total_maps, acc_tech_total_maps)
-                if value is not None
-            ]
-            acc_overall_total_maps = sum(_acc_total_parts) if _acc_total_parts else None
-        except Exception:  # noqa: BLE001
-            pass
-        # AccSaber Reloaded 総譜面数を更新する（accsaber_reloaded_map_counts.json）
+    if options.fetch_accsaber_reloaded:
+        # AccSaber (Reloaded) 総譜面数を更新する（accsaber_reloaded_map_counts.json）
         try:
             _rl_map_counts = _fetch_reloaded_map_counts(session=session)
             accsaber_reloaded_overall_total_maps = _rl_map_counts.get("overall")
@@ -1544,38 +1233,6 @@ def create_snapshot_for_steam_id(
             accsaber_reloaded_tech_total_maps = _rl_map_counts.get("tech")
         except Exception:  # noqa: BLE001
             pass
-        # AccSaber マップデータ（ranked-maps + プレイリスト）をキャッシュに保存する
-        try:
-            _step(0.63, "Fetching AccSaber map data for playlist cache...")
-            _fetch_and_save_accsaber_maps(session=session)
-        except Exception:  # noqa: BLE001
-            pass
-        # AccSaber プレイヤースコアをキャッシュに保存する
-        if scoresaber_id:
-            try:
-                _step(0.64, "Fetching AccSaber player scores for cache...")
-                _fetch_and_save_acc_player_scores(scoresaber_id, session=session)
-            except Exception:  # noqa: BLE001
-                pass
-    else:
-        print("9. AccSaber 取得スキップ（オプションが無効）")
-        _step(0.60, "Skipping AccSaber data...")
-
-    # AccSaber classic は API の rankedPlays ではなく、current playlist と player score cache
-    # から既プレイ件数を再計算した値を優先する。
-    try:
-        _acc_effective_play_counts = _compute_acc_effective_played_counts(scoresaber_id) if scoresaber_id else {}
-        if _acc_effective_play_counts:
-            acc_overall_play_count = _acc_effective_play_counts.get("overall", acc_overall_play_count)
-            acc_true_play_count = _acc_effective_play_counts.get("true", acc_true_play_count)
-            acc_standard_play_count = _acc_effective_play_counts.get("standard", acc_standard_play_count)
-            acc_tech_play_count = _acc_effective_play_counts.get("tech", acc_tech_play_count)
-    except Exception:  # noqa: BLE001
-        pass
-
-    # Overall AP は True / Standard / Tech の AP を合算した値とする
-    if any(v is not None for v in (acc_true_ap, acc_standard_ap, acc_tech_ap)):
-        acc_overall_ap = (acc_true_ap or 0.0) + (acc_standard_ap or 0.0) + (acc_tech_ap or 0.0)
 
     # AccSaber Reloaded ランク情報を取得する
     accsaber_reloaded_overall_rank:          Optional[int]   = None
@@ -1836,45 +1493,10 @@ def create_snapshot_for_steam_id(
         beatleader_experience=beatleader_experience,
         beatleader_prestige=beatleader_prestige,
         beatleader_prestige_icon_url=beatleader_prestige_icon_url,
-        # AccSaber グローバルランク
-        accsaber_overall_rank=acc_overall_rank_global,
-        accsaber_true_rank=acc_true_rank_global,
-        accsaber_standard_rank=acc_standard_rank_global,
-        accsaber_overall_play_count=acc_overall_play_count,
-        accsaber_true_play_count=acc_true_play_count,
-        accsaber_standard_play_count=acc_standard_play_count,
-        accsaber_tech_rank=acc_tech_rank_global,
-        accsaber_tech_play_count=acc_tech_play_count,
-        accsaber_overall_total_maps=acc_overall_total_maps,
-        accsaber_true_total_maps=acc_true_total_maps,
-        accsaber_standard_total_maps=acc_standard_total_maps,
-        accsaber_tech_total_maps=acc_tech_total_maps,
-        accsaber_overall_ap=acc_overall_ap,
-        accsaber_true_ap=acc_true_ap,
-        accsaber_standard_ap=acc_standard_ap,
-        accsaber_tech_ap=acc_tech_ap,
-        accsaber_overall_avg_acc=acc_overall_avg_acc,
-        accsaber_true_avg_acc=acc_true_avg_acc,
-        accsaber_standard_avg_acc=acc_standard_avg_acc,
-        accsaber_tech_avg_acc=acc_tech_avg_acc,
-        # AccSaber 国別ランク
-        accsaber_overall_rank_country=acc_overall_rank_country,
-        accsaber_true_rank_country=acc_true_rank_country,
-        accsaber_standard_rank_country=acc_standard_rank_country,
-        accsaber_tech_rank_country=acc_tech_rank_country,
         beatleader_average_ranked_acc=beatleader_average_ranked_acc,
         beatleader_total_play_count=beatleader_total_play_count,
         beatleader_ranked_play_count=beatleader_ranked_play_count,
-        accsaber_true_fetched=accsaber_true_fetched,
-        accsaber_standard_fetched=accsaber_standard_fetched,
-        accsaber_tech_fetched=accsaber_tech_fetched,
-        accsaber_true_fetch_failed=accsaber_true_fetch_failed,
-        accsaber_standard_fetch_failed=accsaber_standard_fetch_failed,
-        accsaber_tech_fetch_failed=accsaber_tech_fetch_failed,
-        accsaber_true_data_as_of=accsaber_true_data_as_of,
-        accsaber_standard_data_as_of=accsaber_standard_data_as_of,
-        accsaber_tech_data_as_of=accsaber_tech_data_as_of,
-        # AccSaber Reloaded ランク
+        # AccSaber (Reloaded) ランク
         accsaber_reloaded_overall_rank=accsaber_reloaded_overall_rank,
         accsaber_reloaded_overall_rank_country=accsaber_reloaded_overall_rank_country,
         accsaber_reloaded_overall_ap=accsaber_reloaded_overall_ap,
@@ -1909,7 +1531,6 @@ def create_snapshot_for_steam_id(
     print("10.1 スナップショットオブジェクト構築完了。")
     _step(0.90, "Saving snapshot...")
     snapshot.warnings = _warnings
-    snapshot.accsaber_cache_used = bool(_warnings)
 
     if snapshot_dir is not None:
         snapshot_dir.mkdir(parents=True, exist_ok=True)

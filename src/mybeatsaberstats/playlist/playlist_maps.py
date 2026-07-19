@@ -19,7 +19,6 @@ from ..playlist_view import (
     _build_ss_score_hash_index,
     _enrich_entries_with_beatsaver_cache,
     _parse_iso_datetime_to_ts,
-    load_accsaber_maps,
     load_accsaber_reloaded_maps,
     load_bl_maps,
     load_ss_maps,
@@ -146,11 +145,8 @@ def load_bplist_maps(
     elif service == "beatleader":
         ranked = load_bl_maps(steam_id)
         idx = _build_bl_hash_index(ranked)
-    elif service == "accsaber_rl":
+    elif service in ("accsaber_rl", "accsaber"):
         ranked = load_accsaber_reloaded_maps(steam_id, "all", on_progress=on_progress)
-        idx = _build_ss_hash_index(ranked)
-    elif service == "accsaber":
-        ranked = load_accsaber_maps(steam_id, "all", on_progress=on_progress)
         idx = _build_ss_hash_index(ranked)
     else:
         idx = {}

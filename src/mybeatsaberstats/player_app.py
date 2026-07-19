@@ -215,8 +215,7 @@ class TakeSnapshotDialog(QDialog):
         self._cb_bl_ranked_maps = QCheckBox("BeatLeader Ranked Maps", self)
         self._cb_scoresaber     = QCheckBox("ScoreSaber (Player Info / Scores / Stats)", self)
         self._cb_beatleader     = QCheckBox("BeatLeader (Player Info / Scores / Stats)", self)
-        self._cb_accsaber       = QCheckBox("AccSaber (Rank)", self)
-        self._cb_accsaber_rl    = QCheckBox("AccSaber Reloaded (Rank)", self)
+        self._cb_accsaber_rl    = QCheckBox("AccSaber (Rank)", self)
 
         _cache_dir = BASE_DIR / "cache"
 
@@ -229,20 +228,6 @@ class TakeSnapshotDialog(QDialog):
 
         def _fmt_fetched_with_name(path: Path) -> str:
             return f"{_fmt_fetched(path)} <{path.name}>"
-
-        def _fmt_playlist_fetched_with_name(category: str) -> str:
-            try:
-                data = json.loads((_cache_dir / "accsaber_playlist_counts.json").read_text(encoding="utf-8"))
-                entry = data.get(category, {}) if isinstance(data, dict) else {}
-                fat = entry.get("fetched_at") if isinstance(entry, dict) else None
-                if fat and isinstance(fat, str):
-                    dt = datetime.fromisoformat(fat.rstrip("Z"))
-                    dt_local = dt.replace(tzinfo=timezone.utc).astimezone()
-                    date_str = dt_local.strftime("%Y-%m-%d %H:%M")
-                    return f"{date_str} <accsaber_playlist_counts.json>"
-            except Exception:  # noqa: BLE001
-                pass
-            return "Never fetched"
 
         def _fmt_rl_map_counts_fetched_with_name(category: str) -> str:
             try:
@@ -270,15 +255,10 @@ class TakeSnapshotDialog(QDialog):
             (self._cb_bl_ranked_maps, _fmt_fetched_with_name(_cache_dir / "beatleader_ranked_maps.json"), []),
             (self._cb_scoresaber,     _fmt_fetched_with_name(_cache_dir / f"scoresaber_player_scores_{_ss_id}.json") if _ss_id else "N/A", []),
             (self._cb_beatleader,     _fmt_fetched_with_name(_cache_dir / f"beatleader_player_scores_{_bl_id}.json") if _bl_id else "N/A", []),
-            (self._cb_accsaber,       "", [
-                ("　　True Playlist:",     _fmt_playlist_fetched_with_name("true")),
-                ("　　Standard Playlist:", _fmt_playlist_fetched_with_name("standard")),
-                ("　　Tech Playlist:",     _fmt_playlist_fetched_with_name("tech")),
-            ]),
             (self._cb_accsaber_rl,    _fmt_fetched_with_name(_cache_dir / "accsaber_reloaded_map_counts.json"), [
-                ("　　[RL] True Maps:",     _fmt_rl_map_counts_fetched_with_name("true")),
-                ("　　[RL] Standard Maps:", _fmt_rl_map_counts_fetched_with_name("standard")),
-                ("　　[RL] Tech Maps:",     _fmt_rl_map_counts_fetched_with_name("tech")),
+                ("　　True Maps:",     _fmt_rl_map_counts_fetched_with_name("true")),
+                ("　　Standard Maps:", _fmt_rl_map_counts_fetched_with_name("standard")),
+                ("　　Tech Maps:",     _fmt_rl_map_counts_fetched_with_name("tech")),
             ]),
         ]
 
@@ -461,7 +441,6 @@ class TakeSnapshotDialog(QDialog):
             self._cb_bl_ranked_maps,
             self._cb_scoresaber,
             self._cb_beatleader,
-            self._cb_accsaber,
             self._cb_accsaber_rl,
             self._cb_ss_fetch_all,
             self._cb_ss_until,
@@ -476,7 +455,6 @@ class TakeSnapshotDialog(QDialog):
             self._cb_bl_ranked_maps.setChecked(bool(self._saved_state.get("fetch_bl_ranked_maps", True)))
             self._cb_scoresaber.setChecked(bool(self._saved_state.get("fetch_scoresaber", True)))
             self._cb_beatleader.setChecked(bool(self._saved_state.get("fetch_beatleader", True)))
-            self._cb_accsaber.setChecked(bool(self._saved_state.get("fetch_accsaber", True)))
             self._cb_accsaber_rl.setChecked(bool(self._saved_state.get("fetch_accsaber_rl", True)))
             self._cb_ss_fetch_all.setChecked(bool(self._saved_state.get("ss_fetch_all", False)))
             self._cb_ss_until.setChecked(bool(self._saved_state.get("ss_fetch_from_enabled", False)))
@@ -509,7 +487,6 @@ class TakeSnapshotDialog(QDialog):
                 "fetch_bl_ranked_maps": self._cb_bl_ranked_maps.isChecked(),
                 "fetch_scoresaber": self._cb_scoresaber.isChecked(),
                 "fetch_beatleader": self._cb_beatleader.isChecked(),
-                "fetch_accsaber": self._cb_accsaber.isChecked(),
                 "fetch_accsaber_rl": self._cb_accsaber_rl.isChecked(),
                 "ss_fetch_all": self._cb_ss_fetch_all.isChecked(),
                 "ss_fetch_from_enabled": self._cb_ss_until.isChecked(),
@@ -584,7 +561,6 @@ class TakeSnapshotDialog(QDialog):
             fetch_bl_ranked_maps=self._cb_bl_ranked_maps.isChecked(),
             fetch_scoresaber=self._cb_scoresaber.isChecked(),
             fetch_beatleader=self._cb_beatleader.isChecked(),
-            fetch_accsaber=self._cb_accsaber.isChecked(),
             fetch_accsaber_reloaded=self._cb_accsaber_rl.isChecked(),
             fetch_ss_star_stats=True,
             fetch_bl_star_stats=True,
@@ -1420,21 +1396,6 @@ class PlayerWindow(QMainWindow):
         self.bl_info_table = _make_info_table()
 
         # AccSaber 用の指標テーブル
-        self.acc_table = QTableWidget(0, 5, self)
-        self.acc_table.setStyleSheet(table_stylesheet())
-        self.acc_table.verticalHeader().setDefaultSectionSize(14)
-        self.acc_table.verticalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        self.acc_table.verticalHeader().setMinimumSectionSize(0)
-        self.acc_table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
-        self.acc_table.setHorizontalHeaderLabels([
-            "Metric",
-            "AP",
-            "Rank",
-            "Play Count",
-            "Avg Acc",
-        ])
-
-        # AccSaber Reloaded 用の指標テーブル
         self.acc_rl_table = QTableWidget(0, 5, self)
         self.acc_rl_table.setStyleSheet(table_stylesheet())
         self.acc_rl_table.verticalHeader().setDefaultSectionSize(14)
@@ -1491,14 +1452,13 @@ class PlayerWindow(QMainWindow):
 
         # 列幅は内容に合わせて自動調整し、最後の列がレイアウト都合で
         # 不自然に広がらないように stretchLastSection は無効にする
-        for table in (self.acc_table, self.acc_rl_table, self.star_table, self.bl_star_table):
+        for table in (self.acc_rl_table, self.star_table, self.bl_star_table):
             header = table.horizontalHeader()
             header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
             header.setStretchLastSection(False)
             table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
 
-        # AccSaber / AccSaber Reloaded テーブルはカラムが少ないため最小幅を広めに取る
-        self.acc_table.horizontalHeader().setMinimumSectionSize(80)
+        # AccSaber テーブルはカラムが少ないため最小幅を広めに取る
         self.acc_rl_table.horizontalHeader().setMinimumSectionSize(80)
 
         # サービスごとのアイコンをヘッダに設定
@@ -1506,22 +1466,14 @@ class PlayerWindow(QMainWindow):
         icon_scoresaber = QIcon(str(resources_dir / "scoresaber_logo.svg"))
         icon_beatleader = QIcon(str(resources_dir / "beatleader_logo.webp"))
         icon_accsaber = QIcon(str(resources_dir / "asssaber_logo.webp"))
-        _rl_logo_path = resources_dir / "accsaberreloaded_logo.png"
-        icon_accsaber_rl = QIcon(str(_rl_logo_path)) if _rl_logo_path.exists() else icon_accsaber
         # _update_view から参照できるようインスタンス属性として保存
         self._icon_scoresaber = icon_scoresaber
         self._icon_beatleader = icon_beatleader
 
-        # AccSaber テーブル: Metric列(col 0)にアイコンのみ表示、他の列はアイコンなし
-        _acc_metric_item = QTableWidgetItem("")
-        _acc_metric_item.setIcon(icon_accsaber)
-        _acc_metric_item.setToolTip("AccSaber")
-        self.acc_table.setHorizontalHeaderItem(0, _acc_metric_item)
-
-        # AccSaber Reloaded テーブル: Metric列(col 0)にアイコンのみ表示、行番号非表示
+        # AccSaber テーブル: Metric列(col 0)にアイコンのみ表示、行番号非表示
         _rl_metric_item = QTableWidgetItem("")
-        _rl_metric_item.setIcon(icon_accsaber_rl)
-        _rl_metric_item.setToolTip("AccSaber Reloaded")
+        _rl_metric_item.setIcon(icon_accsaber)
+        _rl_metric_item.setToolTip("AccSaber")
         self.acc_rl_table.setHorizontalHeaderItem(0, _rl_metric_item)
         self.acc_rl_table.verticalHeader().setVisible(False)
 
@@ -1539,14 +1491,10 @@ class PlayerWindow(QMainWindow):
         # ★テーブルは行番号(No.1〜)が紛らわしいので非表示にする
         self.star_table.verticalHeader().setVisible(False)
         self.bl_star_table.verticalHeader().setVisible(False)
-        # acc_table の行番号も非表示にする
-        self.acc_table.verticalHeader().setVisible(False)
 
-        # AccSaber / AccSaber Reloaded Play Count 列 (col 3) にバーを表示するデリゲート（ホバー演出付き）
-        _ClickableColHover(self.acc_table, 3, AccPlayCountBarDelegate(self))
+        # AccSaber Play Count 列 (col 3) にバーを表示するデリゲート（ホバー演出付き）
         _ClickableColHover(self.acc_rl_table, 3, AccPlayCountBarDelegate(self))
-        # AccSaber / AccSaber Reloaded Avg Acc 列 (col 4): 70〜100% グラデーション
-        self.acc_table.setItemDelegateForColumn(4, PercentageBarDelegate(self, max_value=100.0, gradient_min=70.0))
+        # AccSaber Avg Acc 列 (col 4): 70〜100% グラデーション
         self.acc_rl_table.setItemDelegateForColumn(4, PercentageBarDelegate(self, max_value=100.0, gradient_min=70.0))
 
         # パーセンテージ列に横棒グラフを表示するデリゲートを適用
@@ -1584,7 +1532,6 @@ class PlayerWindow(QMainWindow):
         _ClickableColHover(self.bl_star_table, 10, perc_pp)
 
         # AccSaber AP 列 (col 1) にホバー演出を追加
-        _ClickableColHover(self.acc_table, 1, QStyledItemDelegate(self))
         _ClickableColHover(self.acc_rl_table, 1, QStyledItemDelegate(self))
 
         # BL Avg ACC 列の L/R トグル変数
@@ -1610,8 +1557,6 @@ class PlayerWindow(QMainWindow):
         self.bl_star_table.cellClicked.connect(self._on_bl_fc_rate_clicked)
         self.bl_star_table.cellClicked.connect(self._on_bl_nf_clicked)
         self.bl_star_table.cellClicked.connect(self._on_bl_pp_clicked)
-        self.acc_table.cellClicked.connect(self._on_acc_play_count_clicked)
-        self.acc_table.cellClicked.connect(self._on_acc_ap_clicked)
         self.acc_rl_table.cellClicked.connect(self._on_acc_rl_play_count_clicked)
         self.acc_rl_table.cellClicked.connect(self._on_acc_rl_ap_clicked)
 
@@ -1673,35 +1618,17 @@ class PlayerWindow(QMainWindow):
         self._main_splitter.setStretchFactor(1, 1)
         self._main_splitter.setSizes([578, 610])  # 初期サイズ配分の目安
 
-        # AccSaber テーブルをタイトル付きコンテナに包む (左下)
+        # AccSaber (旧 Reloaded) テーブルを左下に表示するウィジェット
         left_acc_widget = QWidget(self)
         left_acc_layout = QVBoxLayout(left_acc_widget)
         left_acc_layout.setContentsMargins(2, 2, 2, 2)
         left_acc_layout.setSpacing(2)
-        _acc_header = QWidget(self)
-        _acc_header_layout = QHBoxLayout(_acc_header)
-        _acc_header_layout.setContentsMargins(0, 0, 0, 0)
-        _acc_header_layout.setSpacing(4)
-        self._acc_title = QLabel("AccSaber", self)
-        self._acc_title.setStyleSheet("font-weight: bold; font-size: 11px; padding: 0px 2px;")
-        self._acc_title.setOpenExternalLinks(True)
-        _acc_header_layout.addWidget(self._acc_title)
-        _acc_header_layout.addStretch()
-        _acc_header.setFixedHeight(20)
-        left_acc_layout.addWidget(_acc_header)
-        left_acc_layout.addWidget(self.acc_table, 1)
-
-        # AccSaber Reloaded テーブルを右下に表示するウィジェット
-        right_bottom_widget = QWidget(self)
-        right_bottom_layout = QVBoxLayout(right_bottom_widget)
-        right_bottom_layout.setContentsMargins(2, 2, 2, 2)
-        right_bottom_layout.setSpacing(2)
         # タイトル行: ラベル + 未プレイ抽出ボタン
         _acc_rl_header = QWidget(self)
         _acc_rl_header_layout = QHBoxLayout(_acc_rl_header)
         _acc_rl_header_layout.setContentsMargins(0, 0, 0, 0)
         _acc_rl_header_layout.setSpacing(4)
-        self._acc_rl_title = QLabel("AccSaber Reloaded", self)
+        self._acc_rl_title = QLabel("AccSaber", self)
         self._acc_rl_title.setStyleSheet("font-weight: bold; font-size: 11px; padding: 0px 2px;")
         self._acc_rl_title.setOpenExternalLinks(True)
         # XP表示ラベル
@@ -1709,7 +1636,7 @@ class PlayerWindow(QMainWindow):
         self._acc_rl_xp_label.setStyleSheet("font-size: 11px; font-weight: 600; color: #DF8511; padding: 0px 2px;")
         self._acc_rl_xp_label.setTextFormat(Qt.TextFormat.RichText)
         self._btn_rl_unplayed = QPushButton("💾Unplayed Playlist", self)
-        self._btn_rl_unplayed.setToolTip("BeatLeader 未プレイの AccSaber Reloaded 譜面を bplist ファイルに出力します。")
+        self._btn_rl_unplayed.setToolTip("BeatLeader 未プレイの AccSaber 譜面を bplist ファイルに出力します。")
         self._btn_rl_unplayed.setFixedHeight(20)
         self._btn_rl_unplayed.setStyleSheet("font-size: 11px; padding: 1px 6px;")
         self._btn_rl_unplayed.clicked.connect(self._on_export_rl_unplayed)
@@ -1718,13 +1645,13 @@ class PlayerWindow(QMainWindow):
         _acc_rl_header_layout.addStretch()
         _acc_rl_header_layout.addWidget(self._btn_rl_unplayed)
         _acc_rl_header.setFixedHeight(20)
-        right_bottom_layout.addWidget(_acc_rl_header)
-        right_bottom_layout.addWidget(self.acc_rl_table, 1)
+        left_acc_layout.addWidget(_acc_rl_header)
+        left_acc_layout.addWidget(self.acc_rl_table, 1)
 
-        # 下部: 横スプリッタ [AccSaber テーブル | AccSaber Reloaded テーブル]
+        # 下部: 横スプリッタ [AccSaber テーブル | (空き)]
         self._bottom_h_splitter = QSplitter(Qt.Orientation.Horizontal, self)
         self._bottom_h_splitter.addWidget(left_acc_widget)
-        self._bottom_h_splitter.addWidget(right_bottom_widget)
+        self._bottom_h_splitter.addWidget(QWidget(self))
         self._bottom_h_splitter.setStretchFactor(0, 1)
         self._bottom_h_splitter.setStretchFactor(1, 1)
         self._bottom_h_splitter.setSizes([575, 613])  # 初期サイズ配分の目安
@@ -1931,7 +1858,7 @@ class PlayerWindow(QMainWindow):
     def _apply_row_height(self) -> None:
         """テーブルの行高さを self._row_height に揃える。"""
         h = self._row_height
-        for tbl in (self.acc_table, self.acc_rl_table, self.star_table, self.bl_star_table):
+        for tbl in (self.acc_rl_table, self.star_table, self.bl_star_table):
             tbl.verticalHeader().setMinimumSectionSize(0)
             tbl.verticalHeader().setDefaultSectionSize(h)
             tbl.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
@@ -2028,12 +1955,12 @@ class PlayerWindow(QMainWindow):
         QTimer.singleShot(0, _restore_splitters)
 
     def _on_export_rl_unplayed(self) -> None:
-        """playlist_view の AccSaber Reloaded ローダーを使い、未クリア譜面を bplist に出力する。"""
+        """playlist_view の AccSaber ローダーを使い、未クリア譜面を bplist に出力する。"""
         from PySide6.QtWidgets import QFileDialog
 
         steam_id = self._current_player_id()
         if not steam_id:
-            QMessageBox.warning(self, "AccSaber Reloaded", "No player selected.")
+            QMessageBox.warning(self, "AccSaber", "No player selected.")
             return
 
         _, bl_id = _get_player_ids_from_index(steam_id)
@@ -2052,8 +1979,8 @@ class PlayerWindow(QMainWindow):
         save_dir_path = Path(save_dir)
 
         save_cancelled = {"value": False}
-        save_progress = QProgressDialog("Loading AccSaber Reloaded maps...", "Cancel", 0, 5, self)
-        save_progress.setWindowTitle("AccSaber Reloaded Unplayed")
+        save_progress = QProgressDialog("Loading AccSaber maps...", "Cancel", 0, 5, self)
+        save_progress.setWindowTitle("AccSaber Unplayed")
         save_progress.setWindowModality(Qt.WindowModality.WindowModal)
         save_progress.canceled.connect(lambda: save_cancelled.__setitem__("value", True))
         save_progress.show()
@@ -2066,7 +1993,7 @@ class PlayerWindow(QMainWindow):
         saved_files: list[str] = []
 
         try:
-            _set_save_step(0, "Loading AccSaber Reloaded maps with player scores...")
+            _set_save_step(0, "Loading AccSaber maps with player scores...")
 
             def _on_prog(d: int, t: int, label: str) -> None:
                 if save_cancelled["value"]:
@@ -2081,7 +2008,7 @@ class PlayerWindow(QMainWindow):
                     return
                 _set_save_step(idx, f"Building {cat.capitalize()} unplayed list...")
                 cfg = _RLBatchConfig(
-                    label=f"AccSaber RL Unplayed - {cat.capitalize()}",
+                    label=f"AccSaber Unplayed - {cat.capitalize()}",
                     filename_base="",
                     source="rl",
                     show_cleared=False,
@@ -2096,7 +2023,7 @@ class PlayerWindow(QMainWindow):
                 )
                 filtered = _rl_apply_filter(list(rl_entries), cfg)
                 image = _make_cover(cat, "", "asc", "rl")
-                bplist = _rl_make_bplist(f"AccSaber Reloaded Unplayed - {cat.capitalize()}", filtered, image)
+                bplist = _rl_make_bplist(f"AccSaber Unplayed - {cat.capitalize()}", filtered, image)
                 filename = f"accsaber_reloaded_unplayed_{cat}.bplist"
                 out_path = save_dir_path / filename
                 out_path.write_text(_format_bplist(bplist), encoding="utf-8")
@@ -2107,18 +2034,18 @@ class PlayerWindow(QMainWindow):
         except RuntimeError:
             return
         except Exception as exc:  # noqa: BLE001
-            QMessageBox.warning(self, "AccSaber Reloaded Unplayed", f"Failed to save unplayed maps:\n{exc}")
+            QMessageBox.warning(self, "AccSaber Unplayed", f"Failed to save unplayed maps:\n{exc}")
             return
         finally:
             save_progress.close()
 
         if saved_files:
             QMessageBox.information(
-                self, "AccSaber Reloaded Unplayed",
+                self, "AccSaber Unplayed",
                 "Saved the following files:\n" + "\n".join(saved_files),
             )
         else:
-            QMessageBox.information(self, "AccSaber Reloaded Unplayed", "No unplayed maps found.")
+            QMessageBox.information(self, "AccSaber Unplayed", "No unplayed maps found.")
 
     def _take_snapshot_for_current_player(self) -> bool:
         """Snapshot 取得時に任意の SteamID と取得オプションを選択できるダイアログを表示する。
@@ -2573,7 +2500,6 @@ class PlayerWindow(QMainWindow):
         self.bl_star_table.setStyleSheet(_star_qss)
         self.ss_info_table.setStyleSheet(table_stylesheet())
         self.bl_info_table.setStyleSheet(table_stylesheet())
-        self.acc_table.setStyleSheet(table_stylesheet())
         self.acc_rl_table.setStyleSheet(table_stylesheet())
         self.ss_info_table.clearContents()
         self.bl_info_table.clearContents()
@@ -2582,9 +2508,7 @@ class PlayerWindow(QMainWindow):
         self._bl_prestige_text_label.setText("")
         self._bl_prestige_icon_label.set_image_url(None)
         self._acc_rl_xp_label.setText("")
-        self._acc_title.setText("AccSaber")
-        self._acc_rl_title.setText("AccSaber Reloaded")
-        self.acc_table.setRowCount(0)
+        self._acc_rl_title.setText("AccSaber")
         self.acc_rl_table.setRowCount(0)
         self.star_table.setRowCount(0)
         self.bl_star_table.setRowCount(0)
@@ -2624,20 +2548,14 @@ class PlayerWindow(QMainWindow):
         else:
             self._bl_cache_label.setText("／ BL scores: -")
 
-        # AccSaber / AccSaber Reloaded ラベルにリンクを設定
+        # AccSaber ラベルにリンクを設定
         _as_link_color = "#5aaaee" if is_dark() else "#0066cc"
-        if ss_id:
-            self._acc_title.setText(
-                f'<a href="https://accsaber.com/profile/{ss_id}" style="color:{_as_link_color}; text-decoration:none; font-weight:bold; font-size:11px;">AccSaber</a>'
-            )
-        else:
-            self._acc_title.setText("AccSaber")
         if bl_id:
             self._acc_rl_title.setText(
-                f'<a href="https://accsaberreloaded.com/players/{bl_id}" style="color:{_as_link_color}; text-decoration:none; font-weight:bold; font-size:11px;">AccSaber Reloaded</a>'
+                f'<a href="https://accsaberreloaded.com/players/{bl_id}" style="color:{_as_link_color}; text-decoration:none; font-weight:bold; font-size:11px;">AccSaber</a>'
             )
         else:
-            self._acc_rl_title.setText("AccSaber Reloaded")
+            self._acc_rl_title.setText("AccSaber")
 
         # プレイヤーアバターを非同期で取得
         _preferred_avatar = self._load_avatar_showing()
@@ -2820,15 +2738,6 @@ class PlayerWindow(QMainWindow):
             bl_acc_text, snap.beatleader_total_play_count, ranked_play_bl_text,
         )
 
-        # AccSaber テーブル（Overall / True / Standard / Tech の Global Rank / Country Rank / PlayCount）
-        # Country Rank はスナップショット撮影時点の保存値を使う。
-        # コレクター (collector.py) がランキング画面 (app.py) と同一アルゴリズムで計算・保存するため、
-        # スナップショット比較も正しく機能する。
-        overall_country_rank  = snap.accsaber_overall_rank_country
-        true_country_rank     = snap.accsaber_true_rank_country
-        standard_country_rank = snap.accsaber_standard_rank_country
-        tech_country_rank     = snap.accsaber_tech_rank_country
-
         # AccSaber の Country Rank はプレイヤーの国コードに基づいて表示する。
         # Rank 表示は「GlobalRank (🇨🇦 CountryRank)」のような形式にまとめる。
         acc_country_code: Optional[str] = snap.scoresaber_country or snap.beatleader_country
@@ -2848,102 +2757,10 @@ class PlayerWindow(QMainWindow):
                     parts.append(f"({country_code} {country_rank:,})")
             return " ".join(parts) if parts else None
 
-        true_total_maps = snap.accsaber_true_total_maps
-        standard_total_maps = snap.accsaber_standard_total_maps
-        tech_total_maps = snap.accsaber_tech_total_maps
-        acc_true_play_count = snap.accsaber_true_play_count
-        acc_standard_play_count = snap.accsaber_standard_play_count
-        acc_tech_play_count = snap.accsaber_tech_play_count
-        overall_total_maps: Optional[int]
-        if snap.accsaber_overall_total_maps is not None:
-            overall_total_maps = snap.accsaber_overall_total_maps
-        else:
-            parts = [c for c in (true_total_maps, standard_total_maps, tech_total_maps) if c is not None]
-            overall_total_maps = sum(parts) if parts else None
-
-        def _format_play_with_total(plays: Optional[int], total_maps: Optional[int]) -> Optional[str]:
-            if plays is None:
-                return None
-            if total_maps is not None and total_maps > 0:
-                return f"{plays:,}/{total_maps:,}"
-            return f"{plays:,}"
-
-        # Snapshot から AP を取得し、True/Standard/Tech の合計を Overall として表示する。
-        true_ap = snap.accsaber_true_ap
-        standard_ap = snap.accsaber_standard_ap
-        tech_ap = snap.accsaber_tech_ap
-
-        if any(v is not None for v in (true_ap, standard_ap, tech_ap)):
-            overall_ap = (true_ap or 0.0) + (standard_ap or 0.0) + (tech_ap or 0.0)
-        else:
-            overall_ap = snap.accsaber_overall_ap
-
         def _format_ap(value: Optional[float]) -> Optional[str]:
             if value is None:
                 return None
             return f"{value:,.2f}"
-
-        acc_rows = [
-            (
-                "AP",
-                _format_ap(overall_ap),
-                _format_ap(true_ap),
-                _format_ap(standard_ap),
-                _format_ap(tech_ap),
-            ),
-            (
-                "Rank",
-                _format_acc_rank(snap.accsaber_overall_rank, overall_country_rank, acc_country_code),
-                _format_acc_rank(snap.accsaber_true_rank, true_country_rank, acc_country_code),
-                _format_acc_rank(snap.accsaber_standard_rank, standard_country_rank, acc_country_code),
-                _format_acc_rank(snap.accsaber_tech_rank, tech_country_rank, acc_country_code),
-            ),
-            (
-                "Play Count",
-                _format_play_with_total(
-                    (
-                        (acc_true_play_count or 0)
-                        + (acc_standard_play_count or 0)
-                        + (acc_tech_play_count or 0)
-                    )
-                    if any(
-                        v is not None
-                        for v in (
-                            acc_true_play_count,
-                            acc_standard_play_count,
-                            acc_tech_play_count,
-                        )
-                    )
-                    else snap.accsaber_overall_play_count,
-                    overall_total_maps,
-                ),
-                _format_play_with_total(acc_true_play_count, true_total_maps),
-                _format_play_with_total(acc_standard_play_count, standard_total_maps),
-                _format_play_with_total(acc_tech_play_count, tech_total_maps),
-            ),
-        ]
-
-        # --- キャッシュ使用フラグ（保存済みフィールドから取得） ---
-        _true_fetched  = getattr(snap, "accsaber_true_fetched",      False)
-        _std_fetched   = getattr(snap, "accsaber_standard_fetched",   False)
-        _tech_fetched  = getattr(snap, "accsaber_tech_fetched",       False)
-        _true_as_of    = getattr(snap, "accsaber_true_data_as_of",    None)
-        _std_as_of     = getattr(snap, "accsaber_standard_data_as_of", None)
-        _tech_as_of    = getattr(snap, "accsaber_tech_data_as_of",    None)
-        _true_failed   = getattr(snap, "accsaber_true_fetch_failed",   False)
-        _std_failed    = getattr(snap, "accsaber_standard_fetch_failed", False)
-        _tech_failed   = getattr(snap, "accsaber_tech_fetch_failed",   False)
-
-        # stale = API 取得失敗またはキャッシュから転記（旧スナップ後方互換は除く）
-        def _is_stale(fetched: bool, as_of: Optional[str], failed: bool) -> bool:
-            return (not fetched) and (as_of is not None or failed)
-
-        _stale_true  = _is_stale(_true_fetched,  _true_as_of,  _true_failed)
-        _stale_std   = _is_stale(_std_fetched,   _std_as_of,   _std_failed)
-        _stale_tech  = _is_stale(_tech_fetched,  _tech_as_of,  _tech_failed)
-        _ORANGE = QColor("orange")
-        # col index 2=True, 3=Standard, 4=Tech
-        _stale_by_col = {2: _stale_true, 3: _stale_std, 4: _stale_tech}
 
         # Play Count バー用の割合 (0.0〜1.0)。分母/分子どちらかが None なら None。
         def _play_ratio(plays: Optional[int], total: Optional[int]) -> Optional[float]:
@@ -2951,84 +2768,7 @@ class PlayerWindow(QMainWindow):
                 return None
             return min(1.0, plays / total)
 
-        _overall_play_count = (
-            (acc_true_play_count or 0)
-            + (acc_standard_play_count or 0)
-            + (acc_tech_play_count or 0)
-        ) if any(
-            v is not None for v in (
-                acc_true_play_count,
-                acc_standard_play_count,
-                acc_tech_play_count,
-            )
-        ) else snap.accsaber_overall_play_count
-        _acc_play_ratios = {
-            1: _play_ratio(_overall_play_count, overall_total_maps),
-            2: _play_ratio(acc_true_play_count, true_total_maps),
-            3: _play_ratio(acc_standard_play_count, standard_total_maps),
-            4: _play_ratio(acc_tech_play_count, tech_total_maps),
-        }
-        _acc_avg_acc_vals = {
-            0: getattr(snap, "accsaber_overall_avg_acc", None),
-            1: getattr(snap, "accsaber_true_avg_acc", None),
-            2: getattr(snap, "accsaber_standard_avg_acc", None),
-            3: getattr(snap, "accsaber_tech_avg_acc", None),
-        }
-
-        # 行=Overall/True/Standard/Tech, 列=Metric/AP/Rank/Play Count/Avg Acc
-        _acc_cat_labels   = ["Overall", "True", "Standard", "Tech"]
-        _acc_cat_stale    = [False, _stale_true, _stale_std, _stale_tech]
-        _acc_cat_colors   = [
-            ACC_PLAY_COLORS["overall"], ACC_PLAY_COLORS["true"],
-            ACC_PLAY_COLORS["standard"], ACC_PLAY_COLORS["tech"],
-        ]
-        for row, cat_label in enumerate(_acc_cat_labels):
-            self.acc_table.insertRow(row)
-            metric_item = QTableWidgetItem(cat_label)
-            metric_item.setBackground(label_cell_color())
-            metric_item.setForeground(label_cell_text_color())
-            self.acc_table.setItem(row, 0, metric_item)
-            _row_stale = _acc_cat_stale[row]
-            # col 1: AP
-            _ap_val = acc_rows[0][row + 1]
-            _ap_txt = "" if _ap_val is None else str(_ap_val)
-            _ap_item = QTableWidgetItem(_ap_txt)
-            _ap_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            if _row_stale:
-                _ap_item.setForeground(_ORANGE)
-            self.acc_table.setItem(row, 1, _ap_item)
-            # col 2: Rank
-            _rank_val = acc_rows[1][row + 1]
-            _rank_txt = "" if _rank_val is None else str(_rank_val)
-            _rank_item = QTableWidgetItem(_rank_txt)
-            _rank_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            if _row_stale:
-                _rank_item.setForeground(_ORANGE)
-            self.acc_table.setItem(row, 2, _rank_item)
-            # col 3: Play Count（バー + 🏆）
-            _play_val = acc_rows[2][row + 1]
-            _play_txt = "" if _play_val is None else str(_play_val)
-            _play_item = QTableWidgetItem(_play_txt)
-            if _row_stale:
-                _play_item.setForeground(_ORANGE)
-            _r = _acc_play_ratios.get(row + 1)
-            if _r is not None:
-                if _r >= 1.0:
-                    _play_item.setText(_play_txt + " 🏆")
-                _play_item.setData(Qt.ItemDataRole.UserRole, _r)
-                _play_item.setData(Qt.ItemDataRole.UserRole + 1, _acc_cat_colors[row])
-            self.acc_table.setItem(row, 3, _play_item)
-            # col 4: Avg Acc（バーあり）
-            _avg = _acc_avg_acc_vals.get(row)
-            _avg_txt = f"{_avg:.2f}%" if _avg is not None else ""
-            _avg_item = QTableWidgetItem(_avg_txt)
-            if _avg is not None:
-                _avg_item.setData(Qt.ItemDataRole.UserRole, _avg)
-            self.acc_table.setItem(row, 4, _avg_item)
-
-        self.acc_table.resizeColumnsToContents()
-
-        # --- AccSaber Reloaded テーブルの更新 ---
+        # --- AccSaber テーブルの更新 ---
         rl_ap_overall = snap.accsaber_reloaded_overall_ap
         rl_ap_true    = snap.accsaber_reloaded_true_ap
         rl_ap_std     = snap.accsaber_reloaded_standard_ap
@@ -3080,7 +2820,7 @@ class PlayerWindow(QMainWindow):
             _xp_parts.append(f"XP Rank：{_xp_rank_html}")
         self._acc_rl_xp_label.setText(" ／ ".join(_xp_parts))
 
-        # AccSaber Reloaded Play Count バー用割合
+        # AccSaber Play Count バー用割合
         _rl_play_ratios = {
             1: _play_ratio(snap.accsaber_reloaded_overall_ranked_plays,  _rl_map_counts.get("overall")),
             2: _play_ratio(snap.accsaber_reloaded_true_ranked_plays,     _rl_map_counts.get("true")),
@@ -3128,34 +2868,6 @@ class PlayerWindow(QMainWindow):
                 _avg_rl_item.setData(Qt.ItemDataRole.UserRole, _avg_rl)
             self.acc_rl_table.setItem(row, 4, _avg_rl_item)
         self.acc_rl_table.resizeColumnsToContents()
-
-        # --- 警告メッセージをスナップショット保存済みフィールドから構築して表示 ---
-        _warn_lines: list[str] = []
-
-        def _fmt_date(iso: str | None) -> str:
-            if not iso:
-                return ""
-            try:
-                return datetime.fromisoformat(iso.rstrip("Z")).replace(tzinfo=timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M")
-            except Exception:  # noqa: BLE001
-                return iso
-
-        for _cat_label, _stale, _failed, _as_of in [
-            ("True",     _stale_true, _true_failed, _true_as_of),
-            ("Standard", _stale_std,  _std_failed,  _std_as_of),
-            ("Tech",     _stale_tech, _tech_failed, _tech_as_of),
-        ]:
-            if not _stale:
-                continue
-            if _failed and _as_of is None:
-                _warn_lines.append(f"AccSaber {_cat_label}: API fetch failed — no previous data available")
-            elif _as_of is not None:
-                _warn_lines.append(f"AccSaber {_cat_label}: using cached data from {_fmt_date(_as_of)}")
-            else:
-                _warn_lines.append(f"AccSaber {_cat_label}: using cached data")
-
-        pass  # _warn_lines は警告ラベル廃止により未使用
-
 
         # ★別統計（ScoreSaber ベース）と Total 行
         total_maps = 0
@@ -3887,32 +3599,8 @@ class PlayerWindow(QMainWindow):
             sort_mode="status_desc",
         )
 
-    def _on_acc_play_count_clicked(self, row: int, col: int) -> None:
-        """AccSaber テーブルの Play Count 列クリックで Playlist 画面を開く。"""
-        if col != 3:
-            return
-        _row_categories: Dict[int, Optional[List[str]]] = {
-            0: None,          # Overall
-            1: ["true"],
-            2: ["standard"],
-            3: ["tech"],
-        }
-        self.open_playlist_with_filter("acc", categories=_row_categories.get(row), sort_mode="status_asc")
-
-    def _on_acc_ap_clicked(self, row: int, col: int) -> None:
-        """AccSaber テーブルの AP 列クリックで Playlist 画面を AP 高順で開く。"""
-        if col != 1:
-            return
-        _row_categories: Dict[int, Optional[List[str]]] = {
-            0: None,
-            1: ["true"],
-            2: ["standard"],
-            3: ["tech"],
-        }
-        self.open_playlist_with_filter("acc", categories=_row_categories.get(row), sort_mode="ap_high")
-
     def _on_acc_rl_play_count_clicked(self, row: int, col: int) -> None:
-        """AccSaber Reloaded テーブルの Play Count 列クリックで Playlist 画面を開く。"""
+        """AccSaber テーブルの Play Count 列クリックで Playlist 画面を開く。"""
         if col != 3:
             return
         _row_categories: Dict[int, Optional[List[str]]] = {
@@ -3924,7 +3612,7 @@ class PlayerWindow(QMainWindow):
         self.open_playlist_with_filter("acc_rl", categories=_row_categories.get(row), sort_mode="status_asc")
 
     def _on_acc_rl_ap_clicked(self, row: int, col: int) -> None:
-        """AccSaber Reloaded テーブルの AP 列クリックで Playlist 画面を AP 高順で開く。"""
+        """AccSaber テーブルの AP 列クリックで Playlist 画面を AP 高順で開く。"""
         if col != 1:
             return
         _row_categories: Dict[int, Optional[List[str]]] = {
