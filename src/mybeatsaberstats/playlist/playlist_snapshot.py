@@ -9,7 +9,6 @@ from ..playlist_view import (
     MapEntry,
     _CACHE_DIR,
     _enrich_entries_with_beatsaver_cache,
-    load_accsaber_maps,
     load_accsaber_reloaded_maps,
 )
 
@@ -635,15 +634,6 @@ def _load_snapshot_service_entries_from_cache(steam_id: Optional[str]) -> Dict[s
         service_entries["beatleader"] = load_bl_maps(steam_id)
     except Exception:
         service_entries["beatleader"] = []
-
-    acc_maps_cache = _CACHE_DIR / "accsaber_maps.json"
-    acc_score_cache = _CACHE_DIR / f"accsaber_player_scores_{steam_id}.json" if steam_id else Path()
-    if acc_maps_cache.exists():
-        acc_steam_id = steam_id if acc_score_cache.exists() else None
-        try:
-            service_entries["accsaber"] = load_accsaber_maps(acc_steam_id, "all")
-        except Exception:
-            service_entries["accsaber"] = []
 
     rl_maps_cache = _CACHE_DIR / "accsaber_reloaded_maps.json"
     rl_score_cache = _CACHE_DIR / f"accsaber_reloaded_player_scores_{steam_id}.json" if steam_id else Path()

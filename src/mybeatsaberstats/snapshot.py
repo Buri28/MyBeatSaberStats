@@ -117,64 +117,12 @@ class Snapshot:
     beatleader_prestige: int | None = None
     beatleader_prestige_icon_url: str | None = None
 
-    # AccSaber ランキング（グローバル / 国別）
-    # グローバルランク
-    accsaber_overall_rank: int | None = None
-    accsaber_true_rank: int | None = None
-    accsaber_standard_rank: int | None = None
-    accsaber_tech_rank: int | None = None
-
-    # 国別ランク（プレイヤーの所属国ごとのランク）
-    accsaber_overall_rank_country: int | None = None
-    accsaber_true_rank_country: int | None = None
-    accsaber_standard_rank_country: int | None = None
-    accsaber_tech_rank_country: int | None = None
-
-    accsaber_overall_play_count: int | None = None
-    accsaber_true_play_count: int | None = None
-    accsaber_standard_play_count: int | None = None
-    accsaber_tech_play_count: int | None = None
-    accsaber_overall_total_maps: int | None = None
-    accsaber_true_total_maps: int | None = None
-    accsaber_standard_total_maps: int | None = None
-    accsaber_tech_total_maps: int | None = None
-
-    # AccSaber AP (Overall / True / Standard / Tech)
-    accsaber_overall_ap: float | None = None
-    accsaber_true_ap: float | None = None
-    accsaber_standard_ap: float | None = None
-    accsaber_tech_ap: float | None = None
-
-    # AccSaber Avg Acc (Overall / True / Standard / Tech, 0.0-100.0)
-    accsaber_overall_avg_acc: float | None = None
-    accsaber_true_avg_acc: float | None = None
-    accsaber_standard_avg_acc: float | None = None
-    accsaber_tech_avg_acc: float | None = None
-
     # BeatLeader の追加統計（将来の拡張用）
     beatleader_average_ranked_acc: float | None = None
     beatleader_total_play_count: int | None = None
     beatleader_ranked_play_count: int | None = None
 
-    # AccSaber カテゴリ API が失敗してキャッシュ値を使用したかどうか（保存する）
-    accsaber_cache_used: bool = False
-
-    # AccSaber カテゴリ別 API 取得成功フラグ（False = 過去スナップショットから転記 or 未取得）
-    accsaber_true_fetched: bool = False
-    accsaber_standard_fetched: bool = False
-    accsaber_tech_fetched: bool = False
-
-    # API 呼び出し自体がエラーだったフラグ（保存する）
-    accsaber_true_fetch_failed: bool = False
-    accsaber_standard_fetch_failed: bool = False
-    accsaber_tech_fetch_failed: bool = False
-
-    # 転記元スナップショットの taken_at（fetched=False かつ過去データあり時のみ設定）
-    accsaber_true_data_as_of: str | None = None
-    accsaber_standard_data_as_of: str | None = None
-    accsaber_tech_data_as_of: str | None = None
-
-    # AccSaber Reloaded ランキング（グローバル / 国別）
+    # AccSaber (Reloaded 統合後の現行 AccSaber) ランキング（グローバル / 国別）
     accsaber_reloaded_overall_rank: int | None = None
     accsaber_reloaded_overall_rank_country: int | None = None
     accsaber_reloaded_overall_ap: float | None = None
@@ -308,4 +256,10 @@ class Snapshot:
         data["beatleader_star_stats"] = bl_converted
 
         data.pop("warnings", None)  # 古いファイルにないフィールドは無視
+
+        # 旧バージョンで保存されたフィールド（旧 AccSaber classic 等）は無視する
+        from dataclasses import fields as _dc_fields
+
+        _known = {f.name for f in _dc_fields(Snapshot)}
+        data = {k: v for k, v in data.items() if k in _known}
         return Snapshot(**data)

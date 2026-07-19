@@ -10,7 +10,6 @@ class MapStore:
     _instance: Optional[MapStore] = None
 
     snapshots: dict[str, Any] = {}  # スナップショットデータキャッシュ
-    acc_players: dict[str, Any] = {}  # AccSaber プレイヤーデータキャッシュ
     ss_basic_info: dict[str, Any] = {}  # ScoreSaber 基本情報キャッシュ ScoreSaberPlayer
     bl_basic_info: dict[str, Any] = {}  # BeatLeader 基本情報キャッシュ BeatLeaderPlayer
     

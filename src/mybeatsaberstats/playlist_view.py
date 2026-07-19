@@ -1,7 +1,7 @@
-"""Playlist 画面 — ScoreSaber / BeatLeader / AccSaber / AccSaber Reloaded の
+"""Playlist 画面 — ScoreSaber / BeatLeader / AccSaber の
 ランクマップ、または任意の .bplist ファイルを一覧表示してフィルタ・ソート・一括出力を行う画面。
 
-AccSaber / AccSaber Reloaded は API から取得するためネットワーク接続が必要。
+AccSaber は API から取得するためネットワーク接続が必要。
 """
 from __future__ import annotations
 
@@ -426,8 +426,7 @@ class _PercentageBarDelegate(QStyledItemDelegate):
 # ──────────────────────────────────────────────────────────────────────────────
 SOURCE_SS = "ScoreSaber"
 SOURCE_BL = "BeatLeader"
-SOURCE_ACC = "AccSaber"
-SOURCE_ACC_RL = "AccSaber RL"
+SOURCE_ACC_RL = "AccSaber"
 SOURCE_BS = "BeatSaver"
 SOURCE_OPEN = "Open File"
 def _secondary_button_stylesheet() -> str:
@@ -562,7 +561,6 @@ def export_playlist_configs(
     has_ss = any(config.source == "ss" for config in configs)
     has_bl = any(config.source == "bl" for config in configs)
     has_rl = any(config.source == "rl" for config in configs)
-    has_acc = any(config.source == "acc" for config in configs)
     bs_configs = [config for config in configs if config.source == "bs"]
     needs_mapper_counts = any(
         config.mapper_played_min > 0 or config.sort_mode in ("bl_mapper_played_desc", "bl_mapper_played_asc")
@@ -572,10 +570,9 @@ def export_playlist_configs(
     ss_maps: List[MapEntry] = []
     bl_maps: List[MapEntry] = []
     rl_maps: List[MapEntry] = []
-    acc_maps: List[MapEntry] = []
     mapper_played_counts: Dict[str, int] = _load_bl_mapper_played_counts_from_cache(steam_id) if needs_mapper_counts else {}
 
-    n_load = (1 if has_ss else 0) + (1 if has_bl else 0) + (1 if has_rl else 0) + (1 if has_acc else 0) + len(bs_configs)
+    n_load = (1 if has_ss else 0) + (1 if has_bl else 0) + (1 if has_rl else 0) + len(bs_configs)
     total = n_load + len(configs)
     step = 0
 
@@ -592,7 +589,7 @@ def export_playlist_configs(
         bl_maps = load_bl_maps(steam_id)
         step += 1
     if has_rl:
-        _emit("Fetching AccSaber RL maps...")
+        _emit("Fetching AccSaber maps...")
 
         def _rl_prog(_done: int, _total: int, label: str) -> None:
             if progress is not None:
@@ -600,16 +597,6 @@ def export_playlist_configs(
 
         rl_maps = load_accsaber_reloaded_maps(steam_id, "all", on_progress=_rl_prog)
         step += 1
-    if has_acc:
-        _emit("Fetching AccSaber maps...")
-
-        def _acc_prog(_done: int, _total: int, label: str) -> None:
-            if progress is not None:
-                progress(step, total, label)
-
-        acc_maps = load_accsaber_maps(steam_id, "all", on_progress=_acc_prog)
-        step += 1
-
     folder_path.mkdir(parents=True, exist_ok=True)
     resolved_covers = covers if covers is not None else _pregenerate_covers(configs)
     saved_files: List[str] = []
@@ -646,7 +633,7 @@ def export_playlist_configs(
                 )
                 step += 1
             else:
-                base_maps = {"ss": ss_maps, "bl": bl_maps, "rl": rl_maps, "acc": acc_maps}.get(config.source, [])
+                base_maps = {"ss": ss_maps, "bl": bl_maps, "rl": rl_maps, "acc": rl_maps}.get(config.source, [])
             maps = _apply_config_filter(list(base_maps), config, mapper_played_counts)
             _write_config_files(maps, config, folder_path, saved_files, errors, resolved_covers)
         except Exception as exc:
@@ -1574,9 +1561,9 @@ def _make_playlist_cover(
 
     cover_type:
         "star"     → SS: scoresaber_logo.svg / BL: beatleader_logo.webp + ★N (黄)
-        "true"     → accsaberreloaded_logo + Tr (緑)
-        "standard" → accsaberreloaded_logo + St (青)
-        "tech"     → accsaberreloaded_logo + Tc (赤)
+        "true"     → asssaber_logo + Tr (緑)
+        "standard" → asssaber_logo + St (青)
+        "tech"     → asssaber_logo + Tc (赤)
         "default"  → SS/BL ロゴ or app_icon のみ
     sort_dir: "asc" → ⇧, "desc" → ⇩
     """
@@ -1584,7 +1571,7 @@ def _make_playlist_cover(
 
     # ベース画像選択
     if cover_type in ("true", "standard", "tech"):
-        base_path = RESOURCES_DIR / "accsaberreloaded_logo.png"
+        base_path = RESOURCES_DIR / "asssaber_logo.webp"
     elif source == "ss":
         base_path = RESOURCES_DIR / "scoresaber_logo.svg"
     elif source == "bl":
@@ -1592,7 +1579,7 @@ def _make_playlist_cover(
     elif source == "acc":
         base_path = RESOURCES_DIR / "asssaber_logo.webp"
     elif source == "rl":
-        base_path = RESOURCES_DIR / "accsaberreloaded_logo.png"
+        base_path = RESOURCES_DIR / "asssaber_logo.webp"
     else:
         base_path = RESOURCES_DIR / "app_icon.png"
 
@@ -1730,259 +1717,6 @@ def _save_bplist(parent: QWidget, title: str, entries: List[MapEntry], init_dir:
         return None
 
 
-def load_accsaber_maps(
-    steam_id: Optional[str] = None,
-    category: str = "all",
-    on_progress=None,
-) -> List[MapEntry]:
-    """AccSaber のカテゴリプレイリストを API から取得し AccSaber/SS クリア情報を付与する。
-
-    category: "all" | "true" | "standard" | "tech"
-    on_progress(done: int, total: int, label: str) — 進捗コールバック（省略可）
-
-    クリア判定の優先順位:
-      1. AccSaber player scores API — SC 等の無効モディファイアを除外した公式クリア
-      2. SS/BL player scores — AccSaber スコア取得不可時のフォールバック
-    """
-    _PLAYLIST_URLS: Dict[str, str] = {
-        "true":     "https://accsaber.com/api/playlists/true",
-        "standard": "https://accsaber.com/api/playlists/standard",
-        "tech":     "https://accsaber.com/api/playlists/tech",
-    }
-    _ACC_DIFF_NORM = {
-        "easy": "Easy", "normal": "Normal", "hard": "Hard",
-        "expert": "Expert", "expertplus": "ExpertPlus", "expert+": "ExpertPlus",
-    }
-    cats = ["true", "standard", "tech"] if category == "all" else [category]
-
-    session = requests.Session()
-
-    # キャッシュからマップデータを読み込む（Snapshot 時に保存済みの場合）
-    from .accsaber import load_accsaber_maps_cache as _load_acc_cache
-    _acc_cache = _load_acc_cache()
-
-    # AccSaber ranked-maps から (hash.upper(), diff) → complexity インデックスを構築
-    complexity_index: Dict[Tuple[str, str], float] = {}
-    ranked_date_index: Dict[Tuple[str, str], int] = {}
-    _ranked_maps_src: List[dict] = (_acc_cache.get("ranked_maps") if _acc_cache else None) or []
-    if not _ranked_maps_src:
-        try:
-            rm = session.get("https://accsaber.com/api/ranked-maps", timeout=30)
-            if rm.status_code == 200:
-                _ranked_maps_src = rm.json()
-        except Exception:
-            pass
-    for m in _ranked_maps_src:
-        h = (m.get("songHash") or "").upper()
-        dn = _ACC_DIFF_NORM.get((m.get("difficulty") or "").lower(), m.get("difficulty") or "")
-        c = m.get("complexity") or 0.0
-        if h and dn:
-            complexity_index[(h, dn)] = float(c)
-            ranked_date_index[(h, dn)] = _parse_iso_datetime_to_ts(m.get("dateRanked"))
-
-    # AccSaber プレイヤースコアを取得し (hash, diff) → cleared/nf セットを構築
-    # AccSaber は SC (SmallCubes) 等の特定モディファイアをスコアとしてカウントしないため
-    # SS player scores とは独立して AccSaber 公式クリア判定を行う。
-    acc_score_cleared: set = set()   # (hash.upper(), diff) — AccSaber 正規クリア
-    acc_score_nf: set = set()         # (hash.upper(), diff) — NF クリア
-    acc_score_ap: Dict[Tuple[str, str], Tuple[float, int]] = {}  # (hash, diff) → (ap, rank)
-    acc_score_ts: Dict[Tuple[str, str], int] = {}  # (hash, diff) → played_at_ts
-    acc_player_scores_available = False
-    if steam_id:
-        from .accsaber import load_player_scores_from_cache as _load_acc_score_cache
-        _acc_score_list = _load_acc_score_cache(steam_id)
-        if _acc_score_list is None:
-            try:
-                ar = session.get(
-                    f"https://accsaber.com/api/players/{steam_id}/scores?pageSize=2000",
-                    timeout=15,
-                )
-                if ar.status_code == 200:
-                    _acc_score_list = ar.json()
-            except Exception:
-                _acc_score_list = None
-        if _acc_score_list is not None:
-            for asc in _acc_score_list:
-                h = (asc.get("songHash") or "").upper()
-                dn = _ACC_DIFF_NORM.get((asc.get("difficulty") or "").lower(), asc.get("difficulty", ""))
-                mods = (asc.get("mods") or "").upper()
-                if "NF" in mods:
-                    acc_score_nf.add((h, dn))
-                else:
-                    acc_score_cleared.add((h, dn))
-                ap = float(asc.get("ap") or 0)
-                rank = int(asc.get("rank") or 0)
-                time_set = _parse_iso_datetime_to_ts(asc.get("timeSet"))
-                if ap > 0 and h and dn:
-                    key_ap: Tuple[str, str] = (h, dn)
-                    if ap > acc_score_ap.get(key_ap, (0.0, 0))[0]:
-                        acc_score_ap[key_ap] = (ap, rank)
-                if h and dn and time_set > 0:
-                    key_ts: Tuple[str, str] = (h, dn)
-                    if time_set > acc_score_ts.get(key_ts, 0):
-                        acc_score_ts[key_ts] = time_set
-            acc_player_scores_available = True
-
-    # SS player scores — pp/acc/rank 表示用、および AccSaber 取得不可時のフォールバック
-    ss_scores_raw: Dict[str, dict] = {}
-    if steam_id:
-        sp = _CACHE_DIR / f"scoresaber_player_scores_{steam_id}.json"
-        if sp.exists():
-            try:
-                sd = json.loads(sp.read_text(encoding="utf-8"))
-                ss_scores_raw = sd.get("scores", {})
-            except Exception:
-                pass
-    ss_score_idx = _build_ss_score_hash_index(ss_scores_raw)
-
-    # BL ランクマップキャッシュを読み込んでインデックス化（フォールバック用）
-    bl_ranked = load_bl_maps()
-    bl_index = _build_bl_hash_index(bl_ranked)
-
-    bl_scores: Dict[str, dict] = {}
-    if steam_id:
-        bp = _CACHE_DIR / f"beatleader_player_scores_{steam_id}.json"
-        if bp.exists():
-            try:
-                bd = json.loads(bp.read_text(encoding="utf-8"))
-                bl_scores = bd.get("scores", {})
-            except Exception:
-                pass
-
-    from dataclasses import replace as _dc_replace
-
-    # key → (entry, [cat, ...]) で複数カテゴリを集積する
-    seen_entries: Dict[Tuple[str, str, str], MapEntry] = {}
-    seen_cats: Dict[Tuple[str, str, str], List[str]] = {}
-
-    for i, cat in enumerate(cats):
-        if on_progress:
-            on_progress(i, len(cats), f"Loading AccSaber {cat}...")
-        _cached_playlists: Dict[str, dict] = (_acc_cache.get("playlists") if _acc_cache else None) or {}
-        if cat in _cached_playlists:
-            bplist_data = _cached_playlists[cat]
-        else:
-            url = _PLAYLIST_URLS[cat]
-            resp = session.get(url, timeout=30)
-            resp.raise_for_status()
-            bplist_data = resp.json()
-        songs = bplist_data.get("songs") or []
-        for song in songs:
-            s_hash = (song.get("hash") or "").upper()
-            s_name = song.get("songName") or ""
-            diffs = song.get("difficulties") or []
-            for d in diffs:
-                char = d.get("characteristic") or "Standard"
-                diff_name = _ACC_DIFF_NORM.get((d.get("name") or "").lower(), d.get("name") or "ExpertPlus")
-                key = (s_hash, char, diff_name)
-                if key not in seen_entries:
-                    # SS player scores から pp/acc/rank 取得 (モディファイア有スコアも含む)
-                    ss_info = ss_score_idx.get(key)
-                    ss_pp = 0.0
-                    ss_cleared = ss_nf = False
-                    ss_acc = 0.0
-                    ss_rank = 0
-                    ss_mods = ""
-                    ss_played_at_ts = 0
-                    if ss_info:
-                        ss_pp, ss_cleared, ss_nf, ss_acc, ss_rank, ss_mods, ss_played_at_ts = ss_info
-
-                    # BL スコア取得 (フォールバック用)
-                    bl_entry = bl_index.get(key)
-                    bl_pp = 0.0
-                    bl_cleared = bl_nf = False
-                    bl_acc_val = 0.0
-                    bl_rank = 0
-                    bl_stars = 0.0
-                    bl_mods = ""
-                    bl_played_at_ts = 0
-                    if bl_entry:
-                        bl_pp, bl_cleared, bl_nf, bl_acc_val, bl_rank, bl_mods = _bl_player_score_info(
-                            bl_scores, bl_entry.leaderboard_id
-                        )
-                        bl_played_at_ts = _bl_player_score_timeset(bl_scores, bl_entry.leaderboard_id)
-                        bl_stars = bl_entry.stars
-
-                    # クリア判定: AccSaber 公式スコアを優先
-                    key_hd = (s_hash, diff_name)  # AccSaber API にはモード情報なし
-                    if acc_player_scores_available:
-                        if key_hd in acc_score_cleared:
-                            final_cleared, final_nf, final_mods = True, False, ""
-                        elif key_hd in acc_score_nf:
-                            final_cleared, final_nf, final_mods = False, True, "NF"
-                        else:
-                            # AccSaber にスコアなし — SS/BL でプレイ済みなら「要再プレイ」扱い
-                            if ss_cleared or ss_nf:
-                                final_cleared, final_nf, final_mods = False, True, ss_mods
-                            elif bl_cleared or bl_nf:
-                                final_cleared, final_nf, final_mods = False, True, bl_mods
-                            else:
-                                final_cleared, final_nf, final_mods = False, False, ""
-                    else:
-                        # AccSaber スコア取得不可 → SS/BL フォールバック
-                        if ss_cleared or ss_nf:
-                            final_cleared, final_nf, final_mods = ss_cleared, ss_nf, ss_mods
-                        elif bl_cleared or bl_nf:
-                            final_cleared, final_nf, final_mods = bl_cleared, bl_nf, bl_mods
-                        else:
-                            final_cleared, final_nf, final_mods = False, False, ""
-
-                    final_pp = ss_pp or bl_pp
-                    final_acc = ss_acc or bl_acc_val
-                    final_rank = ss_rank or bl_rank
-
-                    acc_ap_entry = acc_score_ap.get(key_hd, (0.0, 0))
-                    final_acc_ap = acc_ap_entry[0]
-                    final_acc_rank = acc_ap_entry[1]
-                    acc_played_at_ts = acc_score_ts.get(key_hd, 0)
-
-                    if acc_player_scores_available and (key_hd in acc_score_cleared or key_hd in acc_score_nf):
-                        final_score_src = "AS"
-                        final_played_at_ts = acc_played_at_ts
-                    elif ss_pp > 0 or ss_cleared or ss_nf:
-                        final_score_src = "SS"
-                        final_played_at_ts = ss_played_at_ts
-                    elif bl_pp > 0 or bl_cleared or bl_nf:
-                        final_score_src = "BL"
-                        final_played_at_ts = bl_played_at_ts
-                    else:
-                        final_score_src = ""
-                        final_played_at_ts = 0
-
-                    seen_entries[key] = MapEntry(
-                        song_name=s_name, song_author="", mapper="",
-                        song_hash=s_hash, difficulty=diff_name, mode=char,
-                        stars=bl_stars, max_pp=0.0, player_pp=final_pp,
-                        cleared=final_cleared, nf_clear=final_nf,
-                        player_acc=final_acc,
-                        player_rank=final_acc_rank if final_acc_rank else final_rank,
-                        leaderboard_id="", source="accsaber",
-                        acc_category=cat,
-                        acc_rl_ap=final_acc_ap,
-                        acc_complexity=complexity_index.get((s_hash, diff_name), 0.0),
-                        player_mods=final_mods,
-                        score_source=final_score_src,
-                        duration_seconds=bl_entry.duration_seconds if bl_entry else 0,
-                        played_at_ts=final_played_at_ts,
-                        source_date_ts=ranked_date_index.get((s_hash, diff_name), 0),
-                    )
-                    seen_cats[key] = [cat]
-                else:
-                    seen_cats[key].append(cat)
-
-    # 複数カテゴリに属する場合は "/" で結合
-    entries: List[MapEntry] = []
-    for key, entry in seen_entries.items():
-        cat_list = seen_cats.get(key, [])
-        if len(cat_list) > 1:
-            entry = _dc_replace(entry, acc_category="/".join(cat_list))
-        entries.append(entry)
-
-    if on_progress:
-        on_progress(len(cats), len(cats), "Done")
-    return entries
-
-
 def _fetch_rl_ap_index(
     player_id: str,
     session: Optional[requests.Session] = None,
@@ -2065,7 +1799,7 @@ def load_accsaber_reloaded_maps(
 
     def _rl_progress(page: int, total: int) -> None:
         if on_progress:
-            on_progress(page, total, f"Fetching AccSaber Reloaded maps... {page}/{total}")
+            on_progress(page, total, f"Fetching AccSaber maps... {page}/{total}")
 
     from .accsaber_reloaded import (
         fetch_all_maps_full,
@@ -2075,7 +1809,7 @@ def load_accsaber_reloaded_maps(
     if all_maps is None:
         all_maps = fetch_all_maps_full(session=session, on_progress=_rl_progress)
     elif on_progress:
-        on_progress(1, 1, "Loaded AccSaber Reloaded maps from cache")
+        on_progress(1, 1, "Loaded AccSaber maps from cache")
 
     # RL プレイヤースコア (AP, rank) を mapDifficultyId でインデックス化
     # mapDifficultyId -> (ap, rank)
@@ -2300,9 +2034,9 @@ _BATCH_PRESETS: List[_BatchPreset] = [
     _BatchPreset("BL — Uncleared All",                   "bl", "", True,  "star_asc", "", False),
     _BatchPreset("BL — Uncleared per ★",                 "bl", "", True,  "star_asc", "",    True),
     _BatchPreset("BL — High PP per ★",                   "bl", "", False, "pp_high",  "",    True),
-    _BatchPreset("AccSaber RL — Uncleared per Category", "rl", "", True,  "star_asc", "",    True),
-    _BatchPreset("AccSaber RL — High AP per Category",   "rl", "", False, "ap_high",  "",    True),
-    _BatchPreset("AccSaber RL — Oldest Played per Category", "rl", "", False, "playtime_asc", "", True),
+    _BatchPreset("AccSaber — Uncleared per Category", "rl", "", True,  "star_asc", "",    True),
+    _BatchPreset("AccSaber — High AP per Category",   "rl", "", False, "ap_high",  "",    True),
+    _BatchPreset("AccSaber — Oldest Played per Category", "rl", "", False, "playtime_asc", "", True),
 ]
 
 
@@ -3871,7 +3605,6 @@ class PlaylistWindow(QMainWindow):
         self._src_group = QButtonGroup(self)
         self._rb_ss = QRadioButton(SOURCE_SS)
         self._rb_bl = QRadioButton(SOURCE_BL)
-        self._rb_acc = QRadioButton(SOURCE_ACC)
         self._rb_acc_rl = QRadioButton(SOURCE_ACC_RL)
         self._rb_bs = QRadioButton(SOURCE_BS)
         self._rb_open = QRadioButton(SOURCE_OPEN)
@@ -3881,7 +3614,7 @@ class PlaylistWindow(QMainWindow):
 
         src_row1 = QHBoxLayout()
         src_row1.setSpacing(8)
-        for index, radio in enumerate([self._rb_ss, self._rb_bl, self._rb_acc, self._rb_acc_rl]):
+        for index, radio in enumerate([self._rb_ss, self._rb_bl, self._rb_acc_rl]):
             self._src_group.addButton(radio, index)
             src_row1.addWidget(radio)
         src_row1.addStretch()
@@ -3906,8 +3639,7 @@ class PlaylistWindow(QMainWindow):
         self._svc_combo.addItem("None", userData="none")
         self._svc_combo.addItem("ScoreSaber", userData="scoresaber")
         self._svc_combo.addItem("BeatLeader", userData="beatleader")
-        self._svc_combo.addItem("AccSaber", userData="accsaber")
-        self._svc_combo.addItem("AccSaber RL", userData="accsaber_rl")
+        self._svc_combo.addItem("AccSaber", userData="accsaber_rl")
         self._svc_combo.setEnabled(False)
         self._svc_combo.currentIndexChanged.connect(self._on_svc_combo_changed)
         src_row2.addWidget(self._open_edit)
@@ -4476,15 +4208,13 @@ class PlaylistWindow(QMainWindow):
             return "scoresaber"
         if self._rb_bl.isChecked():
             return "beatleader"
-        if self._rb_acc.isChecked():
-            return "accsaber"
         if self._rb_acc_rl.isChecked():
             return "accsaber_reloaded"
         svc = str(self._svc_combo.currentData() or "none")
         return {
             "scoresaber": "scoresaber",
             "beatleader": "beatleader",
-            "accsaber": "accsaber",
+            "accsaber": "accsaber_reloaded",
             "accsaber_rl": "accsaber_reloaded",
         }.get(svc, "scoresaber")
 
@@ -4872,8 +4602,6 @@ class PlaylistWindow(QMainWindow):
             return "ss"
         if self._rb_bl.isChecked():
             return "bl"
-        if self._rb_acc.isChecked():
-            return "acc"
         if self._rb_acc_rl.isChecked():
             return "acc_rl"
         if self._rb_bs.isChecked():
@@ -5136,7 +4864,7 @@ class PlaylistWindow(QMainWindow):
         source_button = {
             "ss": self._rb_ss,
             "bl": self._rb_bl,
-            "acc": self._rb_acc,
+            "acc": self._rb_acc_rl,
             "acc_rl": self._rb_acc_rl,
             "open": self._rb_open,
         }.get(source)
@@ -5237,7 +4965,7 @@ class PlaylistWindow(QMainWindow):
         source_buttons = {
             "ss": self._rb_ss,
             "bl": self._rb_bl,
-            "acc": self._rb_acc,
+            "acc": self._rb_acc_rl,
             "acc_rl": self._rb_acc_rl,
             "bs": self._rb_bs,
             "open": self._rb_open,
@@ -5388,7 +5116,7 @@ class PlaylistWindow(QMainWindow):
         source_key = str(source or "").strip().lower()
 
         # ソースラジオボタンを切り替え（シグナルで _on_source_changed が呼ばれる）
-        _rb_map = {"ss": self._rb_ss, "bl": self._rb_bl, "acc": self._rb_acc, "acc_rl": self._rb_acc_rl}
+        _rb_map = {"ss": self._rb_ss, "bl": self._rb_bl, "acc": self._rb_acc_rl, "acc_rl": self._rb_acc_rl}
         rb = _rb_map.get(source_key)
         if rb is not None:
             rb.setChecked(True)
@@ -5536,7 +5264,7 @@ class PlaylistWindow(QMainWindow):
 
     def _update_filter_export_ui(self) -> None:
         """現在のソース/サービス設定に応じて Filter・Export の表示状態を更新する。"""
-        is_acc = self._rb_acc.isChecked() or self._rb_acc_rl.isChecked() or (
+        is_acc = self._rb_acc_rl.isChecked() or (
             self._rb_open.isChecked() and self._svc_combo.currentData() == "accsaber_rl"
         )
         is_rl = self._rb_acc_rl.isChecked() or (
@@ -5639,7 +5367,7 @@ class PlaylistWindow(QMainWindow):
             date_label = "Ranked"
         elif self._rb_bl.isChecked():
             date_label = "Ranked"
-        elif self._rb_acc.isChecked() or self._rb_acc_rl.isChecked():
+        elif self._rb_acc_rl.isChecked():
             date_label = "Ranked"
         elif self._rb_bs.isChecked():
             date_label = "Published"
@@ -5651,7 +5379,7 @@ class PlaylistWindow(QMainWindow):
         ss_icon = RESOURCES_DIR / "scoresaber_logo.svg"
         bl_icon = RESOURCES_DIR / "beatleader_logo.webp"
         acc_icon = RESOURCES_DIR / "asssaber_logo.webp"
-        rl_icon = RESOURCES_DIR / "accsaberreloaded_logo.png"
+        rl_icon = RESOURCES_DIR / "asssaber_logo.webp"
         for col, text in [
             (_COL_SS_PLAYED, "Played"), (_COL_SS_RANK, "Rank"), (_COL_SS_STARS, "★"), (_COL_SS_ACC, "Acc %"), (_COL_SS_PP, "PP"),
         ]:
@@ -5785,7 +5513,7 @@ class PlaylistWindow(QMainWindow):
             parts.append(f"star{s_min:.0f}-{s_max:.0f}")
 
         # AccSaber / AccSaber RL カテゴリ
-        if self._rb_acc.isChecked() or self._rb_acc_rl.isChecked():
+        if self._rb_acc_rl.isChecked():
             cat_parts: List[str] = []
             if self._cb_cat_true.isChecked():
                 cat_parts.append("T")
@@ -5860,10 +5588,8 @@ class PlaylistWindow(QMainWindow):
                 svc = "scoresaber"
             elif stem.startswith("bl"):
                 svc = "beatleader"
-            elif stem.startswith("rl") or stem.startswith("accsaber_reloaded"):
+            elif stem.startswith("rl") or stem.startswith("accsaber") or stem.startswith("as_"):
                 svc = "accsaber_rl"
-            elif stem.startswith("accsaber") or stem.startswith("as_"):
-                svc = "accsaber"
             else:
                 svc = None
             if svc is not None:
@@ -5964,10 +5690,6 @@ class PlaylistWindow(QMainWindow):
         elif self._rb_bl.isChecked():
             pending_title = SOURCE_BL
             worker_fn = lambda sig: self._run_load_bl(sig, steam_id)
-
-        elif self._rb_acc.isChecked():
-            pending_title = SOURCE_ACC
-            worker_fn = lambda sig: self._run_load_acc(sig, steam_id, "all")
 
         elif self._rb_acc_rl.isChecked():
             pending_title = SOURCE_ACC_RL
@@ -6308,19 +6030,6 @@ class PlaylistWindow(QMainWindow):
             _progress(1, 2, "Refreshing service columns...")
             _refresh_snapshot_entries_service_columns(entries, steam_id)
             _progress(2, 2, "Refreshing service columns...")
-            sigs.finished.emit(entries)
-        except Exception as exc:
-            sigs.error.emit(str(exc))
-
-    def _run_load_acc(self, sigs: _LoadSignals, steam_id: Optional[str], category: str) -> None:
-        """AccSaber キャッシュ/API 読み込みを非同期 worker から実行する。"""
-        def _progress(done: int, total: int, label: str) -> None:
-            sigs.progress.emit(done, total, label)
-        try:
-            entries = load_accsaber_maps(steam_id, category, on_progress=_progress)
-            _progress(0, 1, "Refreshing service columns...")
-            _refresh_snapshot_entries_service_columns(entries, steam_id)
-            _progress(1, 1, "Refreshing service columns...")
             sigs.finished.emit(entries)
         except Exception as exc:
             sigs.error.emit(str(exc))
@@ -7386,7 +7095,7 @@ class PlaylistWindow(QMainWindow):
         radio_map = {
             "ss": self._rb_ss,
             "bl": self._rb_bl,
-            "acc": self._rb_acc,
+            "acc": self._rb_acc_rl,
             "rl": self._rb_acc_rl,
             "bs": self._rb_bs,
         }
@@ -7510,14 +7219,12 @@ class PlaylistWindow(QMainWindow):
 
         search_text = self._search_edit.text().strip()
 
-        is_acc_any = self._rb_acc.isChecked() or self._rb_acc_rl.isChecked()
+        is_acc_any = self._rb_acc_rl.isChecked()
 
         if self._rb_ss.isChecked():
             src_tag = "ss"
         elif self._rb_bl.isChecked():
             src_tag = "bl"
-        elif self._rb_acc.isChecked():
-            src_tag = "acc"
         elif self._rb_bs.isChecked():
             src_tag = "bs"
         elif self._rb_open.isChecked():
@@ -7575,7 +7282,7 @@ class PlaylistWindow(QMainWindow):
             return "single"
         if self._rb_exp_split_alt.isVisible() and self._rb_exp_split_alt.isChecked():
             return "month"
-        if self._rb_acc.isChecked() or self._rb_acc_rl.isChecked() or (
+        if self._rb_acc_rl.isChecked() or (
             self._rb_open.isChecked() and self._svc_combo.currentData() == "accsaber_rl"
         ):
             return "category"
@@ -8140,7 +7847,7 @@ class PlaylistWindow(QMainWindow):
                 self._rb_open.isChecked() and self._svc_combo.currentData() == "accsaber_rl"
             )
         )
-        rl_mode = self._rb_acc.isChecked() or self._rb_acc_rl.isChecked()
+        rl_mode = self._rb_acc_rl.isChecked()
         cat_filter: Optional[set] = None
         if rl_mode:
             allowed: set = set()
@@ -8467,7 +8174,7 @@ class PlaylistWindow(QMainWindow):
         _cleared_bg = QColor(0x26, 0x49, 0x30, 180) if is_dark() else QColor(0xC8, 0xE6, 0xC9)
         _nf_bg = QColor(0x5C, 0x4A, 0x1A, 180) if is_dark() else QColor(0xFF, 0xF3, 0xCD)
         _unplayed_bg = QColor(0x4A, 0x2A, 0x2A, 180) if is_dark() else QColor(0xFF, 0xCC, 0xCC)
-        _is_acc_mode = self._rb_acc.isChecked() or self._rb_acc_rl.isChecked() or (
+        _is_acc_mode = self._rb_acc_rl.isChecked() or (
             self._rb_open.isChecked() and self._svc_combo.currentData() in ("accsaber_rl", "accsaber")
         )
         _is_bs_mode = self._rb_bs.isChecked()
