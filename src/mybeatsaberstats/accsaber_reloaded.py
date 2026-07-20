@@ -4,7 +4,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import requests
 
@@ -652,6 +652,51 @@ def fetch_player_xp(
         page += 1
 
     return None
+
+
+def fetch_player_milestone_counts(
+    player_id: str,
+    session: Optional[requests.Session] = None,
+) -> Optional[Tuple[int, int]]:
+    """プレイヤーのマイルストーン達成数と総数を (completed, total) で返す。
+
+    /v1/users/{id}/milestones を全ページ走査する。取得失敗時は None。
+    """
+    if not player_id:
+        return None
+
+    if session is None:
+        session = requests.Session()
+
+    url = f"{BASE_URL}/users/{player_id}/milestones"
+    completed = 0
+    total = 0
+    page = 0
+    while True:
+        try:
+            resp = session.get(url, params={"size": 200, "page": page}, timeout=30)
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as exc:  # noqa: BLE001
+            log_api_failure("accsaber_reloaded", "fetch_player_milestone_counts", f"request failed url={url} player_id={player_id} page={page}", exc)
+            return None
+
+        content = data.get("content")
+        if not isinstance(content, list):
+            return None
+        completed += sum(1 for m in content if isinstance(m, dict) and m.get("completed"))
+        try:
+            total = int(data.get("totalElements", total))
+        except (TypeError, ValueError):
+            pass
+
+        if data.get("last", True) or not content:
+            break
+        page += 1
+
+    if total <= 0:
+        return None
+    return completed, total
 
 
 # ---------------------------------------------------------------------------

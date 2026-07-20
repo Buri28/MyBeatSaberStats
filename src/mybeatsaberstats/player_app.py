@@ -1079,6 +1079,148 @@ class RemotePixmapLabel(QLabel):
         self.setPixmap(pixmap)
 
 
+class _EventsFetchSignals(QObject):
+    """イベント情報の非同期取得完了シグナル。"""
+    fetched = Signal(object, object)  # (accsaber_event, beatleader_event) — 各 dict | None
+
+
+class EventsPanel(QWidget):
+    """AccSaber / BeatLeader の現在のイベントを表示するパネル。"""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._signals = _EventsFetchSignals()
+        self._signals.fetched.connect(self._on_fetched)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(2, 2, 2, 2)
+        layout.setSpacing(2)
+
+        _title = QLabel("Events", self)
+        _title.setStyleSheet("font-weight: bold; font-size: 11px; padding: 0px 2px;")
+        _title.setFixedHeight(20)
+        layout.addWidget(_title)
+
+        resources_dir = RESOURCES_DIR
+        self._rows: list[tuple[QLabel, RemotePixmapLabel, QLabel]] = []
+        for logo_name in ("asssaber_logo.webp", "beatleader_logo.webp"):
+            row = QHBoxLayout()
+            row.setContentsMargins(2, 0, 2, 0)
+            row.setSpacing(6)
+            svc_icon = QLabel(self)
+            svc_icon.setPixmap(QIcon(str(resources_dir / logo_name)).pixmap(16, 16))
+            svc_icon.setFixedSize(16, 16)
+            ev_icon = RemotePixmapLabel(24, self)
+            text = QLabel("Loading...", self)
+            text.setStyleSheet("font-size: 11px;")
+            text.setTextFormat(Qt.TextFormat.RichText)
+            text.setOpenExternalLinks(True)
+            text.setWordWrap(True)
+            row.addWidget(svc_icon)
+            row.addWidget(ev_icon)
+            row.addWidget(text, 1)
+            layout.addLayout(row)
+            self._rows.append((svc_icon, ev_icon, text))
+        layout.addStretch(1)
+
+        threading.Thread(target=self._fetch, daemon=True).start()
+
+    # --- 取得 ---
+
+    def _fetch(self) -> None:
+        import requests as _requests
+
+        acc_event: Optional[dict] = None
+        bl_event: Optional[dict] = None
+        try:
+            resp = _requests.get("https://api.accsaberreloaded.com/v1/events", timeout=10)
+            resp.raise_for_status()
+            events = resp.json()
+            if isinstance(events, list) and events:
+                # active / live を優先し、なければ先頭
+                acc_event = next((e for e in events if e.get("active") or e.get("live")), events[0])
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            resp = _requests.get("https://api.beatleader.xyz/events?page=1&count=1", timeout=10)
+            resp.raise_for_status()
+            data = resp.json().get("data") or []
+            if data:
+                bl_event = data[0]
+        except Exception:  # noqa: BLE001
+            pass
+        self._signals.fetched.emit(acc_event, bl_event)
+
+    # --- 表示 ---
+
+    @staticmethod
+    def _fmt_iso_date(iso: Optional[str]) -> str:
+        if not iso:
+            return "?"
+        try:
+            return (
+                datetime.fromisoformat(str(iso).rstrip("Z"))
+                .replace(tzinfo=timezone.utc)
+                .astimezone()
+                .strftime("%Y-%m-%d")
+            )
+        except Exception:  # noqa: BLE001
+            return str(iso)[:10]
+
+    def _on_fetched(self, acc_event: Optional[dict], bl_event: Optional[dict]) -> None:
+        _link_color = "#5aaaee" if is_dark() else "#0066cc"
+        _link_style = f"color:{_link_color}; text-decoration:none; font-weight:bold;"
+        _dim = "color: gray;"
+
+        # AccSaber
+        _, acc_icon, acc_text = self._rows[0]
+        if acc_event is None:
+            acc_text.setText('<span style="color:gray;">No event info</span>')
+        else:
+            title = acc_event.get("title") or acc_event.get("slug") or "Event"
+            start = self._fmt_iso_date(acc_event.get("startsAt"))
+            end = self._fmt_iso_date(acc_event.get("endsAt"))
+            _slug = acc_event.get("slug") or ""
+            _acc_url = (
+                f"https://www.accsaber.com/news?event={_slug}"
+                if _slug else "https://www.accsaber.com/news"
+            )
+            parts = [f'<a href="{_acc_url}" style="{_link_style}">{title}</a>']
+            status = "LIVE" if acc_event.get("live") or acc_event.get("active") else "Ended"
+            parts.append(f'<span style="{_dim}">{start} 〜 {end} ({status})</span>')
+            week = acc_event.get("currentWeek")
+            total_weeks = acc_event.get("totalWeeks")
+            if week is not None and total_weeks:
+                parts.append(f"Week {week}/{total_weeks}")
+            acc_text.setText("<br>".join(parts))
+            acc_icon.set_image_url(acc_event.get("iconUrl") or None)
+
+        # BeatLeader
+        _, bl_icon, bl_text = self._rows[1]
+        if bl_event is None:
+            bl_text.setText('<span style="color:gray;">No event info</span>')
+        else:
+            title = bl_event.get("name") or "Event"
+            end_ts = bl_event.get("endDate")
+            end_str = "?"
+            ongoing = False
+            if end_ts is not None:
+                try:
+                    end_dt = datetime.fromtimestamp(int(end_ts), tz=timezone.utc)
+                    end_str = end_dt.astimezone().strftime("%Y-%m-%d")
+                    ongoing = end_dt > datetime.now(timezone.utc)
+                except (TypeError, ValueError):
+                    pass
+            ev_id = bl_event.get("id")
+            url = f"https://beatleader.com/event/{ev_id}" if ev_id is not None else "https://beatleader.com/events"
+            status = f"〜 {end_str} (LIVE)" if ongoing else f"Ended {end_str}"
+            bl_text.setText(
+                f'<a href="{url}" style="{_link_style}">{title}</a><br>'
+                f'<span style="{_dim}">{status}</span>'
+            )
+            bl_icon.set_image_url(bl_event.get("image") or None)
+
+
 class PlayerAvatarWidget(QLabel):
     """プレイヤーアバターを表示し、クリックで SS/BL を切り替えるウィジェット。"""
 
@@ -1648,10 +1790,11 @@ class PlayerWindow(QMainWindow):
         left_acc_layout.addWidget(_acc_rl_header)
         left_acc_layout.addWidget(self.acc_rl_table, 1)
 
-        # 下部: 横スプリッタ [AccSaber テーブル | (空き)]
+        # 下部: 横スプリッタ [AccSaber テーブル | イベントパネル]
+        self._events_panel = EventsPanel(self)
         self._bottom_h_splitter = QSplitter(Qt.Orientation.Horizontal, self)
         self._bottom_h_splitter.addWidget(left_acc_widget)
-        self._bottom_h_splitter.addWidget(QWidget(self))
+        self._bottom_h_splitter.addWidget(self._events_panel)
         self._bottom_h_splitter.setStretchFactor(0, 1)
         self._bottom_h_splitter.setStretchFactor(1, 1)
         self._bottom_h_splitter.setSizes([575, 613])  # 初期サイズ配分の目安
@@ -2818,6 +2961,11 @@ class PlayerWindow(QMainWindow):
         if _xp_rank_str is not None:
             _xp_rank_html = f'<span style="font-size:12px;">{_xp_rank_str}</span>'  
             _xp_parts.append(f"XP Rank：{_xp_rank_html}")
+        _ms_done = snap.accsaber_reloaded_milestones_completed
+        _ms_total = snap.accsaber_reloaded_milestones_total
+        if _ms_done is not None and _ms_total:
+            _ms_html = f'<span style="font-size:12px;">{_ms_done}/{_ms_total}</span>'
+            _xp_parts.append(f"Milestones：{_ms_html}")
         self._acc_rl_xp_label.setText(" ／ ".join(_xp_parts))
 
         # AccSaber Play Count バー用割合

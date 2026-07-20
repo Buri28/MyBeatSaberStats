@@ -25,11 +25,12 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 import requests
 
-from PySide6.QtCore import Qt, QObject, Signal, QUrl, QSize, QDate, QTimer
+from PySide6.QtCore import Qt, QObject, Signal, QUrl, QSize, QDate, QTimer, QEvent
 from PySide6.QtGui import QColor, QImage, QPainter, QFont, QPixmap, QDesktopServices, QIcon, QPalette
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QAbstractSpinBox,
     QComboBox,
     QDialog,
     QDoubleSpinBox,
@@ -3087,6 +3088,13 @@ class PlaylistWindow(QMainWindow):
         self._update_selection_status()
         self._update_bl_mapper_cache_status()
 
+        # 一覧テーブルは NoFocus のため、↑↓等での行移動をアプリ全体の
+        # イベントフィルタで拾う（初回表示直後などフォーカスが乗っていない
+        # 状態でもキー操作を効かせるため、keyPressEvent 依存にしない）。
+        app = QApplication.instance()
+        if app is not None:
+            app.installEventFilter(self)
+
         # ─ Right panel: Batch Export ────────────────────────────────────
         _right_w = QWidget()
         _right_w.setMinimumWidth(180)
@@ -5039,6 +5047,9 @@ class PlaylistWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
         """終了時に現在のウィンドウ状態を保存してから閉じる。"""
+        app = QApplication.instance()
+        if app is not None:
+            app.removeEventFilter(self)
         self._save_window_state()
         super().closeEvent(event)
 
@@ -7542,6 +7553,69 @@ class PlaylistWindow(QMainWindow):
     def _scroll_table_to_bottom(self) -> None:
         """現在の一覧テーブルを最終行へスクロールする。"""
         self._table.scrollToBottom()
+
+    def eventFilter(self, obj, event) -> bool:  # type: ignore[override]
+        """テキスト入力欄以外にフォーカスがある時、↑↓等で選択行を移動する。"""
+        if event.type() == QEvent.Type.KeyPress and self.isActiveWindow():
+            focus = QApplication.focusWidget()
+            # テキスト入力・スピン・コンボ・別のリスト系はそちらの操作を優先する。
+            editing = isinstance(
+                focus, (QLineEdit, QComboBox, QAbstractSpinBox, QAbstractItemView)
+            )
+            if not editing and self._handle_navigation_key(event.key()):
+                return True
+        return super().eventFilter(obj, event)
+
+    def _handle_navigation_key(self, key) -> bool:
+        """行移動系キーを処理し、扱ったら True を返す。"""
+        if key == Qt.Key.Key_Up:
+            self._move_selection(-1)
+        elif key == Qt.Key.Key_Down:
+            self._move_selection(1)
+        elif key == Qt.Key.Key_PageUp:
+            self._move_selection(-10)
+        elif key == Qt.Key.Key_PageDown:
+            self._move_selection(10)
+        elif key == Qt.Key.Key_Home:
+            self._move_selection_to_edge(top=True)
+        elif key == Qt.Key.Key_End:
+            self._move_selection_to_edge(top=False)
+        else:
+            return False
+        return True
+
+    def _move_selection(self, delta: int) -> None:
+        """選択行（カーソル）を delta 行ぶん上下へ移動して可視化する。"""
+        table = self._table
+        row_count = table.rowCount()
+        if row_count <= 0:
+            return
+        selected = sorted({idx.row() for idx in table.selectionModel().selectedRows()})
+        if selected:
+            current = selected[-1] if delta > 0 else selected[0]
+            target = current + delta
+        else:
+            target = 0 if delta > 0 else row_count - 1
+        self._select_single_row(max(0, min(row_count - 1, target)))
+
+    def _move_selection_to_edge(self, top: bool) -> None:
+        """選択行を一覧の先頭または末尾へ移動する。"""
+        table = self._table
+        row_count = table.rowCount()
+        if row_count <= 0:
+            return
+        self._select_single_row(0 if top else row_count - 1)
+
+    def _select_single_row(self, target: int) -> None:
+        """指定行だけを選択し、画面内へスクロールする。"""
+        table = self._table
+        table.clearSelection()
+        table.selectRow(target)
+        table.setCurrentCell(target, 0)
+        table.scrollTo(
+            table.model().index(target, _COL_SONG),
+            QAbstractItemView.ScrollHint.EnsureVisible,
+        )
 
     def _custom_levels_dir(self) -> Path:
         """設定済み Beat Saber フォルダから CustomLevels ディレクトリを組み立てる。"""
