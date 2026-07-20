@@ -158,6 +158,10 @@ class Snapshot:
     accsaber_reloaded_xp_rank: int | None = None
     accsaber_reloaded_xp_rank_country: int | None = None
 
+    # マイルストーン達成数 / 総数
+    accsaber_reloaded_milestones_completed: int | None = None
+    accsaber_reloaded_milestones_total: int | None = None
+
     # 実行時の警告メッセージ（保存しない）
     warnings: list = field(default_factory=list)
 
