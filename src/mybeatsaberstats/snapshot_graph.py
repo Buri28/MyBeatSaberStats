@@ -9,6 +9,7 @@ from PySide6.QtCore import QDate, QRect, QSize, Qt
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QColorDialog,
     QComboBox,
     QDateEdit,
     QDialog,
@@ -153,6 +154,7 @@ class LineChartWidget(QWidget):
         self._t_max_explicit: Optional[datetime] = None
         self._y_as_int: bool = False
         self._y_inverted: bool = False
+        self._color: QColor = QColor(0, 120, 215)  # 既定は Windows 系アクセントに近い青
         self.setMinimumHeight(180)
         self.setMinimumWidth(260)
 
@@ -174,6 +176,12 @@ class LineChartWidget(QWidget):
     def set_y_inverted(self, inverted: bool) -> None:
         self._y_inverted = inverted
         self.update()
+
+    def set_color(self, color: QColor) -> None:
+        """折れ線の色を設定する。"""
+        if color.isValid():
+            self._color = QColor(color)
+            self.update()
 
     def paintEvent(self, event) -> None:  # type: ignore[override]
         """QWidget.paintEvent のオーバーライド。折れ線グラフを描画する。"""
@@ -299,7 +307,7 @@ class LineChartWidget(QWidget):
             painter.drawText(x - 20, area.bottom() + 16, 40, 16, Qt.AlignmentFlag.AlignHCenter, text)
 
         # 折れ線（データそのままを直線で結ぶ）
-        line_pen = QPen(QColor(0, 120, 215))  # Windows 系のアクセントカラーに近い青
+        line_pen = QPen(self._color)
         line_pen.setWidth(2)
         painter.setPen(line_pen)
 
@@ -492,7 +500,8 @@ class SnapshotGraphDialog(QDialog):
             if not isinstance(key, str) or key not in metric_keys:
                 continue
             inverted = bool(g.get("inverted", False))
-            self._add_graph_internal(metric_key=key, inverted=inverted)
+            color = g.get("color") if isinstance(g.get("color"), str) else None
+            self._add_graph_internal(metric_key=key, inverted=inverted, color=color)
             added = True
 
         return added
@@ -634,9 +643,21 @@ class SnapshotGraphDialog(QDialog):
     def _add_graph(self) -> None:
         self._add_graph_internal(metric_key=None)
 
-    def _add_graph_internal(self, metric_key: Optional[str] = None, inverted: bool = False) -> None:
+    def _add_graph_internal(
+        self,
+        metric_key: Optional[str] = None,
+        inverted: bool = False,
+        color: Optional[str] = None,
+    ) -> None:
         item = QListWidgetItem(self.list_widget)
-        widget = _GraphItemWidget(self, self._snapshots, self._metric_defs, initial_metric_key=metric_key, initial_inverted=inverted)
+        widget = _GraphItemWidget(
+            self,
+            self._snapshots,
+            self._metric_defs,
+            initial_metric_key=metric_key,
+            initial_inverted=inverted,
+            initial_color=color,
+        )
         item.setSizeHint(widget.sizeHint())
         self.list_widget.addItem(item)
         self.list_widget.setItemWidget(item, widget)
@@ -665,7 +686,11 @@ class SnapshotGraphDialog(QDialog):
                 key = w._current_metric_key()
                 if not key:
                     continue
-                graphs_cfg.append({"metric_key": key, "inverted": w._invert_btn.isChecked()})
+                graphs_cfg.append({
+                    "metric_key": key,
+                    "inverted": w._invert_btn.isChecked(),
+                    "color": w._color.name(),
+                })
 
             payload = {
                 "from": d_from.isoformat(),
@@ -695,6 +720,7 @@ class _GraphItemWidget(QWidget):
         metric_defs: List[_MetricDef],
         initial_metric_key: Optional[str] = None,
         initial_inverted: bool = False,
+        initial_color: Optional[str] = None,
     ) -> None:
         super().__init__(dialog)
         self._dialog = dialog
@@ -702,6 +728,13 @@ class _GraphItemWidget(QWidget):
         self._metric_defs = list(metric_defs)
         self._d_from: Optional[date] = None
         self._d_to: Optional[date] = None
+
+        # 折れ線の色（保存値があれば復元、無ければ既定の青）
+        self._color: QColor = QColor(0, 120, 215)
+        if initial_color:
+            c = QColor(initial_color)
+            if c.isValid():
+                self._color = c
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
@@ -721,6 +754,13 @@ class _GraphItemWidget(QWidget):
         self._invert_btn.toggled.connect(self._on_invert_toggled)
         top_row.addWidget(self._invert_btn)
 
+        # 色選択ボタン（ボタン自体を現在の色で塗り、押下でカラーダイアログを開く）
+        self._color_btn = QPushButton(self)
+        self._color_btn.setToolTip("Change line color")
+        self._color_btn.setFixedWidth(30)
+        self._color_btn.clicked.connect(self._on_color_clicked)
+        top_row.addWidget(self._color_btn)
+
         remove_btn = QPushButton("Remove")
         remove_btn.clicked.connect(self._on_remove_clicked)
         top_row.addWidget(remove_btn)
@@ -730,6 +770,10 @@ class _GraphItemWidget(QWidget):
         # 下: グラフ
         self.chart = LineChartWidget(self)
         layout.addWidget(self.chart)
+
+        # 初期色をチャートとボタンに反映する
+        self.chart.set_color(self._color)
+        self._update_color_button()
 
         self.metric_combo.currentIndexChanged.connect(self._on_metric_changed)
 
@@ -775,6 +819,20 @@ class _GraphItemWidget(QWidget):
 
     def _on_invert_toggled(self, checked: bool) -> None:
         self.chart.set_y_inverted(checked)
+
+    def _on_color_clicked(self) -> None:
+        """カラーダイアログを開いて折れ線の色を変更する。"""
+        color = QColorDialog.getColor(self._color, self, "Select line color")
+        if color.isValid():
+            self._color = color
+            self.chart.set_color(color)
+            self._update_color_button()
+
+    def _update_color_button(self) -> None:
+        """色選択ボタンの見た目を現在の色で塗る。"""
+        self._color_btn.setStyleSheet(
+            f"background-color: {self._color.name()}; border: 1px solid #888;"
+        )
 
     def _update_chart(self) -> None:
         key = self._current_metric_key()
