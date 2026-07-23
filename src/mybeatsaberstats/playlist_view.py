@@ -7558,11 +7558,15 @@ class PlaylistWindow(QMainWindow):
         """テキスト入力欄以外にフォーカスがある時、↑↓等で選択行を移動する。"""
         if event.type() == QEvent.Type.KeyPress and self.isActiveWindow():
             focus = QApplication.focusWidget()
-            # テキスト入力・スピン・コンボ・別のリスト系はそちらの操作を優先する。
-            editing = isinstance(
-                focus, (QLineEdit, QComboBox, QAbstractSpinBox, QAbstractItemView)
-            )
-            if not editing and self._handle_navigation_key(event.key()):
+            key = event.key()
+            # コンボ・スピン・別のリスト系は ↑↓等をそちら自身が使うので一切奪わない。
+            if isinstance(focus, (QComboBox, QAbstractSpinBox, QAbstractItemView)):
+                return super().eventFilter(obj, event)
+            # 単一行テキスト入力欄では ↑↓/PageUp/PageDown は未使用のため一覧移動に流用する。
+            # ただし Home/End はテキストカーソル移動に使われるので奪わない。
+            if isinstance(focus, QLineEdit) and key in (Qt.Key.Key_Home, Qt.Key.Key_End):
+                return super().eventFilter(obj, event)
+            if self._handle_navigation_key(key):
                 return True
         return super().eventFilter(obj, event)
 
