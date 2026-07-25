@@ -736,6 +736,7 @@ _TITLE_RANK: Dict[str, int] = {
     "ACC Champ": 2,
     "ACC Elder": 3,
     "ACC God": 4,
+    "ACC Celestial": 5,
 }
 
 _TITLE_ICON_CACHE_DIR: Path = BASE_DIR / "cache" / "accsaber_titles"
