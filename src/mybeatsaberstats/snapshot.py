@@ -161,12 +161,17 @@ class Snapshot:
 
     accsaber_reloaded_xp: float | None = None
     accsaber_reloaded_xp_level: int | None = None
+    accsaber_reloaded_level_title: str | None = None
     accsaber_reloaded_xp_rank: int | None = None
     accsaber_reloaded_xp_rank_country: int | None = None
 
     # マイルストーン達成数 / 総数
     accsaber_reloaded_milestones_completed: int | None = None
     accsaber_reloaded_milestones_total: int | None = None
+
+    # キャンペーン称号バッジ（最上位）
+    accsaber_reloaded_title_name: str | None = None
+    accsaber_reloaded_title_icon_url: str | None = None
 
     # 実行時の警告メッセージ（保存しない）
     warnings: list = field(default_factory=list)

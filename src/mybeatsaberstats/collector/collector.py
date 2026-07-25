@@ -36,6 +36,9 @@ from ..accsaber_reloaded import fetch_player_all_categories as _fetch_accsaber_r
 from ..accsaber_reloaded import fetch_player_xp as _fetch_accsaber_reloaded_xp
 from ..accsaber_reloaded import fetch_player_milestone_counts as _fetch_accsaber_reloaded_milestones
 from ..accsaber_reloaded import fetch_player_skill_levels as _fetch_accsaber_reloaded_skill
+from ..accsaber_reloaded import fetch_player_highest_title as _fetch_accsaber_reloaded_title
+from ..accsaber_reloaded import download_title_icon as _download_accsaber_reloaded_title_icon
+from ..accsaber_reloaded import fetch_player_level_title as _fetch_accsaber_reloaded_level_title
 from ..accsaber_reloaded import fetch_reloaded_map_counts as _fetch_reloaded_map_counts
 from ..accsaber_reloaded import fetch_and_save_all_maps_cache as _fetch_and_save_rl_maps
 from ..accsaber_reloaded import fetch_and_save_player_scores_cache as _fetch_and_save_rl_player_scores
@@ -1267,6 +1270,9 @@ def create_snapshot_for_steam_id(
     accsaber_reloaded_xp_rank_country:       Optional[int]   = None
     accsaber_reloaded_milestones_completed:  Optional[int]   = None
     accsaber_reloaded_milestones_total:      Optional[int]   = None
+    accsaber_reloaded_title_name:            Optional[str]   = None
+    accsaber_reloaded_title_icon_url:        Optional[str]   = None
+    accsaber_reloaded_level_title:           Optional[str]   = None
 
     # AccSaber Reloaded の userId は Steam ID（BeatLeader ID と同じ）なので beatleader_id を優先する。
     # ScoreSaber が非 Steam 形式の ID（例: 3117609721598571）の場合に scoresaber_id を渡すと
@@ -1327,6 +1333,12 @@ def create_snapshot_for_steam_id(
             accsaber_reloaded_xp_rank       = _rl_xp_result.rank_global
             accsaber_reloaded_xp_rank_country = _rl_xp_result.rank_country
 
+        # XP レベル称号（例: Legend）
+        try:
+            accsaber_reloaded_level_title = _fetch_accsaber_reloaded_level_title(_rl_player_id, session=session)
+        except Exception as exc:  # noqa: BLE001
+            _rethrow_if_cancelled(exc)
+
         # マイルストーン達成状況
         try:
             _rl_milestones = _fetch_accsaber_reloaded_milestones(_rl_player_id, session=session)
@@ -1346,6 +1358,21 @@ def create_snapshot_for_steam_id(
         accsaber_reloaded_true_skill_level     = _rl_skill.get("true")
         accsaber_reloaded_standard_skill_level = _rl_skill.get("standard")
         accsaber_reloaded_tech_skill_level     = _rl_skill.get("tech")
+
+        # キャンペーン称号バッジ（最上位）
+        try:
+            _rl_title = _fetch_accsaber_reloaded_title(_rl_player_id, session=session)
+        except Exception as exc:  # noqa: BLE001
+            _rethrow_if_cancelled(exc)
+            _rl_title = None
+        if _rl_title is not None:
+            accsaber_reloaded_title_name = _rl_title.name
+            accsaber_reloaded_title_icon_url = _rl_title.icon_url
+            # バッジ画像をキャッシュに落としておく（表示はオフラインで行う）
+            try:
+                _download_accsaber_reloaded_title_icon(_rl_title.icon_url, session=session)
+            except Exception as exc:  # noqa: BLE001
+                _rethrow_if_cancelled(exc)
 
         print("9.4R AccSaber Reloaded プレイヤーステータス取得完了。")
 
@@ -1559,6 +1586,9 @@ def create_snapshot_for_steam_id(
         accsaber_reloaded_xp_rank_country=accsaber_reloaded_xp_rank_country,
         accsaber_reloaded_milestones_completed=accsaber_reloaded_milestones_completed,
         accsaber_reloaded_milestones_total=accsaber_reloaded_milestones_total,
+        accsaber_reloaded_title_name=accsaber_reloaded_title_name,
+        accsaber_reloaded_title_icon_url=accsaber_reloaded_title_icon_url,
+        accsaber_reloaded_level_title=accsaber_reloaded_level_title,
         star_stats=star_stats,
         beatleader_star_stats=beatleader_star_stats,
     )

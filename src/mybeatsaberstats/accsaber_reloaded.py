@@ -654,6 +654,33 @@ def fetch_player_xp(
     return None
 
 
+def fetch_player_level_title(
+    player_id: str,
+    session: Optional[requests.Session] = None,
+) -> Optional[str]:
+    """プレイヤーの XP レベル称号（例: "Legend"）を返す。
+
+    /v1/users/{id} の levelData.title を読む。取得失敗時は None。
+    """
+    if not player_id:
+        return None
+    if session is None:
+        session = requests.Session()
+    try:
+        resp = session.get(f"{BASE_URL}/users/{player_id}", timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:  # noqa: BLE001
+        log_api_failure("accsaber_reloaded", "fetch_player_level_title", f"request failed player_id={player_id}", exc)
+        return None
+    level_data = data.get("levelData") if isinstance(data, dict) else None
+    if isinstance(level_data, dict):
+        title = level_data.get("title")
+        if isinstance(title, str) and title:
+            return title
+    return None
+
+
 def fetch_player_milestone_counts(
     player_id: str,
     session: Optional[requests.Session] = None,
@@ -697,6 +724,133 @@ def fetch_player_milestone_counts(
     if total <= 0:
         return None
     return completed, total
+
+
+# ---------------------------------------------------------------------------
+# キャンペーン称号バッジ
+# ---------------------------------------------------------------------------
+
+# AccSaber キャンペーン称号バッジ（値が大きいほど高位）
+_TITLE_RANK: Dict[str, int] = {
+    "ACC Mercenary": 1,
+    "ACC Champ": 2,
+    "ACC Elder": 3,
+    "ACC God": 4,
+}
+
+_TITLE_ICON_CACHE_DIR: Path = BASE_DIR / "cache" / "accsaber_titles"
+
+
+@dataclass
+class AccSaberTitle:
+    name: str
+    icon_url: str
+    item_id: str
+    rank: int
+
+
+def fetch_player_highest_title(
+    player_id: str,
+    session: Optional[requests.Session] = None,
+) -> Optional[AccSaberTitle]:
+    """プレイヤーのインベントリから最も高いキャンペーン称号バッジを返す。
+
+    /v1/users/{id}/inventory の typeKey=="badge" のうち、_TITLE_RANK に
+    含まれる称号で最上位のものを返す。取得失敗 / 未所持なら None。
+    """
+    if not player_id:
+        return None
+    if session is None:
+        session = requests.Session()
+
+    best: Optional[AccSaberTitle] = None
+    page = 0
+    while True:
+        try:
+            resp = session.get(
+                f"{BASE_URL}/users/{player_id}/inventory",
+                params={"page": page, "size": _PAGE_SIZE},
+                timeout=30,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as exc:  # noqa: BLE001
+            log_api_failure("accsaber_reloaded", "fetch_player_highest_title", f"request failed player_id={player_id} page={page}", exc)
+            break
+
+        content = data.get("content")
+        if not isinstance(content, list) or not content:
+            break
+
+        for entry in content:
+            if not isinstance(entry, dict):
+                continue
+            item = entry.get("item")
+            if not isinstance(item, dict):
+                continue
+            if item.get("typeKey") != "badge":
+                continue
+            name = str(item.get("name") or "")
+            rank = _TITLE_RANK.get(name)
+            if rank is None:
+                continue
+            if best is None or rank > best.rank:
+                best = AccSaberTitle(
+                    name=name,
+                    icon_url=str(item.get("iconUrl") or ""),
+                    item_id=str(item.get("id") or ""),
+                    rank=rank,
+                )
+
+        if data.get("last", True):
+            break
+        page += 1
+
+    return best
+
+
+def _title_icon_cache_path(icon_url: str) -> Optional[Path]:
+    """iconUrl からローカルキャッシュのファイルパスを求める（拡張子込み）。"""
+    if not icon_url:
+        return None
+    base = icon_url.split("?", 1)[0].rsplit("/", 1)[-1]
+    if not base:
+        return None
+    return _TITLE_ICON_CACHE_DIR / base
+
+
+def download_title_icon(
+    icon_url: str,
+    session: Optional[requests.Session] = None,
+) -> Optional[Path]:
+    """称号バッジ画像をダウンロードしてキャッシュし、ローカルパスを返す。
+
+    既にキャッシュ済みなら再取得しない。取得失敗時は None。
+    """
+    path = _title_icon_cache_path(icon_url)
+    if path is None:
+        return None
+    if path.exists() and path.stat().st_size > 0:
+        return path
+    if session is None:
+        session = requests.Session()
+    try:
+        resp = session.get(icon_url, timeout=30)
+        resp.raise_for_status()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(resp.content)
+        return path
+    except Exception as exc:  # noqa: BLE001
+        log_api_failure("accsaber_reloaded", "download_title_icon", f"download failed url={icon_url}", exc)
+        return None
+
+
+def get_title_icon_cache_path(icon_url: str) -> Optional[Path]:
+    """ダウンロード済み称号バッジ画像のパスを返す（存在すれば）。無ければ None。"""
+    path = _title_icon_cache_path(icon_url)
+    if path is not None and path.exists() and path.stat().st_size > 0:
+        return path
+    return None
 
 
 # ---------------------------------------------------------------------------

@@ -37,7 +37,10 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QProgressDialog,
     QStyledItemDelegate,
+    QScrollArea,
 )
+from PySide6.QtGui import QDesktopServices
+from PySide6.QtCore import QUrl
 
 from .snapshot import Snapshot, SNAPSHOT_DIR, BASE_DIR, RESOURCES_DIR, StarClearStat, resource_path
 from .theme import table_stylesheet, toggle as _toggle_theme, is_dark, label_cell_color, label_cell_text_color, init_theme as _init_theme, button_label as _theme_button_label, current_theme_mode as _current_theme_mode, set_theme_mode as _set_theme_mode
@@ -47,6 +50,8 @@ from .accsaber_reloaded import build_unplayed_bplist as _rl_build_unplayed_bplis
 from .accsaber_reloaded import fetch_player_all_categories as _rl_fetch_player
 from .accsaber_reloaded import fetch_player_scored_diff_ids as _rl_fetch_scored_diff_ids
 from .accsaber_reloaded import CATEGORY_IDS as _RL_CATEGORY_IDS
+from .accsaber_reloaded import get_title_icon_cache_path as _rl_title_icon_path
+from .accsaber_reloaded import download_title_icon as _rl_download_title_icon
 from .snapshot_view import SnapshotCompareDialog, AccPlayCountBarDelegate, ACC_PLAY_COLORS, ACC_PLAY_COL_CATS
 from .snapshot_graph import SnapshotGraphDialog
 from .settings_store import (
@@ -1087,7 +1092,7 @@ class _EventsFetchSignals(QObject):
 class EventsPanel(QWidget):
     """AccSaber / BeatLeader の現在のイベントを表示するパネル。"""
 
-    def __init__(self, parent=None) -> None:
+    def __init__(self, parent=None, show_title: bool = True) -> None:
         super().__init__(parent)
         self._signals = _EventsFetchSignals()
         self._signals.fetched.connect(self._on_fetched)
@@ -1096,10 +1101,11 @@ class EventsPanel(QWidget):
         layout.setContentsMargins(2, 2, 2, 2)
         layout.setSpacing(2)
 
-        _title = QLabel("Events", self)
-        _title.setStyleSheet("font-weight: bold; font-size: 11px; padding: 0px 2px;")
-        _title.setFixedHeight(20)
-        layout.addWidget(_title)
+        if show_title:
+            _title = QLabel("Events", self)
+            _title.setStyleSheet("font-weight: bold; font-size: 11px; padding: 0px 2px;")
+            _title.setFixedHeight(20)
+            layout.addWidget(_title)
 
         resources_dir = RESOURCES_DIR
         self._rows: list[tuple[QLabel, RemotePixmapLabel, QLabel]] = []
@@ -1329,7 +1335,7 @@ class PlayerWindow(QMainWindow):
         # --- UI 状態保存用変数 ---
         self._row_height: int = 24
         self._saved_main_splitter_sizes: list[int] = [578, 610]
-        self._saved_bottom_splitter_sizes: list[int] = [575, 613]
+        self._saved_bottom_splitter_sizes: list[int] = [578, 610]
         self._saved_mid_splitter_sizes: list[int] = [528, 165]
         self._default_window_size = (1211, 770)
         self.resize(*self._default_window_size)
@@ -1776,31 +1782,86 @@ class PlayerWindow(QMainWindow):
         self._acc_rl_title = QLabel("AccSaber", self)
         self._acc_rl_title.setStyleSheet("font-weight: bold; font-size: 11px; padding: 0px 2px;")
         self._acc_rl_title.setOpenExternalLinks(True)
+        # キャンペーン称号バッジ（AccSaber ラベルの右隣）: ヘッダを広げないサイズ
+        self._acc_rl_badge = QLabel("", self)
+        self._acc_rl_badge.setFixedHeight(16)
+        self._acc_rl_badge.setVisible(False)
+        # 称号名テキスト（God / Elder / Champ / Mercenary）
+        self._acc_rl_badge_text = QLabel("", self)
+        self._acc_rl_badge_text.setStyleSheet("font-size: 11px; font-weight: bold; color: #DF8511; padding: 0px 1px;")
+        self._acc_rl_badge_text.setVisible(False)
         # XP表示ラベル
         self._acc_rl_xp_label = QLabel("", self)
         self._acc_rl_xp_label.setStyleSheet("font-size: 11px; font-weight: 600; color: #DF8511; padding: 0px 2px;")
         self._acc_rl_xp_label.setTextFormat(Qt.TextFormat.RichText)
-        self._btn_rl_unplayed = QPushButton("💾Unplayed Playlist", self)
-        self._btn_rl_unplayed.setToolTip("BeatLeader 未プレイの AccSaber 譜面を bplist ファイルに出力します。")
-        self._btn_rl_unplayed.setFixedHeight(20)
-        self._btn_rl_unplayed.setStyleSheet("font-size: 11px; padding: 1px 6px;")
-        self._btn_rl_unplayed.clicked.connect(self._on_export_rl_unplayed)
         _acc_rl_header_layout.addWidget(self._acc_rl_title)
+        _acc_rl_header_layout.addWidget(self._acc_rl_badge)
+        _acc_rl_header_layout.addWidget(self._acc_rl_badge_text)
         _acc_rl_header_layout.addWidget(self._acc_rl_xp_label)
         _acc_rl_header_layout.addStretch()
-        _acc_rl_header_layout.addWidget(self._btn_rl_unplayed)
         _acc_rl_header.setFixedHeight(20)
         left_acc_layout.addWidget(_acc_rl_header)
+
+        # 本体: AccSaber テーブルのみ（ScoreSaber 枠と幅を揃える左ペイン）
         left_acc_layout.addWidget(self.acc_rl_table, 1)
 
-        # 下部: 横スプリッタ [AccSaber テーブル | イベントパネル]
-        self._events_panel = EventsPanel(self)
+        # 右ペイン: [ボタン列 | Events(縦スクロール, stretch で右端に寄る)]
+        _acc_btn_col = QVBoxLayout()
+        _acc_btn_col.setContentsMargins(0, 0, 0, 0)
+        _acc_btn_col.setSpacing(3)
+        _btn_qss = "font-size: 11px; padding: 2px 6px;"
+        self._btn_rl_unplayed = QPushButton("💾Unplayed Playlist", self)
+        self._btn_rl_unplayed.setToolTip("BeatLeader 未プレイの AccSaber 譜面を bplist ファイルに出力します。")
+        self._btn_rl_unplayed.setStyleSheet(_btn_qss)
+        self._btn_rl_unplayed.clicked.connect(self._on_export_rl_unplayed)
+        self._btn_rl_campaigns = QPushButton("🏆Campaigns", self)
+        self._btn_rl_campaigns.setToolTip("AccSaber の Campaigns ページを開きます。")
+        self._btn_rl_campaigns.setStyleSheet(_btn_qss)
+        self._btn_rl_campaigns.clicked.connect(self._on_open_campaigns)
+        self._btn_rl_ms_progress = QPushButton("📊Milestones", self)
+        self._btn_rl_ms_progress.setToolTip("AccSaber の Milestones ページを開きます。")
+        self._btn_rl_ms_progress.setStyleSheet(_btn_qss)
+        self._btn_rl_ms_progress.clicked.connect(self._on_open_milestones)
+        _acc_btn_col.addWidget(self._btn_rl_unplayed)
+        _acc_btn_col.addWidget(self._btn_rl_campaigns)
+        _acc_btn_col.addWidget(self._btn_rl_ms_progress)
+        _acc_btn_col.addStretch(1)
+
+        # Events: ヘッダ(枠外) + 枠付きスクロールエリア(イベント本体)
+        self._events_panel = EventsPanel(self, show_title=False)
+        self._events_scroll = QScrollArea(self)
+        self._events_scroll.setWidgetResizable(True)
+        self._events_scroll.setWidget(self._events_panel)
+        self._events_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._apply_events_frame()
+
+        _events_container = QWidget(self)
+        _events_container.setFixedWidth(320)  # 幅は固定し、右端に寄せる
+        _events_vbox = QVBoxLayout(_events_container)
+        _events_vbox.setContentsMargins(0, 0, 0, 0)
+        _events_vbox.setSpacing(2)
+        _events_header = QLabel("Events", self)
+        _events_header.setStyleSheet("font-weight: bold; font-size: 11px; padding: 0px 2px;")
+        _events_header.setFixedHeight(20)
+        _events_vbox.addWidget(_events_header)          # ヘッダは枠外
+        _events_vbox.addWidget(self._events_scroll, 1)  # 本体は枠内
+
+        _right_bottom_widget = QWidget(self)
+        _right_bottom_layout = QHBoxLayout(_right_bottom_widget)
+        _right_bottom_layout.setContentsMargins(0, 0, 0, 0)
+        _right_bottom_layout.setSpacing(6)
+        _right_bottom_layout.addLayout(_acc_btn_col)
+        _right_bottom_layout.addStretch(1)  # ボタンと Events の間を伸縮させ、Events を右端に固定
+        _right_bottom_layout.addWidget(_events_container)
+
+        # 下部: 横スプリッタ [AccSaber テーブル | ボタン＋Events]
+        # ScoreSaber/BeatLeader の _main_splitter と同じ分割比にし、左端を揃える
         self._bottom_h_splitter = QSplitter(Qt.Orientation.Horizontal, self)
         self._bottom_h_splitter.addWidget(left_acc_widget)
-        self._bottom_h_splitter.addWidget(self._events_panel)
+        self._bottom_h_splitter.addWidget(_right_bottom_widget)
         self._bottom_h_splitter.setStretchFactor(0, 1)
         self._bottom_h_splitter.setStretchFactor(1, 1)
-        self._bottom_h_splitter.setSizes([575, 613])  # 初期サイズ配分の目安
+        self._bottom_h_splitter.setSizes([578, 610])  # _main_splitter と同じ初期比で SS 枠と揃える
 
         # 中央エリア (★テーブル) と下部エリアの間に縦スプリッタを設置
         self._mid_bottom_splitter = QSplitter(Qt.Orientation.Vertical, self)
@@ -2021,11 +2082,23 @@ class PlayerWindow(QMainWindow):
             self._apply_row_height()
             self._save_ui_state()
 
+    def _apply_events_frame(self) -> None:
+        """Events エリアにテーブルと同系色の枠・背景を付ける（テーマ対応）。"""
+        _border = "#3c3c3c" if is_dark() else "#a8a8a8"
+        _bg = "#121212" if is_dark() else "#ffffff"
+        self._events_scroll.setFrameShape(QScrollArea.Shape.StyledPanel)
+        self._events_scroll.setStyleSheet(
+            f"QScrollArea {{ border: 2px solid {_border}; border-radius: 3px; background-color: {_bg}; }}"
+        )
+        # 枠内（ビューポート/イベントパネル）もテーブルと同じ暗い背景にする
+        self._events_scroll.viewport().setStyleSheet(f"background-color: {_bg};")
+        self._events_panel.setStyleSheet(f"background-color: {_bg};")
+
     def _on_default_layout(self) -> None:
         """レイアウトをデフォルト値にリセットする。"""
         self._row_height = 24
         self._saved_main_splitter_sizes = [578, 610]
-        self._saved_bottom_splitter_sizes = [575, 613]
+        self._saved_bottom_splitter_sizes = [578, 610]
         self._saved_mid_splitter_sizes = [528, 165]
         self.resize(1211, 770)
         self._apply_row_height()
@@ -2099,6 +2172,14 @@ class PlayerWindow(QMainWindow):
             self._mid_bottom_splitter.setSizes(self._saved_mid_splitter_sizes)
 
         QTimer.singleShot(0, _restore_splitters)
+
+    def _on_open_campaigns(self) -> None:
+        """AccSaber の Campaigns ページをブラウザで開く。"""
+        QDesktopServices.openUrl(QUrl("https://accsaber.com/campaigns"))
+
+    def _on_open_milestones(self) -> None:
+        """AccSaber の Milestones ページをブラウザで開く（グローバルルート）。"""
+        QDesktopServices.openUrl(QUrl("https://accsaber.com/milestones"))
 
     def _on_export_rl_unplayed(self) -> None:
         """playlist_view の AccSaber ローダーを使い、未クリア譜面を bplist に出力する。"""
@@ -2639,6 +2720,41 @@ class PlayerWindow(QMainWindow):
         self.snapshot_combo.setCurrentIndex(0)
         self.snapshot_combo.blockSignals(False)
 
+    def _update_acc_rl_badge(self, title_name: "str | None", icon_url: "str | None") -> None:
+        """AccSaber ラベルの右隣にキャンペーン称号バッジと称号名を表示する。"""
+        def _hide() -> None:
+            self._acc_rl_badge.clear()
+            self._acc_rl_badge.setVisible(False)
+            self._acc_rl_badge_text.clear()
+            self._acc_rl_badge_text.setVisible(False)
+
+        if not title_name or not icon_url:
+            _hide()
+            return
+        # キャッシュ済み画像を優先。無ければダウンロードを試みる。
+        path = _rl_title_icon_path(icon_url)
+        if path is None:
+            try:
+                path = _rl_download_title_icon(icon_url)
+            except Exception:  # noqa: BLE001
+                path = None
+        if path is None:
+            _hide()
+            return
+        pixmap = QPixmap(str(path))
+        if pixmap.isNull():
+            _hide()
+            return
+        pixmap = pixmap.scaledToHeight(16, Qt.TransformationMode.SmoothTransformation)
+        self._acc_rl_badge.setPixmap(pixmap)
+        self._acc_rl_badge.setToolTip(title_name)
+        self._acc_rl_badge.setVisible(True)
+        # 称号名（"ACC God" → "God" など）
+        short = title_name[len("ACC "):] if title_name.startswith("ACC ") else title_name
+        self._acc_rl_badge_text.setText(short)
+        self._acc_rl_badge_text.setToolTip(title_name)
+        self._acc_rl_badge_text.setVisible(True)
+
     def _update_view(self) -> None:
         # テーマ変更時に全テーブルのスタイルを更新する
         _star_qss = table_stylesheet() + "\nQTableWidget::item { padding: 0px; margin: 0px; }"
@@ -2647,6 +2763,7 @@ class PlayerWindow(QMainWindow):
         self.ss_info_table.setStyleSheet(table_stylesheet())
         self.bl_info_table.setStyleSheet(table_stylesheet())
         self.acc_rl_table.setStyleSheet(table_stylesheet())
+        self._apply_events_frame()
         self.ss_info_table.clearContents()
         self.bl_info_table.clearContents()
         self._ss_id_label.setText("")
@@ -2655,6 +2772,10 @@ class PlayerWindow(QMainWindow):
         self._bl_prestige_icon_label.set_image_url(None)
         self._acc_rl_xp_label.setText("")
         self._acc_rl_title.setText("AccSaber")
+        self._acc_rl_badge.clear()
+        self._acc_rl_badge.setVisible(False)
+        self._acc_rl_badge_text.clear()
+        self._acc_rl_badge_text.setVisible(False)
         self.acc_rl_table.setRowCount(0)
         self.star_table.setRowCount(0)
         self.bl_star_table.setRowCount(0)
@@ -2955,8 +3076,14 @@ class PlayerWindow(QMainWindow):
         _xp_str = None
         if _xp is not None:
             _lv_html = f'<span style="font-size:13px;">Lv.{_xp_level} </span>' if _xp_level else ""
+            # XP レベル称号（例: LEGEND）を LV の右に表示
+            _lv_title = getattr(snap, "accsaber_reloaded_level_title", None)
+            _lv_title_html = (
+                f'<span style="font-size:11px; color:#DF8511; font-weight:bold;">{_lv_title.upper()} </span>'
+                if _lv_title else ""
+            )
             _xp_html = f'<span style="font-size:11px;">({_xp:,.0f} XP)</span>' if _xp_level else ""
-            _xp_str = _lv_html + _xp_html
+            _xp_str = _lv_html + _lv_title_html + _xp_html
         _xp_rank_str = _format_acc_rank(snap.accsaber_reloaded_xp_rank, snap.accsaber_reloaded_xp_rank_country, acc_country_code)
         _xp_parts: list[str] = []
         if _xp_str is not None:
@@ -2970,6 +3097,12 @@ class PlayerWindow(QMainWindow):
             _ms_html = f'<span style="font-size:12px;">{_ms_done}/{_ms_total}</span>'
             _xp_parts.append(f"Milestones：{_ms_html}")
         self._acc_rl_xp_label.setText(" ／ ".join(_xp_parts))
+
+        # キャンペーン称号バッジ（AccSaber ラベルの右隣）
+        self._update_acc_rl_badge(
+            getattr(snap, "accsaber_reloaded_title_name", None),
+            getattr(snap, "accsaber_reloaded_title_icon_url", None),
+        )
 
         # AccSaber Play Count バー用割合
         _rl_play_ratios = {
