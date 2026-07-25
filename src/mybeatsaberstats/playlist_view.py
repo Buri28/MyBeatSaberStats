@@ -4052,6 +4052,12 @@ class PlaylistWindow(QMainWindow):
     def showEvent(self, event) -> None:  # type: ignore[override]
         """初回表示時にだけ保存済み状態の復元処理を起動する。"""
         super().showEvent(event)
+        # 一度閉じると closeEvent でイベントフィルタを外すため、再表示のたびに
+        # 付け直して ↑↓ 等での一覧移動が効くようにする（重複登録を避けて再登録）。
+        app = QApplication.instance()
+        if app is not None:
+            app.removeEventFilter(self)
+            app.installEventFilter(self)
         if self._initial_restore_started:
             return
         self._initial_restore_started = True
