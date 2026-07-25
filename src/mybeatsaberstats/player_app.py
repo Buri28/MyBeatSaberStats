@@ -1538,7 +1538,7 @@ class PlayerWindow(QMainWindow):
         self.bl_info_table = _make_info_table()
 
         # AccSaber 用の指標テーブル
-        self.acc_rl_table = QTableWidget(0, 5, self)
+        self.acc_rl_table = QTableWidget(0, 6, self)
         self.acc_rl_table.setStyleSheet(table_stylesheet())
         self.acc_rl_table.verticalHeader().setDefaultSectionSize(14)
         self.acc_rl_table.verticalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
@@ -1550,6 +1550,7 @@ class PlayerWindow(QMainWindow):
             "Rank",
             "Play Count",
             "Avg Acc",
+            "Skill Level",
         ])
 
         # SS ★別クリア統計テーブル
@@ -1638,6 +1639,8 @@ class PlayerWindow(QMainWindow):
         _ClickableColHover(self.acc_rl_table, 3, AccPlayCountBarDelegate(self))
         # AccSaber Avg Acc 列 (col 4): 70〜100% グラデーション
         self.acc_rl_table.setItemDelegateForColumn(4, PercentageBarDelegate(self, max_value=100.0, gradient_min=70.0))
+        # AccSaber Skill Level 列 (col 5): Play Count と同じカテゴリ色バー（MAX 100）
+        self.acc_rl_table.setItemDelegateForColumn(5, AccPlayCountBarDelegate(self))
 
         # パーセンテージ列に横棒グラフを表示するデリゲートを適用
         # Clear Rate 用: 0〜100% で赤→黄→緑グラデーション
@@ -2981,6 +2984,12 @@ class PlayerWindow(QMainWindow):
             2: getattr(snap, "accsaber_reloaded_standard_avg_acc", None),
             3: getattr(snap, "accsaber_reloaded_tech_avg_acc", None),
         }
+        _rl_skill_vals = {
+            0: getattr(snap, "accsaber_reloaded_overall_skill_level", None),
+            1: getattr(snap, "accsaber_reloaded_true_skill_level", None),
+            2: getattr(snap, "accsaber_reloaded_standard_skill_level", None),
+            3: getattr(snap, "accsaber_reloaded_tech_skill_level", None),
+        }
 
         # 行=Overall/True/Standard/Tech, 列=Metric/AP/Rank/Play Count/Avg Acc
         _rl_cat_labels = ["Overall", "True", "Standard", "Tech"]
@@ -3015,6 +3024,15 @@ class PlayerWindow(QMainWindow):
             if _avg_rl is not None:
                 _avg_rl_item.setData(Qt.ItemDataRole.UserRole, _avg_rl)
             self.acc_rl_table.setItem(row, 4, _avg_rl_item)
+            # col 5: Skill Level（Play Count と同じカテゴリ色バー、MAX 100）
+            _skill_rl = _rl_skill_vals.get(row)
+            _skill_rl_txt = f"{_skill_rl:.1f}" if _skill_rl is not None else ""
+            _skill_rl_item = QTableWidgetItem(_skill_rl_txt)
+            _skill_rl_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+            if _skill_rl is not None:
+                _skill_rl_item.setData(Qt.ItemDataRole.UserRole, max(0.0, min(1.0, _skill_rl / 100.0)))
+                _skill_rl_item.setData(Qt.ItemDataRole.UserRole + 1, _rl_cat_colors[row])
+            self.acc_rl_table.setItem(row, 5, _skill_rl_item)
         self.acc_rl_table.resizeColumnsToContents()
 
         # ★別統計（ScoreSaber ベース）と Total 行

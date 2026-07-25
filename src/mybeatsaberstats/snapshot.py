@@ -153,6 +153,12 @@ class Snapshot:
     accsaber_reloaded_standard_avg_acc: float | None = None
     accsaber_reloaded_tech_avg_acc: float | None = None
 
+    # AccSaber スキルレベル
+    accsaber_reloaded_overall_skill_level: float | None = None
+    accsaber_reloaded_true_skill_level: float | None = None
+    accsaber_reloaded_standard_skill_level: float | None = None
+    accsaber_reloaded_tech_skill_level: float | None = None
+
     accsaber_reloaded_xp: float | None = None
     accsaber_reloaded_xp_level: int | None = None
     accsaber_reloaded_xp_rank: int | None = None
