@@ -344,6 +344,49 @@ class LineChartWidget(QWidget):
         painter.end()
 
 
+class _GraphListWidget(QListWidget):
+    """グラフ用のリスト。IconMode + setItemWidget の並べ替えを自前で処理する。
+
+    QListWidget の InternalMove は setItemWidget で載せたウィジェットを
+    移動時に引き継がないため、ドロップが失敗したり空セルになったりする
+    （位置やタイミングで「できたりできなかったり」する）。そこで dropEvent を
+    オーバーライドし、Qt 本体の移動は行わずに親へ並べ替えを依頼する。
+    """
+
+    def __init__(self, owner: "SnapshotGraphDialog") -> None:
+        super().__init__(owner)
+        self._owner = owner
+
+    def startDrag(self, supportedActions) -> None:  # type: ignore[override]
+        # MoveAction のままだと Qt が元アイテムを自動削除し、自前の並べ替えと
+        # 二重処理になってしまう。CopyAction で実行して自動削除を抑止する。
+        super().startDrag(Qt.DropAction.CopyAction)
+
+    def dragEnterEvent(self, event) -> None:  # type: ignore[override]
+        if event.source() is self:
+            event.accept()
+        else:
+            super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event) -> None:  # type: ignore[override]
+        if event.source() is self:
+            event.accept()
+        else:
+            super().dragMoveEvent(event)
+
+    def dropEvent(self, event) -> None:  # type: ignore[override]
+        if event.source() is not self:
+            super().dropEvent(event)
+            return
+        src_row = self.currentRow()
+        pos = event.position().toPoint()
+        target_item = self.itemAt(pos)
+        dst_row = self.count() - 1 if target_item is None else self.row(target_item)
+        # Qt 本体の InternalMove は呼ばず（ウィジェットが失われるため）自前で並べ替える
+        self._owner._move_graph(src_row, dst_row)
+        event.accept()
+
+
 class SnapshotGraphDialog(QDialog):
     """スナップショットを期間で絞りつつ、複数の項目グラフを並べて表示するダイアログ。"""
 
@@ -379,8 +422,12 @@ class SnapshotGraphDialog(QDialog):
         self.to_latest_btn.clicked.connect(self._on_to_latest_clicked)
         control_row.addWidget(self.to_latest_btn)
 
-        # 右端側に Add Graph ボタンを寄せる
+        # 右端側に Default Layout / Add Graph ボタンを寄せる
         control_row.addStretch(1)
+        default_layout_btn = QPushButton("Default Layout", self)
+        default_layout_btn.setToolTip("3×3 のグラフが収まるようにウィンドウサイズを調整する")
+        default_layout_btn.clicked.connect(self._on_default_layout)
+        control_row.addWidget(default_layout_btn)
         add_btn = QPushButton("Add Graph")
         add_btn.clicked.connect(self._add_graph)
         control_row.addWidget(add_btn)
@@ -389,7 +436,7 @@ class SnapshotGraphDialog(QDialog):
 
         # 中央: 複数グラフを並べるリスト（ドラッグ＆ドロップで並べ替え可）
         # 横方向に左上から右へ配置し、幅に応じて折り返す。
-        self.list_widget = QListWidget(self)
+        self.list_widget = _GraphListWidget(self)
         self.list_widget.setViewMode(QListView.ViewMode.IconMode)
         self.list_widget.setFlow(QListView.Flow.LeftToRight)
         self.list_widget.setWrapping(True)
@@ -478,6 +525,12 @@ class SnapshotGraphDialog(QDialog):
             # 日付復元に失敗しても無視し、スナップショットからの初期値を使う
             pass
 
+        # ウィンドウサイズ
+        _w = data.get("window_width")
+        _h = data.get("window_height")
+        if isinstance(_w, int) and isinstance(_h, int) and _w > 0 and _h > 0:
+            self.resize(_w, _h)
+
         # グラフ配置
         graphs_cfg = data.get("graphs")
         if not isinstance(graphs_cfg, list):
@@ -540,7 +593,13 @@ class SnapshotGraphDialog(QDialog):
             _MetricDef("accsaber_reloaded_standard_ranked_plays", "AccSaber Standard Play Count", is_int=True),
             _MetricDef("accsaber_reloaded_tech_ranked_plays", "AccSaber Tech Play Count", is_int=True),
             _MetricDef("accsaber_reloaded_xp", "AccSaber XP", is_int=False),
+            _MetricDef("accsaber_reloaded_xp_level", "AccSaber LV", is_int=True),
             _MetricDef("accsaber_reloaded_xp_rank", "AccSaber XP Rank", is_int=True),
+            _MetricDef("accsaber_reloaded_milestones_completed", "AccSaber Milestones", is_int=True),
+            _MetricDef("accsaber_reloaded_overall_skill_level", "AccSaber Overall Skill Level", is_int=False),
+            _MetricDef("accsaber_reloaded_true_skill_level", "AccSaber True Skill Level", is_int=False),
+            _MetricDef("accsaber_reloaded_standard_skill_level", "AccSaber Standard Skill Level", is_int=False),
+            _MetricDef("accsaber_reloaded_tech_skill_level", "AccSaber Tech Skill Level", is_int=False),
         ]
 
         # Stats(ScoreSaber 側) の★別クリア数/クリア率/Avg ACC
@@ -666,6 +725,66 @@ class SnapshotGraphDialog(QDialog):
         d_from_py, d_to_py = self._date_range_py()
         widget.set_date_range(d_from_py, d_to_py)
 
+    def _graph_configs(self) -> List[dict]:
+        """現在のグラフ配置を設定 dict のリストとして取得する（未選択も保持）。"""
+        configs: List[dict] = []
+        for w in self._graph_widgets():
+            configs.append({
+                "metric_key": w._current_metric_key(),
+                "inverted": w._invert_btn.isChecked(),
+                "color": w._color.name(),
+            })
+        return configs
+
+    def _rebuild_graphs(self, configs: List[dict]) -> None:
+        """既存グラフを全て破棄し、configs の順序で作り直す。"""
+        while self.list_widget.count() > 0:
+            item = self.list_widget.takeItem(0)
+            w = self.list_widget.itemWidget(item)
+            if isinstance(w, _GraphItemWidget):
+                w.deleteLater()
+        for c in configs:
+            self._add_graph_internal(
+                metric_key=c.get("metric_key"),
+                inverted=bool(c.get("inverted")),
+                color=c.get("color"),
+            )
+        self._update_all_charts()
+
+    def _move_graph(self, src_row: int, dst_row: int) -> None:
+        """src_row のグラフを dst_row の位置へ移動する。"""
+        configs = self._graph_configs()
+        n = len(configs)
+        if src_row < 0 or src_row >= n or src_row == dst_row:
+            return
+        moved = configs.pop(src_row)
+        if dst_row < 0 or dst_row > len(configs):
+            dst_row = len(configs)
+        configs.insert(dst_row, moved)
+        self._rebuild_graphs(configs)
+
+    def _on_default_layout(self) -> None:
+        """3×3 のグラフが収まるようにウィンドウサイズを調整する。"""
+        # グラフ 1 個分のサイズ（既存アイテムがあればそのサイズヒント、無ければ最小値）
+        if self.list_widget.count() > 0:
+            cell = self.list_widget.item(0).sizeHint()
+        else:
+            cell = QSize(280, 220)
+        spacing = self.list_widget.spacing()
+        cols = rows = 3
+        vbar = self.list_widget.verticalScrollBar().sizeHint().width()
+        frame = self.list_widget.frameWidth() * 2
+
+        list_w = cols * cell.width() + (cols + 1) * spacing + frame + vbar
+        list_h = rows * cell.height() + (rows + 1) * spacing + frame
+
+        # 上部コントロール行・下部ボタン行・レイアウト余白ぶんを加算する
+        extra_w = 24
+        extra_h = 100
+
+        self.resize(list_w + extra_w, list_h + extra_h)
+        self._save_state()
+
     def _remove_graph_widget(self, widget: "_GraphItemWidget") -> None:
         for i in range(self.list_widget.count()):
             item = self.list_widget.item(i)
@@ -696,6 +815,8 @@ class SnapshotGraphDialog(QDialog):
                 "from": d_from.isoformat(),
                 "to": d_to.isoformat(),
                 "graphs": graphs_cfg,
+                "window_width": self.width(),
+                "window_height": self.height(),
             }
             path = self._settings_path()
             path.parent.mkdir(parents=True, exist_ok=True)

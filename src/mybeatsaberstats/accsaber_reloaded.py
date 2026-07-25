@@ -700,6 +700,62 @@ def fetch_player_milestone_counts(
 
 
 # ---------------------------------------------------------------------------
+# スキルレベル
+# ---------------------------------------------------------------------------
+
+# AccSaber スキルレベル categoryCode → 内部カテゴリ名
+_SKILL_CODE_TO_CAT: Dict[str, str] = {
+    "overall":      "overall",
+    "true_acc":     "true",
+    "standard_acc": "standard",
+    "tech_acc":     "tech",
+}
+
+
+def fetch_player_skill_levels(
+    player_id: str,
+    session: Optional[requests.Session] = None,
+) -> Dict[str, Optional[float]]:
+    """プレイヤーの AccSaber スキルレベルをカテゴリ別に取得する。
+
+    /v1/users/{id}/skill から各カテゴリの skillLevel を読み取る。
+    戻り値: {"overall": 56.6, "true": ..., "standard": ..., "tech": ...}
+    取得失敗 / 未登録カテゴリは None。
+    """
+    result: Dict[str, Optional[float]] = {cat: None for cat in CATEGORY_IDS}
+    if not player_id:
+        return result
+
+    if session is None:
+        session = requests.Session()
+
+    try:
+        resp = session.get(f"{BASE_URL}/users/{player_id}/skill", timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:  # noqa: BLE001
+        log_api_failure("accsaber_reloaded", "fetch_player_skill_levels", f"request failed player_id={player_id}", exc)
+        return result
+
+    skills = data.get("skills") if isinstance(data, dict) else None
+    if not isinstance(skills, list):
+        return result
+
+    for entry in skills:
+        if not isinstance(entry, dict):
+            continue
+        cat = _SKILL_CODE_TO_CAT.get(str(entry.get("categoryCode") or ""))
+        if not cat:
+            continue
+        try:
+            result[cat] = float(entry.get("skillLevel"))
+        except (TypeError, ValueError):
+            result[cat] = None
+
+    return result
+
+
+# ---------------------------------------------------------------------------
 # 未プレイ抽出用
 # ---------------------------------------------------------------------------
 
