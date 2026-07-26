@@ -467,6 +467,8 @@ class SnapshotGraphDialog(QDialog):
         loaded = self._load_saved_state()
         if not loaded:
             self._add_graph()
+            # 初回オープン時はウィンドウの縦横をデフォルトレイアウト(3×3)に合わせる
+            self.resize(self._default_layout_size())
         self._update_all_charts()
 
     def _on_to_latest_clicked(self) -> None:
@@ -763,8 +765,8 @@ class SnapshotGraphDialog(QDialog):
         configs.insert(dst_row, moved)
         self._rebuild_graphs(configs)
 
-    def _on_default_layout(self) -> None:
-        """3×3 のグラフが収まるようにウィンドウサイズを調整する。"""
+    def _default_layout_size(self) -> QSize:
+        """3×3 のグラフが収まるウィンドウサイズを返す。"""
         # グラフ 1 個分のサイズ（既存アイテムがあればそのサイズヒント、無ければ最小値）
         if self.list_widget.count() > 0:
             cell = self.list_widget.item(0).sizeHint()
@@ -781,8 +783,11 @@ class SnapshotGraphDialog(QDialog):
         # 上部コントロール行・下部ボタン行・レイアウト余白ぶんを加算する
         extra_w = 24
         extra_h = 100
+        return QSize(list_w + extra_w, list_h + extra_h)
 
-        self.resize(list_w + extra_w, list_h + extra_h)
+    def _on_default_layout(self) -> None:
+        """3×3 のグラフが収まるようにウィンドウサイズを調整する。"""
+        self.resize(self._default_layout_size())
         self._save_state()
 
     def _remove_graph_widget(self, widget: "_GraphItemWidget") -> None:

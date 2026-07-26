@@ -70,6 +70,7 @@ from PySide6.QtWidgets import (
     QStyleOptionHeader,
     QStyleOptionViewItem,
     QTextBrowser,
+    QAbstractItemDelegate,
     QStyledItemDelegate,
 )
 
@@ -192,6 +193,36 @@ class _PlaylistTableWidget(QTableWidget):
 
 
 class _NoFocusItemDelegate(QStyledItemDelegate):
+    def createEditor(self, parent, option, index):  # type: ignore[override]
+        # Song / Mapper / Author のテキスト列は、文字を選択してコピーできるよう
+        # 読み取り専用の QLineEdit エディタを表示する。それ以外の列は編集不可。
+        if index.column() in (_COL_SONG, _COL_MAPPER, _COL_AUTHOR):
+            editor = QLineEdit(parent)
+            editor.setReadOnly(True)
+            editor.setFrame(False)
+            # 読み取り専用 QLineEdit は editingFinished がフォーカスアウトで
+            # 発火しないことがあるため、FocusOut を直接拾ってエディタを閉じる。
+            editor.installEventFilter(self)
+            return editor
+        return None
+
+    def eventFilter(self, obj, event) -> bool:  # type: ignore[override]
+        if isinstance(obj, QLineEdit) and event.type() == QEvent.Type.FocusOut:
+            self.closeEditor.emit(obj, QAbstractItemDelegate.EndEditHint.NoHint)
+            return False
+        return super().eventFilter(obj, event)
+
+    def setEditorData(self, editor, index):  # type: ignore[override]
+        if isinstance(editor, QLineEdit):
+            editor.setText(str(index.data(Qt.ItemDataRole.DisplayRole) or ""))
+            editor.selectAll()
+        else:
+            super().setEditorData(editor, index)
+
+    def setModelData(self, editor, model, index):  # type: ignore[override]
+        # 読み取り専用エディタなので、値の書き戻しは行わない。
+        return
+
     @staticmethod
     def _selection_colors(active: bool) -> tuple[QColor, QColor]:
         """アクティブ/非アクティブ時の選択セル配色を返す。"""
@@ -274,7 +305,17 @@ class _NoFocusItemDelegate(QStyledItemDelegate):
         painter.restore()
 
 
+class _NoEditItemDelegate(QStyledItemDelegate):
+    """ダブルクリックでも編集エディタを出さないデリゲート。"""
+
+    def createEditor(self, parent, option, index):  # type: ignore[override]
+        return None
+
+
 class _TransparentSelectionItemDelegate(QStyledItemDelegate):
+    def createEditor(self, parent, option, index):  # type: ignore[override]
+        return None
+
     def paint(self, painter, option, index):  # type: ignore[override]
         """透明寄りの選択背景でシンプルにセルを描画する。"""
         opt = QStyleOptionViewItem(option)
@@ -318,6 +359,9 @@ class _PercentageBarDelegate(QStyledItemDelegate):
         self._dark_text_off_bar = dark_text_off_bar
         self._light_text_on_bar = light_text_on_bar
         self._light_text_off_bar = light_text_off_bar
+
+    def createEditor(self, parent, option, index):  # type: ignore[override]
+        return None
 
     def _parse_value(self, value_str) -> Optional[float]:
         """表示値からバー描画用の float を抽出する。"""
@@ -2950,7 +2994,7 @@ class PlaylistWindow(QMainWindow):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Playlist / Maps")
-        self.resize(1300, 800)
+        self.resize(1652, 910)
         self._initialize_window_state(steam_id, initial_source_tab)
         root = self._build_base_layout()
 
@@ -2962,11 +3006,13 @@ class PlaylistWindow(QMainWindow):
 
         # ─ テーブル ─────────────────────────────────────────────────
         self._table_stack = QStackedWidget(self)
-        self._default_numeric_delegate = QStyledItemDelegate(self)
+        self._default_numeric_delegate = _NoEditItemDelegate(self)
         self._transparent_selection_delegate = _TransparentSelectionItemDelegate(self)
         self._maps_rate_delegate = _PercentageBarDelegate(self, max_value=100.0, gradient_min=0.0)
         self._snapshot_table = self._create_playlist_table()
         self._maps_table = self._create_playlist_table()
+        # 既定の列幅を適用（保存済み state があれば後で上書きされる）
+        self._apply_default_column_widths()
         self._table_stack.addWidget(self._snapshot_table)
         self._table_stack.addWidget(self._maps_table)
         self._table = self._snapshot_table
@@ -3104,16 +3150,16 @@ class PlaylistWindow(QMainWindow):
         self.__cols.addWidget(_right_w)
 
         # 右パネル内を縦スプリッタで分割 (上: Preview / 中: Batch Queue / 下: Quick Presets)
-        _right_splitter = QSplitter(Qt.Orientation.Vertical)
-        _right_splitter.setChildrenCollapsible(False)
-        _rl.addWidget(_right_splitter)
+        self._right_splitter = QSplitter(Qt.Orientation.Vertical)
+        self._right_splitter.setChildrenCollapsible(False)
+        _rl.addWidget(self._right_splitter)
 
         self._preview_pane = QWidget()
         self._preview_pane.setObjectName("previewPane")
         _preview_layout = QVBoxLayout(self._preview_pane)
         _preview_layout.setSpacing(6)
         _preview_layout.setContentsMargins(6, 6, 6, 6)
-        _right_splitter.addWidget(self._preview_pane)
+        self._right_splitter.addWidget(self._preview_pane)
 
         self._preview_title_widget = QWidget()
         _preview_title_row = QHBoxLayout(self._preview_title_widget)
@@ -3302,7 +3348,7 @@ class PlaylistWindow(QMainWindow):
         _top_layout = QVBoxLayout(_top_pane)
         _top_layout.setSpacing(6)
         _top_layout.setContentsMargins(0, 0, 0, 0)
-        _right_splitter.addWidget(_top_pane)
+        self._right_splitter.addWidget(_top_pane)
 
         _batch_title_row = QHBoxLayout()
         _batch_title = QLabel("Batch Export")
@@ -3371,7 +3417,7 @@ class PlaylistWindow(QMainWindow):
         _bot_layout = QVBoxLayout(_bot_pane)
         _bot_layout.setSpacing(6)
         _bot_layout.setContentsMargins(0, 0, 0, 0)
-        _right_splitter.addWidget(_bot_pane)
+        self._right_splitter.addWidget(_bot_pane)
 
         _bot_layout.addWidget(QLabel("Quick Presets:"))
 
@@ -3430,7 +3476,7 @@ class PlaylistWindow(QMainWindow):
             self._btn_quick_export.sizeHint().width() + 24,
         ))
 
-        _right_splitter.setSizes([280, 280, 220])
+        self._right_splitter.setSizes([280, 280, 220])
 
         # ── バッチ状態 ──
         self._export_dir: str = load_playlist_export_dir()
@@ -3446,7 +3492,7 @@ class PlaylistWindow(QMainWindow):
         self._batch_refresh_queue()
 
         # スプリッタ初期サイズ: 左を広く、右パネルを 252px
-        self._splitter.setSizes([940, 350])
+        self._splitter.setSizes([1249, 390])
         self._update_filter_export_ui()
         self._update_table_visual_mode()
         self._clear_preview()
@@ -3595,6 +3641,11 @@ class PlaylistWindow(QMainWindow):
         self._source_tabs = QTabWidget()
         self._source_tabs.setDocumentMode(True)
         self._source_tabs.setStyleSheet(self._source_tabs_stylesheet())
+        # タブ行の右端に Default Layout ボタンを配置する
+        self._btn_default_layout = QPushButton("Default Layout")
+        self._btn_default_layout.setToolTip("ウィンドウサイズ・分割位置・行高を既定値に戻す")
+        self._btn_default_layout.clicked.connect(self._on_default_layout)
+        self._source_tabs.setCornerWidget(self._btn_default_layout, Qt.Corner.TopRightCorner)
         src_vbox.addWidget(self._source_tabs)
 
         snapshot_tab = QWidget()
@@ -4141,7 +4192,9 @@ class PlaylistWindow(QMainWindow):
         table.setHorizontalHeaderLabels(_COL_LABELS)
         table.setItemDelegate(_NoFocusItemDelegate(table))
         table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        # Song / Mapper / Author 列はダブルクリックで読み取り専用エディタを開き、
+        # 文字を選択してコピーできるようにする（他列は編集不可のデリゲートで抑止）。
+        table.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked)
         table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         table.setSortingEnabled(True)
@@ -4177,7 +4230,7 @@ class PlaylistWindow(QMainWindow):
         table.setColumnWidth(_COL_BL_STARS, 52)
         table.setColumnWidth(_COL_BL_ACC, 64)
         table.setColumnWidth(_COL_BL_PP, 52)
-        table.setColumnWidth(_COL_BL_WATCHED, 78)
+        table.setColumnWidth(_COL_BL_WATCHED, 36)
         table.setColumnWidth(_COL_ACC_CAT, 70)
         table.setColumnWidth(_COL_ACC_COMPLEXITY, 58)
         table.setColumnWidth(_COL_ACC_ACC, 64)
@@ -4197,9 +4250,9 @@ class PlaylistWindow(QMainWindow):
         table.setColumnWidth(_COL_AUTHOR, 140)
         table.setColumnWidth(_COL_MAPPER, 120)
         table.setColumnWidth(_COL_BL_MAPPER_PLAYED, 68)
-        table.setColumnWidth(_COL_BL_WATCHED, 78)
+        table.setColumnWidth(_COL_BL_WATCHED, 36)
         table.setColumnWidth(_COL_BL_MAPS_PLAYED, 110)
-        table.setColumnWidth(_COL_BL_MAPS_WATCHED, 78)
+        table.setColumnWidth(_COL_BL_MAPS_WATCHED, 36)
         table.setItemDelegateForColumn(_COL_DIFF, self._transparent_selection_delegate)
         table.itemSelectionChanged.connect(self._update_selection_status)
         table.itemSelectionChanged.connect(self._update_preview_from_selection)
@@ -4499,14 +4552,56 @@ class PlaylistWindow(QMainWindow):
         self._update_beatsaver_cache_status("retrying after error")
         self._start_next_beatsaver_meta_batch()
 
+    def _on_default_layout(self) -> None:
+        """ウィンドウサイズ・分割位置・行高を既定値に戻す。"""
+        self.resize(1652, 910)
+        self._splitter.setSizes([1249, 390])
+        self._right_splitter.setSizes([280, 280, 220])
+        self._row_height = 34
+        self._apply_row_height(refresh_table=True)
+        self._apply_default_column_widths()
+        self._save_window_state()
+
+    # 既定の列幅（cache/playlist_window.json の実測値。0 は非表示列でスキップ）
+    _DEFAULT_SNAPSHOT_COLUMN_WIDTHS = [
+        52, 34, 215, 0, 0, 78, 42, 26, 42, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 110, 70, 58, 64, 52, 60, 0, 0, 0, 32, 45, 120, 109, 0, 0, 0,
+    ]
+    _DEFAULT_MAPS_COLUMN_WIDTHS = [
+        52, 34, 220, 0, 0, 112, 42, 26, 42, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 110, 70, 58, 64, 52, 60, 0, 0, 0, 32, 45, 120, 120, 0, 0, 0,
+    ]
+
+    def _apply_default_column_widths(self) -> None:
+        """既定の列幅を Snapshot / Maps テーブルへ適用する（0 の非表示列はスキップ）。"""
+        self._apply_column_widths(self._snapshot_table, self._DEFAULT_SNAPSHOT_COLUMN_WIDTHS)
+        self._apply_column_widths(self._maps_table, self._DEFAULT_MAPS_COLUMN_WIDTHS)
+
+    @staticmethod
+    def _column_widths(table) -> list:
+        """テーブルの全列幅をリストで返す。"""
+        return [table.columnWidth(i) for i in range(table.columnCount())]
+
+    @staticmethod
+    def _apply_column_widths(table, widths) -> None:
+        """保存済みの列幅をテーブルへ適用する（列数が一致する場合のみ）。"""
+        if not isinstance(widths, list) or len(widths) != table.columnCount():
+            return
+        for i, w in enumerate(widths):
+            if isinstance(w, int) and w > 0:
+                table.setColumnWidth(i, w)
+
     def _save_window_state(self) -> None:
         """現在のウィンドウ状態と各タブの表示状態を保存する。"""
         try:
             payload = load_playlist_window_payload()
             payload["splitter_sizes"] = self._splitter.sizes()
+            payload["right_splitter_sizes"] = self._right_splitter.sizes()
             payload["window_width"] = self.width()
             payload["window_height"] = self.height()
             payload["row_height"] = self._row_height
+            payload["snapshot_column_widths"] = self._column_widths(self._snapshot_table)
+            payload["maps_column_widths"] = self._column_widths(self._maps_table)
             payload["last_load_text_snapshot"] = self._snapshot_last_load_text
             payload["last_load_text_maps"] = self._maps_last_load_text
             payload["highest_diff_only_snapshot"] = self._highest_diff_only_snapshot
@@ -4553,6 +4648,11 @@ class PlaylistWindow(QMainWindow):
         sizes = data.get("splitter_sizes")
         if isinstance(sizes, list) and len(sizes) == 2:
             self._splitter.setSizes(sizes)
+        right_sizes = data.get("right_splitter_sizes")
+        if isinstance(right_sizes, list) and len(right_sizes) == 3:
+            self._right_splitter.setSizes([int(s) for s in right_sizes])
+        self._apply_column_widths(self._snapshot_table, data.get("snapshot_column_widths"))
+        self._apply_column_widths(self._maps_table, data.get("maps_column_widths"))
         if isinstance(row_height, int):
             self._row_height = max(18, min(row_height, 64))
             self._apply_row_height(refresh_table=False)
@@ -5403,10 +5503,12 @@ class PlaylistWindow(QMainWindow):
             self._set_table_header_item(col, text, ss_icon)
         for col, text in [
             (_COL_BL_PLAYED, "Played"), (_COL_BL_RANK, "Rank"), (_COL_BL_STARS, "★"), (_COL_BL_ACC, "Acc %"), (_COL_BL_PP, "PP"),
-            (_COL_BL_WATCHED, "Watched"),
-            (_COL_BL_MAPS_PLAYED, "Played"), (_COL_BL_MAPS_WATCHED, "Watched"),
+            (_COL_BL_MAPS_PLAYED, "Played"),
         ]:
             self._set_table_header_item(col, text, bl_icon)
+        # 👀 列は ToolTip を "Watched" にする
+        self._set_table_header_item(_COL_BL_WATCHED, "👀", bl_icon, tooltip="Watched")
+        self._set_table_header_item(_COL_BL_MAPS_WATCHED, "👀", bl_icon, tooltip="Watched")
         self._set_table_header_item(_COL_BL_MAPPER_PLAYED, "MP", bl_icon, tooltip="Mapper Played")
         for col, text in [
             (_COL_ACC_PLAYED, "Played"), (_COL_ACC_CAT, "Category"), (_COL_ACC_COMPLEXITY, "Cmplx"), (_COL_ACC_ACC, "Acc %"), (_COL_ACC_AP, "AP"), (_COL_ACC_RANK, "Rank"),
@@ -7920,8 +8022,12 @@ class PlaylistWindow(QMainWindow):
         min_bs_rating = self._bs_filter_min_rating.value()
         min_bs_votes = self._bs_filter_min_votes.value()
         min_mapper_played = self._mapper_played_filter_slider.value()
+        # Maps(BeatSaver) は未ランクで★を持たないため、★フィルタは適用しない。
+        # （Snapshot 用プリセットで設定された★範囲が共有ウィジェット経由で
+        #  残っていても Maps を巻き込まないようにする）
+        is_maps = self._is_maps_tab()
         mapper_played_counts: Dict[str, int] = {}
-        if self._is_maps_tab():
+        if is_maps:
             mapper_played_counts = _load_bl_mapper_played_counts_from_cache(self._steam_id)
             if not mapper_played_counts:
                 mapper_played_counts = _build_bl_mapper_played_counts(self._all_entries)
@@ -7945,8 +8051,8 @@ class PlaylistWindow(QMainWindow):
 
         result: List[MapEntry] = []
         for e in self._all_entries:
-            # 星フィルタ
-            if e.stars < star_min or e.stars >= star_max:
+            # 星フィルタ（Maps は未ランクのため適用しない）
+            if not is_maps and (e.stars < star_min or e.stars >= star_max):
                 continue
             # テキストフィルタ
             if keywords:
