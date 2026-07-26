@@ -148,6 +148,67 @@ def _extract_steam_id_from_input(text: str) -> str:
     return m.group(1) if m else text
 
 
+# AccSaber サイトの CSS 変数（--text-primary / --text-secondary）と同じ文字色
+# ダーク: :root, ライト: [data-theme=light]
+_ACC_SITE_TEXT_PRIMARY = {True: "#e6e4ee", False: "#1a1726"}
+_ACC_SITE_TEXT_SECONDARY = {True: "#8c87a3", False: "#6a6580"}
+
+
+def _acc_site_text_primary() -> str:
+    return _ACC_SITE_TEXT_PRIMARY[bool(is_dark())]
+
+
+def _acc_site_text_secondary() -> str:
+    return _ACC_SITE_TEXT_SECONDARY[bool(is_dark())]
+
+
+# XP レベル称号の色。AccSaber サイトの CSS 変数 --tier-* と同じ値（ライト/ダーク共通）
+_ACC_SITE_TIER_COLORS = {
+    "newcomer": "#6b7280",
+    "apprentice": "#3b82f6",
+    "adept": "#10b981",
+    "skilled": "#cd7f32",
+    "expert": "#c0c0d0",
+    "master": "#fbbf24",
+    "grandmaster": "#8b5cf6",
+    "legend": "#f97316",
+    "transcendent": "#22d3ee",
+    "mythic": "#ef4444",
+    "ascendant": "#f472b6",
+}
+
+
+# 将来 AccSaber 側に Ascendant より上の称号が追加された場合に割り当てる色。
+# サイトのパレット（--accent-* / --xp-* / --tier-*）から未使用のものを上位順に並べたもの。
+_ACC_SITE_TIER_FUTURE_COLORS = (
+    "#f5b800",  # accent-overall
+    "#a855f7",  # tier-apex
+    "#3ccfd6",  # xp-set-bonus
+    "#e56fb0",  # xp-campaign
+    "#22c55e",  # accent-true-acc
+    "#b9f2ff",  # tier-diamond
+    "#6a9bf5",  # xp-mission
+    "#e58a3a",  # xp-score
+)
+
+
+def _acc_site_level_title_color(title: str | None) -> str:
+    """レベル称号（例: Transcendent）に対応するサイトの色を返す。
+
+    サイト未定義（＝新しく追加された上位称号）の場合は、称号名から決まる
+    固定の色を _ACC_SITE_TIER_FUTURE_COLORS から割り当てる。同じ称号なら
+    常に同じ色になり、既存の称号色とも重複しない。
+    """
+    key = (title or "").strip().lower().replace(" ", "-")
+    if not key:
+        return _acc_site_text_secondary()
+    known = _ACC_SITE_TIER_COLORS.get(key)
+    if known:
+        return known
+    _idx = sum(ord(c) for c in key) % len(_ACC_SITE_TIER_FUTURE_COLORS)
+    return _ACC_SITE_TIER_FUTURE_COLORS[_idx]
+
+
 _TAKE_SNAPSHOT_DIALOG_PATH = BASE_DIR / "cache" / "take_snapshot_dialog.json"
 
 
@@ -3075,14 +3136,24 @@ class PlayerWindow(QMainWindow):
         _xp_level = snap.accsaber_reloaded_xp_level
         _xp_str = None
         if _xp is not None:
-            _lv_html = f'<span style="font-size:13px;">Lv.{_xp_level} </span>' if _xp_level else ""
+            # 色は AccSaber サイトの CSS 変数に合わせる
+            #   Lv 数値 = --text-primary / 称号・XP = --text-secondary
+            _ACC_TEXT_PRIMARY = _acc_site_text_primary()
+            _ACC_TEXT_SECONDARY = _acc_site_text_secondary()
+            _lv_html = (
+                f'<span style="font-size:13px; color:{_ACC_TEXT_PRIMARY};">Lv.{_xp_level} </span>'
+                if _xp_level else ""
+            )
             # XP レベル称号（例: LEGEND）を LV の右に表示
             _lv_title = getattr(snap, "accsaber_reloaded_level_title", None)
             _lv_title_html = (
-                f'<span style="font-size:11px; color:#DF8511; font-weight:bold;">{_lv_title.upper()} </span>'
+                f'<span style="font-size:11px; color:{_acc_site_level_title_color(_lv_title)}; font-weight:bold;">{_lv_title.upper()} </span>'
                 if _lv_title else ""
             )
-            _xp_html = f'<span style="font-size:11px;">({_xp:,.0f} XP)</span>' if _xp_level else ""
+            _xp_html = (
+                f'<span style="font-size:11px; color:{_ACC_TEXT_SECONDARY};">({_xp:,.0f} XP)</span>'
+                if _xp_level else ""
+            )
             _xp_str = _lv_html + _lv_title_html + _xp_html
         _xp_rank_str = _format_acc_rank(snap.accsaber_reloaded_xp_rank, snap.accsaber_reloaded_xp_rank_country, acc_country_code)
         _xp_parts: list[str] = []

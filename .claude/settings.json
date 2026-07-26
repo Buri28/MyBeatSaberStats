@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//tmp/**)",
+      "Bash(curl -sL \"https://accsaberreloaded.com/\" -o idx.html)"
+    ]
+  }
+}
