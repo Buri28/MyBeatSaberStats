@@ -193,6 +193,10 @@ class _PlaylistTableWidget(QTableWidget):
 
 
 class _NoFocusItemDelegate(QStyledItemDelegate):
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._open_editor: Optional[QLineEdit] = None
+
     def createEditor(self, parent, option, index):  # type: ignore[override]
         # Song / Mapper / Author のテキスト列は、文字を選択してコピーできるよう
         # 読み取り専用の QLineEdit エディタを表示する。それ以外の列は編集不可。
@@ -203,12 +207,24 @@ class _NoFocusItemDelegate(QStyledItemDelegate):
             # 読み取り専用 QLineEdit は editingFinished がフォーカスアウトで
             # 発火しないことがあるため、FocusOut を直接拾ってエディタを閉じる。
             editor.installEventFilter(self)
+            self._open_editor = editor
+            editor.destroyed.connect(self._on_editor_destroyed)
             return editor
         return None
+
+    def _on_editor_destroyed(self, *_) -> None:
+        self._open_editor = None
+
+    def close_open_editor(self) -> None:
+        """開いている編集エディタがあれば閉じる（ウィンドウ非アクティブ化時などに使用）。"""
+        if self._open_editor is not None:
+            self.closeEditor.emit(self._open_editor, QAbstractItemDelegate.EndEditHint.NoHint)
+            self._open_editor = None
 
     def eventFilter(self, obj, event) -> bool:  # type: ignore[override]
         if isinstance(obj, QLineEdit) and event.type() == QEvent.Type.FocusOut:
             self.closeEditor.emit(obj, QAbstractItemDelegate.EndEditHint.NoHint)
+            self._open_editor = None
             return False
         return super().eventFilter(obj, event)
 
@@ -5150,6 +5166,20 @@ class PlaylistWindow(QMainWindow):
             self._activate_table_for_tab(self._source_tab_maps_idx)
             self._apply_saved_sort_for_current_tab()
             self._apply_filter()
+
+    def changeEvent(self, event) -> None:  # type: ignore[override]
+        """ウィンドウが非アクティブになったら開いている編集エディタを閉じる。
+
+        別アプリへ切り替えて貼り付ける等でフォーカスが外れても、テキスト選択用の
+        読み取り専用エディタが残らないようにする（Qt 既定では非アクティブ化では
+        エディタが閉じないため）。
+        """
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.ActivationChange and not self.isActiveWindow():
+            for tbl in (self._snapshot_table, self._maps_table):
+                deleg = tbl.itemDelegate()
+                if isinstance(deleg, _NoFocusItemDelegate):
+                    deleg.close_open_editor()
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
         """終了時に現在のウィンドウ状態を保存してから閉じる。"""
