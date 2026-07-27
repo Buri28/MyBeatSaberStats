@@ -2266,8 +2266,8 @@ class SnapshotCompareDialog(QDialog):
             _v_a = getattr(snap_a, _attr)
             _v_b = getattr(snap_b, _attr)
             self._set_row(self.table_acc, row_acc, _lbl,
-                          (round(_v_a, 2), f"{_v_a:.1f}") if _v_a is not None else None,
-                          (round(_v_b, 2), f"{_v_b:.1f}") if _v_b is not None else None)
+                          (round(_v_a, 2), f"{_v_a:.2f}") if _v_a is not None else None,
+                          (round(_v_b, 2), f"{_v_b:.2f}") if _v_b is not None else None)
             _set_skill_bar(row_acc, _v_a, _v_b, _cat)
             row_acc += 1
         _set_group_label(_grp_start, 4, "Skill Level")
@@ -2436,7 +2436,7 @@ class SnapshotCompareDialog(QDialog):
                 def _skill_item(skill):
                     if skill is None:
                         return QTableWidgetItem("")
-                    it = QTableWidgetItem(f"{skill:.1f}")
+                    it = QTableWidgetItem(f"{skill:.2f}")
                     it.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
                     it.setData(Qt.ItemDataRole.UserRole, max(0.0, min(1.0, skill / 100.0)))
                     it.setData(Qt.ItemDataRole.UserRole + 1, _skill_color)
@@ -2447,7 +2447,7 @@ class SnapshotCompareDialog(QDialog):
                 delta_skill_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                 if skill_a is not None and skill_b is not None:
                     ds = skill_b - skill_a
-                    delta_skill_item.setText(f"{ds:+.1f}")
+                    delta_skill_item.setText(f"{ds:+.2f}")
                     if ds > 0:
                         delta_skill_item.setBackground(diff_positive_bg())
                     elif ds < 0:
