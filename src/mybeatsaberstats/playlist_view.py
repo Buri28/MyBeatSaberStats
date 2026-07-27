@@ -25,7 +25,10 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 import requests
 
-from PySide6.QtCore import Qt, QObject, Signal, QUrl, QSize, QDate, QTimer, QEvent
+from PySide6.QtCore import (
+    Qt, QObject, Signal, QUrl, QSize, QDate, QTimer, QEvent,
+    QModelIndex, QPersistentModelIndex, QRect,
+)
 from PySide6.QtGui import QColor, QImage, QPainter, QFont, QPixmap, QDesktopServices, QIcon, QPalette
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
@@ -195,42 +198,18 @@ class _PlaylistTableWidget(QTableWidget):
 class _NoFocusItemDelegate(QStyledItemDelegate):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        # 開いているエディタは複数になり得るため、リストで保持する。
-        self._open_editors: List[QLineEdit] = []
+        # 開いているエディタ（複数になり得る）と、それが担当するセルの永続インデックス。
+        # 値は (永続インデックス, 生成時のセル矩形)
+        self._open_editors: List[Tuple[QLineEdit, QPersistentModelIndex, QRect]] = []
         # 取り残されたエディタを定期的に掃除する（原因を問わない最後の砦）。
         self._sweep_timer = QTimer(self)
-        self._sweep_timer.setInterval(700)
+        self._sweep_timer.setInterval(500)
         self._sweep_timer.timeout.connect(self._sweep_stale_editors)
         self._sweep_timer.start()
 
-    def _sweep_stale_editors(self) -> None:
-        """ビューポート上に残っている読み取り専用エディタを掃除する。
-
-        このエディタは「文字を選択してコピーする」ためだけに存在するので、
-        キーボードフォーカスを持っていないものは残っていてはいけない。
-        closeEditor が効かず取り残された場合もここで確実に破棄する。
-        """
+    def _view(self) -> Optional[QAbstractItemView]:
         view = self.parent()
-        if not isinstance(view, QAbstractItemView):
-            return
-        try:
-            viewport = view.viewport()
-            if viewport is None:
-                return
-            for child in viewport.findChildren(QLineEdit):
-                if not child.isVisible():
-                    continue
-                window = child.window()
-                if window is not None and window.focusWidget() is child:
-                    continue  # 使用中
-                self.closeEditor.emit(child, QAbstractItemDelegate.EndEditHint.NoHint)
-                if child.isVisible():
-                    child.hide()
-                    child.setParent(None)
-                    child.deleteLater()
-                self._forget_editor(child)
-        except RuntimeError:
-            pass
+        return view if isinstance(view, QAbstractItemView) else None
 
     def createEditor(self, parent, option, index):  # type: ignore[override]
         # Song / Mapper / Author のテキスト列は、文字を選択してコピーできるよう
@@ -244,38 +223,89 @@ class _NoFocusItemDelegate(QStyledItemDelegate):
             # 読み取り専用 QLineEdit は editingFinished がフォーカスアウトで
             # 発火しないことがあるため、FocusOut を直接拾ってエディタを閉じる。
             editor.installEventFilter(self)
-            self._open_editors.append(editor)
+            view = self._view()
+            cell_rect = view.visualRect(index) if view is not None else QRect()
+            self._open_editors.append((editor, QPersistentModelIndex(index), cell_rect))
             editor.destroyed.connect(lambda *_, e=editor: self._forget_editor(e))
             return editor
         return None
 
     def _forget_editor(self, editor) -> None:
-        self._open_editors = [e for e in self._open_editors if e is not editor]
+        self._open_editors = [t for t in self._open_editors if t[0] is not editor]
+
+    def _destroy_editor(self, editor) -> None:
+        """エディタを閉じ、ビューが閉じられなかった場合は直接破棄する。
+
+        QAbstractItemView.closeEditor() は、そのエディタとセルの対応を見失っていると
+        警告を出して何もせずに戻る（＝エディタが残り、ビューは EditingState のまま
+        固まって以降どのセルもダブルクリックで開けなくなる）。そのため破棄後に
+        状態も明示的に戻す。
+        """
+        view = self._view()
+        try:
+            self.closeEditor.emit(editor, QAbstractItemDelegate.EndEditHint.NoHint)
+            if editor.isVisible():
+                editor.removeEventFilter(self)
+                editor.hide()
+                editor.setParent(None)
+                editor.deleteLater()
+        except RuntimeError:
+            pass  # 既に C++ 側が破棄済み
+        self._forget_editor(editor)
+        if view is not None and view.state() == QAbstractItemView.State.EditingState:
+            view.setState(QAbstractItemView.State.NoState)
 
     def close_open_editors(self) -> None:
-        """開いている編集エディタをすべて閉じる。
+        """開いている編集エディタをすべて閉じる。"""
+        for entry in list(self._open_editors):
+            self._destroy_editor(entry[0])
+        self._open_editors = []
 
-        行の並べ替え・再構築やウィンドウ非アクティブ化で、ビューがエディタの
-        対応を見失い閉じられなくなることがあるため、closeEditor を送ったうえで
-        なお残っているウィジェットは直接破棄する。
+    def _sweep_stale_editors(self) -> None:
+        """ビューポート上に残っている読み取り専用エディタを掃除する。
+
+        このエディタは「文字を選択してコピーする」ためだけに存在するので、
+        担当セルを失った / 表示位置がセルとずれた / フォーカスを持っていない
+        ものは残っていてはいけない。どの経路で取り残されてもここで回収する。
         """
-        editors, self._open_editors = self._open_editors, []
-        for editor in editors:
-            try:
-                self.closeEditor.emit(editor, QAbstractItemDelegate.EndEditHint.NoHint)
-                if editor.isVisible():
-                    editor.hide()
-                    editor.setParent(None)
-                    editor.deleteLater()
-            except RuntimeError:
-                # 既に C++ 側が破棄済み
-                continue
+        view = self._view()
+        if view is None:
+            return
+        try:
+            viewport = view.viewport()
+            if viewport is None:
+                return
+            known = {id(e): (i, r) for e, i, r in self._open_editors}
+            for child in viewport.findChildren(QLineEdit):
+                if not child.isVisible():
+                    continue
+                entry = known.get(id(child))
+                if entry is None:
+                    self._destroy_editor(child)  # 管理外＝取り残し
+                    continue
+                index, cell_rect = entry
+                if not index.isValid():
+                    self._destroy_editor(child)  # 行が作り直された
+                    continue
+                if view.visualRect(QModelIndex(index)) != cell_rect:
+                    self._destroy_editor(child)  # 並べ替え・スクロール等でセルが動いた
+                    continue
+                window = child.window()
+                if window is not None and window.focusWidget() is not child:
+                    self._destroy_editor(child)  # フォーカスを失っている
+        except RuntimeError:
+            pass
 
     def eventFilter(self, obj, event) -> bool:  # type: ignore[override]
         if isinstance(obj, QLineEdit) and event.type() == QEvent.Type.FocusOut:
-            self.closeEditor.emit(obj, QAbstractItemDelegate.EndEditHint.NoHint)
-            self._forget_editor(obj)
+            self._destroy_editor(obj)
             return False
+        # テーブルは NoFocus なので、他のセルをクリックしてもエディタは
+        # フォーカスを失わない（＝閉じない）。ビューポートへのクリックで閉じる。
+        if event.type() == QEvent.Type.MouseButtonPress and self._open_editors:
+            view = self._view()
+            if view is not None and obj is view.viewport():
+                self.close_open_editors()
         return super().eventFilter(obj, event)
 
     def setEditorData(self, editor, index):  # type: ignore[override]
@@ -4258,12 +4288,16 @@ class PlaylistWindow(QMainWindow):
         table.setHorizontalHeaderLabels(_COL_LABELS)
         _deleg = _NoFocusItemDelegate(table)
         table.setItemDelegate(_deleg)
+        table.viewport().installEventFilter(_deleg)
         # 行の再構築（検索・フィルタ）や並べ替え・スクロールで、読み取り専用エディタが
         # 元のセルから切り離されて画面に残ることがあるため、これらの契機で必ず閉じる。
         _model = table.model()
         if _model is not None:
-            _model.rowsRemoved.connect(lambda *_: _deleg.close_open_editors())
-            _model.modelReset.connect(lambda *_: _deleg.close_open_editors())
+            # 行が消える「前」に閉じる。消えた後だとビューがセルとの対応を失い、
+            # closeEditor が効かずエディタが取り残される。
+            _model.rowsAboutToBeRemoved.connect(lambda *_: _deleg.close_open_editors())
+            _model.modelAboutToBeReset.connect(lambda *_: _deleg.close_open_editors())
+            _model.layoutAboutToBeChanged.connect(lambda *_: _deleg.close_open_editors())
         table.horizontalHeader().sortIndicatorChanged.connect(lambda *_: _deleg.close_open_editors())
         table.verticalScrollBar().valueChanged.connect(lambda *_: _deleg.close_open_editors())
         table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
