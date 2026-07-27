@@ -195,36 +195,86 @@ class _PlaylistTableWidget(QTableWidget):
 class _NoFocusItemDelegate(QStyledItemDelegate):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self._open_editor: Optional[QLineEdit] = None
+        # 開いているエディタは複数になり得るため、リストで保持する。
+        self._open_editors: List[QLineEdit] = []
+        # 取り残されたエディタを定期的に掃除する（原因を問わない最後の砦）。
+        self._sweep_timer = QTimer(self)
+        self._sweep_timer.setInterval(700)
+        self._sweep_timer.timeout.connect(self._sweep_stale_editors)
+        self._sweep_timer.start()
+
+    def _sweep_stale_editors(self) -> None:
+        """ビューポート上に残っている読み取り専用エディタを掃除する。
+
+        このエディタは「文字を選択してコピーする」ためだけに存在するので、
+        キーボードフォーカスを持っていないものは残っていてはいけない。
+        closeEditor が効かず取り残された場合もここで確実に破棄する。
+        """
+        view = self.parent()
+        if not isinstance(view, QAbstractItemView):
+            return
+        try:
+            viewport = view.viewport()
+            if viewport is None:
+                return
+            for child in viewport.findChildren(QLineEdit):
+                if not child.isVisible():
+                    continue
+                window = child.window()
+                if window is not None and window.focusWidget() is child:
+                    continue  # 使用中
+                self.closeEditor.emit(child, QAbstractItemDelegate.EndEditHint.NoHint)
+                if child.isVisible():
+                    child.hide()
+                    child.setParent(None)
+                    child.deleteLater()
+                self._forget_editor(child)
+        except RuntimeError:
+            pass
 
     def createEditor(self, parent, option, index):  # type: ignore[override]
         # Song / Mapper / Author のテキスト列は、文字を選択してコピーできるよう
         # 読み取り専用の QLineEdit エディタを表示する。それ以外の列は編集不可。
         if index.column() in (_COL_SONG, _COL_MAPPER, _COL_AUTHOR):
+            # 前のエディタが残っている場合は先に閉じる（重なって取り残されるのを防ぐ）
+            self.close_open_editors()
             editor = QLineEdit(parent)
             editor.setReadOnly(True)
             editor.setFrame(False)
             # 読み取り専用 QLineEdit は editingFinished がフォーカスアウトで
             # 発火しないことがあるため、FocusOut を直接拾ってエディタを閉じる。
             editor.installEventFilter(self)
-            self._open_editor = editor
-            editor.destroyed.connect(self._on_editor_destroyed)
+            self._open_editors.append(editor)
+            editor.destroyed.connect(lambda *_, e=editor: self._forget_editor(e))
             return editor
         return None
 
-    def _on_editor_destroyed(self, *_) -> None:
-        self._open_editor = None
+    def _forget_editor(self, editor) -> None:
+        self._open_editors = [e for e in self._open_editors if e is not editor]
 
-    def close_open_editor(self) -> None:
-        """開いている編集エディタがあれば閉じる（ウィンドウ非アクティブ化時などに使用）。"""
-        if self._open_editor is not None:
-            self.closeEditor.emit(self._open_editor, QAbstractItemDelegate.EndEditHint.NoHint)
-            self._open_editor = None
+    def close_open_editors(self) -> None:
+        """開いている編集エディタをすべて閉じる。
+
+        行の並べ替え・再構築やウィンドウ非アクティブ化で、ビューがエディタの
+        対応を見失い閉じられなくなることがあるため、closeEditor を送ったうえで
+        なお残っているウィジェットは直接破棄する。
+        """
+        editors, self._open_editors = self._open_editors, []
+        for editor in editors:
+            try:
+                self.closeEditor.emit(editor, QAbstractItemDelegate.EndEditHint.NoHint)
+                if editor.isVisible():
+                    editor.hide()
+                    editor.setParent(None)
+                    editor.deleteLater()
+            except RuntimeError:
+                # 既に C++ 側が破棄済み
+                continue
 
     def eventFilter(self, obj, event) -> bool:  # type: ignore[override]
         if isinstance(obj, QLineEdit) and event.type() == QEvent.Type.FocusOut:
             self.closeEditor.emit(obj, QAbstractItemDelegate.EndEditHint.NoHint)
-            self._open_editor = None
+            self._forget_editor(obj)
             return False
         return super().eventFilter(obj, event)
 
@@ -4206,7 +4256,16 @@ class PlaylistWindow(QMainWindow):
         """Playlist / Maps 共通の一覧テーブルを初期設定込みで生成する。"""
         table = _PlaylistTableWidget(0, _COL_COUNT, self)
         table.setHorizontalHeaderLabels(_COL_LABELS)
-        table.setItemDelegate(_NoFocusItemDelegate(table))
+        _deleg = _NoFocusItemDelegate(table)
+        table.setItemDelegate(_deleg)
+        # 行の再構築（検索・フィルタ）や並べ替え・スクロールで、読み取り専用エディタが
+        # 元のセルから切り離されて画面に残ることがあるため、これらの契機で必ず閉じる。
+        _model = table.model()
+        if _model is not None:
+            _model.rowsRemoved.connect(lambda *_: _deleg.close_open_editors())
+            _model.modelReset.connect(lambda *_: _deleg.close_open_editors())
+        table.horizontalHeader().sortIndicatorChanged.connect(lambda *_: _deleg.close_open_editors())
+        table.verticalScrollBar().valueChanged.connect(lambda *_: _deleg.close_open_editors())
         table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         # Song / Mapper / Author 列はダブルクリックで読み取り専用エディタを開き、
         # 文字を選択してコピーできるようにする（他列は編集不可のデリゲートで抑止）。
@@ -5179,7 +5238,7 @@ class PlaylistWindow(QMainWindow):
             for tbl in (self._snapshot_table, self._maps_table):
                 deleg = tbl.itemDelegate()
                 if isinstance(deleg, _NoFocusItemDelegate):
-                    deleg.close_open_editor()
+                    deleg.close_open_editors()
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
         """終了時に現在のウィンドウ状態を保存してから閉じる。"""
