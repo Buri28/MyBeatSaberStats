@@ -141,10 +141,11 @@ def _extract_steam_id_from_input(text: str) -> str:
         https://scoresaber.com/u/<id>
         https://beatleader.com/u/<id>
         https://steamcommunity.com/profiles/<id>
+        https://accsaber.com/players/<id>
     ID が見つからない場合は元のテキストをそのまま返す。
     """
     text = text.strip()
-    m = re.search(r'(?:/u/|/profiles/)([0-9]{17})', text)
+    m = re.search(r'(?:/u/|/profiles/|/players/)([0-9]{17})', text)
     return m.group(1) if m else text
 
 
@@ -266,7 +267,7 @@ class TakeSnapshotDialog(QDialog):
         # SteamID / URL 入力（URL を貼ると自動で SteamID を抽出する）
         form = QFormLayout()
         self._id_edit = QLineEdit(default_steam_id, self)
-        self._id_edit.setPlaceholderText("SteamID or ScoreSaber/BeatLeader/Steam URL")
+        self._id_edit.setPlaceholderText("SteamID or ScoreSaber/BeatLeader/AccSaber/Steam URL")
         self._id_edit.textChanged.connect(self._on_id_text_changed)
         form.addRow("SteamID:", self._id_edit)
         layout.addLayout(form)
@@ -656,10 +657,17 @@ class SettingsDialog(QDialog):
         beatsaber_dir_row = QHBoxLayout()
         beatsaber_dir_row.setSpacing(8)
         beatsaber_dir_row.addWidget(QLabel("Folder:", self))
-        self._beatsaber_dir_edit = QLineEdit(_load_beatsaber_dir(), self)
-        self._beatsaber_dir_edit.setReadOnly(True)
-        self._beatsaber_dir_edit.setPlaceholderText("Select Beat Saber folder...")
-        beatsaber_dir_row.addWidget(self._beatsaber_dir_edit, 1)
+        # 直接入力も可能。検出できた候補はドロップダウンから選択できる。
+        self._beatsaber_dir_combo = QComboBox(self)
+        self._beatsaber_dir_combo.setEditable(True)
+        self._beatsaber_dir_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self._beatsaber_dir_edit = QLineEdit(self)
+        self._beatsaber_dir_combo.setLineEdit(self._beatsaber_dir_edit)
+        self._beatsaber_dir_edit.setPlaceholderText("Enter or select Beat Saber folder...")
+        for candidate in _find_beatsaber_dir_candidates():
+            self._beatsaber_dir_combo.addItem(candidate)
+        self._beatsaber_dir_edit.setText(_load_beatsaber_dir())
+        beatsaber_dir_row.addWidget(self._beatsaber_dir_combo, 1)
         self._btn_beatsaber_dir = QPushButton("Change...", self)
         self._btn_beatsaber_dir.clicked.connect(self._browse_beatsaber_dir)
         beatsaber_dir_row.addWidget(self._btn_beatsaber_dir)
@@ -736,6 +744,11 @@ class SettingsDialog(QDialog):
             self._beatsaber_dir_edit.setText(folder)
 
     def accept(self) -> None:  # type: ignore[override]
+        beatsaber_dir = self._beatsaber_dir_edit.text().strip()
+        # 空欄（未設定のまま）は許容し、入力があるときだけ検証する
+        if beatsaber_dir and not _validate_beatsaber_dir(self, beatsaber_dir):
+            return
+
         theme_mode = str(self._theme_mode_combo.currentData() or "default")
         app = QApplication.instance()
         _set_theme_mode(theme_mode, app if isinstance(app, QApplication) else None)
@@ -746,13 +759,121 @@ class SettingsDialog(QDialog):
         if playlist_export_dir:
             _save_playlist_export_dir(playlist_export_dir)
 
-        beatsaber_dir = self._beatsaber_dir_edit.text().strip()
         if beatsaber_dir:
             _save_beatsaber_dir(beatsaber_dir)
         if self._parent_window is not None:
             self._parent_window._sync_shared_settings_to_open_windows()
             self._parent_window._sync_ui_after_theme_change()
         super().accept()
+
+
+BEATSABER_EXE_NAME = "Beat Saber.exe"
+
+
+def _is_beatsaber_dir(folder: str) -> bool:
+    """指定フォルダが Beat Saber のインストールフォルダか（Beat Saber.exe の有無）を判定する。"""
+    try:
+        return (Path(folder) / BEATSABER_EXE_NAME).is_file()
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _validate_beatsaber_dir(parent: QWidget, folder: str) -> bool:
+    """Beat Saber フォルダとして妥当か検証し、NG なら警告を表示して False を返す。"""
+    if not Path(folder).is_dir():
+        QMessageBox.warning(parent, "Beat Saber Folder", f"Folder does not exist:\n{folder}")
+        return False
+    if not _is_beatsaber_dir(folder):
+        QMessageBox.warning(
+            parent,
+            "Beat Saber Folder",
+            f"{BEATSABER_EXE_NAME} was not found in:\n{folder}\n\n"
+            "Please select the Beat Saber installation folder.",
+        )
+        return False
+    return True
+
+
+def _steam_beatsaber_dirs() -> List[str]:
+    """Steam のライブラリフォルダから Beat Saber のインストール先を探す。"""
+    found: List[str] = []
+    try:
+        import winreg  # type: ignore
+    except Exception:  # noqa: BLE001
+        return found
+
+    steam_path = ""
+    for hive, key in (
+        (winreg.HKEY_CURRENT_USER, r"Software\Valve\Steam"),
+        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Valve\Steam"),
+    ):
+        try:
+            with winreg.OpenKey(hive, key) as k:
+                value = winreg.QueryValueEx(k, "SteamPath" if hive == winreg.HKEY_CURRENT_USER else "InstallPath")[0]
+            if value:
+                steam_path = str(value)
+                break
+        except Exception:  # noqa: BLE001
+            continue
+    if not steam_path:
+        return found
+
+    libraries = [Path(steam_path)]
+    vdf = Path(steam_path) / "steamapps" / "libraryfolders.vdf"
+    try:
+        text = vdf.read_text(encoding="utf-8", errors="ignore")
+        for m in re.finditer(r'"path"\s*"([^"]+)"', text):
+            libraries.append(Path(m.group(1).replace("\\\\", "\\")))
+    except Exception:  # noqa: BLE001
+        pass
+
+    for lib in libraries:
+        candidate = lib / "steamapps" / "common" / "Beat Saber"
+        if _is_beatsaber_dir(str(candidate)):
+            found.append(str(candidate))
+    return found
+
+
+def _bsmanager_beatsaber_dirs() -> List[str]:
+    """BS Manager の設定から各インスタンスのフォルダを探す。"""
+    found: List[str] = []
+    config = Path.home() / "AppData" / "Roaming" / "bs-manager" / "config.json"
+    roots: List[Path] = []
+    try:
+        data = json.loads(config.read_text(encoding="utf-8"))
+        install_folder = data.get("installation-folder")
+        if install_folder:
+            roots.append(Path(str(install_folder)))
+        last = (data.get("last-version-launched") or {}).get("path")
+        if last:
+            found.append(str(Path(str(last))))
+    except Exception:  # noqa: BLE001
+        pass
+    # 設定が読めない場合の既定位置
+    roots.append(Path.home() / "AppData" / "Roaming")
+
+    for root in roots:
+        instances = root / "BSManager" / "BSInstances"
+        try:
+            for entry in sorted(instances.iterdir(), reverse=True):
+                if entry.is_dir():
+                    found.append(str(entry))
+        except Exception:  # noqa: BLE001
+            continue
+    return found
+
+
+def _find_beatsaber_dir_candidates() -> List[str]:
+    """Beat Saber フォルダの候補（Beat Saber.exe が存在するもののみ）を返す。"""
+    candidates: List[str] = []
+    seen = set()
+    for folder in _bsmanager_beatsaber_dirs() + _steam_beatsaber_dirs():
+        key = folder.rstrip("\\/").lower()
+        if key in seen or not _is_beatsaber_dir(folder):
+            continue
+        seen.add(key)
+        candidates.append(folder)
+    return candidates
 
 
 class BeatSaberFolderDialog(QDialog):
@@ -767,10 +888,17 @@ class BeatSaberFolderDialog(QDialog):
         row = QHBoxLayout()
         row.setSpacing(8)
         row.addWidget(QLabel("Folder:", self))
-        self._beatsaber_dir_edit = QLineEdit(_load_beatsaber_dir(), self)
-        self._beatsaber_dir_edit.setReadOnly(True)
-        self._beatsaber_dir_edit.setPlaceholderText("Select Beat Saber folder...")
-        row.addWidget(self._beatsaber_dir_edit, 1)
+        # 直接入力も可能。検出できた候補はドロップダウンから選択できる。
+        self._dir_combo = QComboBox(self)
+        self._dir_combo.setEditable(True)
+        self._dir_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self._beatsaber_dir_edit = QLineEdit(self)
+        self._dir_combo.setLineEdit(self._beatsaber_dir_edit)
+        self._beatsaber_dir_edit.setPlaceholderText("Enter or select Beat Saber folder...")
+        for candidate in _find_beatsaber_dir_candidates():
+            self._dir_combo.addItem(candidate)
+        self._beatsaber_dir_edit.setText(_load_beatsaber_dir())
+        row.addWidget(self._dir_combo, 1)
         self._btn_browse = QPushButton("Change...", self)
         self._btn_browse.clicked.connect(self._browse_beatsaber_dir)
         row.addWidget(self._btn_browse)
@@ -794,6 +922,8 @@ class BeatSaberFolderDialog(QDialog):
         beatsaber_dir = self._beatsaber_dir_edit.text().strip()
         if not beatsaber_dir:
             QMessageBox.warning(self, "Beat Saber Folder", "Beat Saber folder is empty.")
+            return
+        if not _validate_beatsaber_dir(self, beatsaber_dir):
             return
         _save_beatsaber_dir(beatsaber_dir)
         super().accept()
