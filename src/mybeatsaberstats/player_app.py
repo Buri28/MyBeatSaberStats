@@ -3360,7 +3360,7 @@ class PlayerWindow(QMainWindow):
             self.acc_rl_table.setItem(row, 4, _avg_rl_item)
             # col 5: Skill Level（Play Count と同じカテゴリ色バー、MAX 100）
             _skill_rl = _rl_skill_vals.get(row)
-            _skill_rl_txt = f"{_skill_rl:.1f}" if _skill_rl is not None else ""
+            _skill_rl_txt = f"{_skill_rl:.2f}" if _skill_rl is not None else ""
             _skill_rl_item = QTableWidgetItem(_skill_rl_txt)
             _skill_rl_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
             if _skill_rl is not None:
