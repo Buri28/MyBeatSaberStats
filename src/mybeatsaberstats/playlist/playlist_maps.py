@@ -18,6 +18,7 @@ from ..playlist_view import (
     _build_ss_hash_index,
     _build_ss_score_hash_index,
     _enrich_entries_with_beatsaver_cache,
+    _load_cached_player_score_dicts,
     _parse_iso_datetime_to_ts,
     load_accsaber_reloaded_maps,
     load_bl_maps,
@@ -125,6 +126,46 @@ def _normalize_duration_seconds(value: object) -> int:
     return seconds if seconds > 0 else 0
 
 
+_BPLIST_DIFF_ALIASES: Dict[str, str] = {
+    "easy": "Easy",
+    "normal": "Normal",
+    "hard": "Hard",
+    "expert": "Expert",
+    "expertplus": "ExpertPlus",
+    "expert+": "ExpertPlus",
+    "expertplusplus": "ExpertPlus",
+    "ex+": "ExpertPlus",
+}
+
+_BPLIST_MODE_ALIASES: Dict[str, str] = {
+    "standard": "Standard",
+    "onesaber": "OneSaber",
+    "noarrows": "NoArrows",
+    "90degree": "90Degree",
+    "360degree": "360Degree",
+    "lightshow": "Lightshow",
+    "lawless": "Lawless",
+    "legacy": "Legacy",
+}
+
+
+def _normalize_bplist_difficulty(value: object) -> str:
+    """bplist の難易度名 (小文字表記など) を内部表記へ揃える。"""
+    name = str(value or "").strip()
+    if not name:
+        return "ExpertPlus"
+    return _BPLIST_DIFF_ALIASES.get(name.replace("_", "").replace(" ", "").lower(), name)
+
+
+def _normalize_bplist_characteristic(value: object) -> str:
+    """bplist の characteristic (小文字表記など) を内部表記へ揃える。"""
+    name = str(value or "").strip()
+    if not name:
+        return "Standard"
+    name = name.replace("Solo", "") or "Standard"
+    return _BPLIST_MODE_ALIASES.get(name.replace("_", "").replace(" ", "").lower(), name)
+
+
 def load_bplist_maps(
     bplist_path: Path,
     service: str,
@@ -152,6 +193,68 @@ def load_bplist_maps(
         idx = {}
         ranked = []
 
+    # ranked 一覧に無い譜面 (unranked など) でもプレイ済み状態を出せるように、
+    # ローカルの player score cache からスコア情報を引けるようにしておく。
+    ss_scores_raw, bl_scores_raw = _load_cached_player_score_dicts(steam_id)
+    ss_score_idx = _build_ss_score_hash_index(ss_scores_raw)
+    bl_score_idx = _build_bl_score_hash_index(bl_scores_raw)
+    bl_replay_idx = _build_bl_replay_hash_index(bl_scores_raw)
+    bl_leaderboard_idx = _build_bl_leaderboard_hash_index(bl_scores_raw)
+
+    def _make_open_entry(song_name: str, song_hash: str, diff_name: str, mode: str) -> MapEntry:
+        """ranked 索引に無い譜面を、cache 済みスコアで補完しつつ MapEntry 化する。"""
+        key = (song_hash, mode, diff_name)
+        ss_match = ss_score_idx.get(key)
+        bl_match = bl_score_idx.get(key)
+        if ss_match and bl_match:
+            # cleared > NF > 未プレイ、同条件なら PP が高い方を採用する。
+            ss_rankable = (2 if ss_match[1] else 1 if ss_match[2] else 0, ss_match[0])
+            bl_rankable = (2 if bl_match[1] else 1 if bl_match[2] else 0, bl_match[0])
+            best_match = ss_match if ss_rankable >= bl_rankable else bl_match
+            score_source = "SS" if best_match is ss_match else "BL"
+        elif ss_match:
+            best_match, score_source = ss_match, "SS"
+        elif bl_match:
+            best_match, score_source = bl_match, "BL"
+        else:
+            best_match, score_source = None, ""
+
+        if best_match is None:
+            pp = acc = 0.0
+            cleared = nf_clear = False
+            rank = 0
+            mods = ""
+            played_at_ts = 0
+        else:
+            pp, cleared, nf_clear, acc, rank, mods, played_at_ts = best_match
+
+        bl_leaderboard_id = bl_leaderboard_idx.get(key, "")
+        return MapEntry(
+            song_name=song_name,
+            song_author="",
+            mapper="",
+            song_hash=song_hash,
+            difficulty=diff_name,
+            mode=mode,
+            stars=0.0,
+            max_pp=0.0,
+            player_pp=pp,
+            cleared=cleared,
+            nf_clear=nf_clear,
+            player_acc=acc,
+            player_rank=rank,
+            leaderboard_id=bl_leaderboard_id,
+            source="open",
+            player_mods=mods,
+            score_source=score_source,
+            duration_seconds=0,
+            played_at_ts=played_at_ts,
+            beatleader_page_url=(
+                f"https://beatleader.com/leaderboard/global/{bl_leaderboard_id}" if bl_leaderboard_id else ""
+            ),
+            beatleader_replay_url=bl_replay_idx.get(key, ""),
+        )
+
     entries: List[MapEntry] = []
     for song in songs:
         song_hash = (song.get("hash") or "").upper()
@@ -159,55 +262,30 @@ def load_bplist_maps(
         diffs = song.get("difficulties") or []
 
         if not diffs:
-            for entry in ranked or []:
-                if entry.song_hash == song_hash:
-                    entries.append(entry)
-            if not ranked:
-                entries.append(MapEntry(
-                    song_name=song_name,
-                    song_author="",
-                    mapper="",
-                    song_hash=song_hash,
-                    difficulty="",
-                    mode="",
-                    stars=0.0,
-                    max_pp=0.0,
-                    player_pp=0.0,
-                    cleared=False,
-                    nf_clear=False,
-                    player_acc=0.0,
-                    player_rank=0,
-                    leaderboard_id="",
-                    source="open",
-                    duration_seconds=0,
-                ))
+            matched = [entry for entry in ranked or [] if entry.song_hash == song_hash]
+            if matched:
+                entries.extend(matched)
+                continue
+            # 難易度指定なし = 全難易度。cache 済みスコアから既知の難易度を復元する。
+            played_keys = sorted(
+                {key for key in ss_score_idx if key[0] == song_hash}
+                | {key for key in bl_score_idx if key[0] == song_hash}
+            )
+            if played_keys:
+                for _, mode, diff_name in played_keys:
+                    entries.append(_make_open_entry(song_name, song_hash, diff_name, mode))
+            else:
+                entries.append(_make_open_entry(song_name, song_hash, "", ""))
             continue
 
         for diff in diffs:
-            characteristic = diff.get("characteristic") or "Standard"
-            diff_name = diff.get("name") or "ExpertPlus"
+            characteristic = _normalize_bplist_characteristic(diff.get("characteristic"))
+            diff_name = _normalize_bplist_difficulty(diff.get("name") or diff.get("difficulty"))
             key = (song_hash, characteristic, diff_name)
             if key in idx:
                 entries.append(idx[key])
             else:
-                entries.append(MapEntry(
-                    song_name=song_name,
-                    song_author="",
-                    mapper="",
-                    song_hash=song_hash,
-                    difficulty=diff_name,
-                    mode=characteristic,
-                    stars=0.0,
-                    max_pp=0.0,
-                    player_pp=0.0,
-                    cleared=False,
-                    nf_clear=False,
-                    player_acc=0.0,
-                    player_rank=0,
-                    leaderboard_id="",
-                    source="open",
-                    duration_seconds=0,
-                ))
+                entries.append(_make_open_entry(song_name, song_hash, diff_name, characteristic))
 
     return _enrich_entries_with_beatsaver_cache(entries)
 

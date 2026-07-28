@@ -128,6 +128,13 @@ class _SwapSortArrowStyle(QProxyStyle):
             super().drawPrimitive(element, option, painter, widget)
 
 
+def _release_navigation_blocking_focus() -> None:
+    """↑↓ を自前で消費するウィジェット（リスト/コンボ/スピン）のフォーカスを外す。"""
+    focus = QApplication.focusWidget()
+    if isinstance(focus, (QAbstractItemView, QComboBox, QAbstractSpinBox)):
+        focus.clearFocus()
+
+
 class _PlaylistTableWidget(QTableWidget):
     @staticmethod
     def _blend_colors(base: QColor, overlay: QColor, alpha_override: Optional[float] = None) -> QColor:
@@ -151,6 +158,16 @@ class _PlaylistTableWidget(QTableWidget):
         blended = self._blend_colors(base_color, fill_color, effective_alpha)
         blended.setAlpha(255)
         return blended
+
+    def mousePressEvent(self, event) -> None:  # type: ignore[override]
+        """一覧をクリックしたら ↑↓ を奪う入力系ウィジェットのフォーカスを外す。
+
+        一覧テーブルは NoFocus なのでクリックしてもフォーカスが移らない。
+        Batch Export / Quick Presets のリスト等にフォーカスが残ったままだと、
+        ウィンドウ側の ↑↓ 行移動がそちらへ吸われて効かなくなるため、ここで解放する。
+        """
+        _release_navigation_blocking_focus()
+        super().mousePressEvent(event)
 
     def paintEvent(self, event) -> None:  # type: ignore[override]
         """選択行の上下ラインと帯背景を追加で描画する。"""
@@ -5458,6 +5475,9 @@ class PlaylistWindow(QMainWindow):
 
     def _on_source_tab_changed(self, index: int) -> None:
         """Snapshot / Maps タブ切替時に Load フッタと表示状態を切り替える。"""
+        # Batch Export / Quick Presets のリストにフォーカスが残っていると
+        # タブへ戻っても ↑↓ の行移動が効かなくなるため、切替時に解放する。
+        _release_navigation_blocking_focus()
         if index == self._source_tab_maps_idx:
             if not self._rb_bs.isChecked():
                 self._rb_bs.setChecked(True)
