@@ -32,6 +32,7 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QColor, QImage, QPainter, QFont, QPixmap, QDesktopServices, QIcon, QPalette
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
+    QAbstractButton,
     QAbstractItemView,
     QAbstractSpinBox,
     QComboBox,
@@ -7241,13 +7242,14 @@ class PlaylistWindow(QMainWindow):
             return
         self._download_beatsaver_entry(entry)
 
-    def _download_selected_entries(self) -> None:
+    def _download_selected_entries(self, show_dialogs: bool = True) -> None:
         entries = [
             entry for entry in self._selected_entries()
             if self._can_download_beatsaver_entry(entry)
         ]
         if not entries:
-            QMessageBox.information(self, "Download", "ダウンロード可能な譜面が選択されていません。")
+            if show_dialogs:
+                QMessageBox.information(self, "Download", "ダウンロード可能な譜面が選択されていません。")
             return
 
         success_count = 0
@@ -7258,6 +7260,8 @@ class PlaylistWindow(QMainWindow):
             else:
                 failed_count += 1
 
+        if not show_dialogs:
+            return
         if failed_count:
             QMessageBox.warning(
                 self,
@@ -7270,6 +7274,49 @@ class PlaylistWindow(QMainWindow):
                 "Download",
                 f"{success_count} maps downloaded.",
             )
+
+    def _maps_table_selected_entries(self) -> List[MapEntry]:
+        """Maps 一覧テーブルで選択中の MapEntry を返す。"""
+        table = self._maps_table
+        selection_model = table.selectionModel()
+        if selection_model is None:
+            return []
+        entries: List[MapEntry] = []
+        for model_index in selection_model.selectedRows():
+            item = table.item(model_index.row(), _COL_SONG)
+            if item is None:
+                continue
+            entry = item.data(Qt.ItemDataRole.UserRole)
+            if isinstance(entry, MapEntry):
+                entries.append(entry)
+        return entries
+
+    def _delete_selected_entries(self, show_dialogs: bool = False) -> None:
+        """Maps 一覧で選択中のダウンロード済み譜面を Beat Saber から削除する。"""
+        self._refresh_installed_levels_cache(force=True)
+        entries = [
+            entry for entry in self._maps_table_selected_entries()
+            if self._can_delete_beatsaver_entry(entry)
+        ]
+        if not entries:
+            if show_dialogs:
+                QMessageBox.information(self, "Delete Map", "削除できる譜面が選択されていません。")
+            return
+
+        deleted = 0
+        failed = 0
+        for entry in entries:
+            if self._delete_beatsaver_entry(entry, show_dialogs=False):
+                deleted += 1
+            else:
+                failed += 1
+
+        if not show_dialogs:
+            return
+        if failed:
+            QMessageBox.warning(self, "Delete Map", f"{deleted} maps deleted, {failed} failed.")
+        else:
+            QMessageBox.information(self, "Delete Map", f"{deleted} maps deleted.")
 
     def _setWindowTitle_source(self, src: str) -> None:
         self.setWindowTitle(f"Playlist / Maps - {src}")
@@ -7790,6 +7837,20 @@ class PlaylistWindow(QMainWindow):
         if event.type() == QEvent.Type.KeyPress and self.isActiveWindow():
             focus = QApplication.focusWidget()
             key = event.key()
+            # Maps 一覧表示中は Enter でダウンロード、Delete で削除する。
+            # 一覧テーブルは NoFocus なのでフォーカス位置では判定できず、
+            # 代わりに「入力系ウィジェットにフォーカスが無いこと」を条件にする。
+            if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Delete):
+                if self._table is self._maps_table and not isinstance(
+                    focus, (QLineEdit, QComboBox, QAbstractSpinBox, QAbstractItemView, QAbstractButton)
+                ):
+                    # キー操作は連打されるので結果ダイアログは出さない。
+                    if key == Qt.Key.Key_Delete:
+                        self._delete_selected_entries(show_dialogs=False)
+                    else:
+                        self._download_selected_entries(show_dialogs=False)
+                    return True
+                return super().eventFilter(obj, event)
             # コンボ・スピン・別のリスト系は ↑↓等をそちら自身が使うので一切奪わない。
             if isinstance(focus, (QComboBox, QAbstractSpinBox, QAbstractItemView)):
                 return super().eventFilter(obj, event)
