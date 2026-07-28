@@ -414,6 +414,100 @@ def _merge_file_cache_with_recent_batches(
     return counts
 
 
+def _fetch_song_hashes_by_difficulty_id(session: requests.Session) -> Dict[str, str]:
+    """/v1/maps/difficulties/all から difficulty ID → songHash の辞書を作る。
+
+    difficulties 系のページング API は songHash を返さないため、
+    ここで取得したものを後から合成する（ranked 以外は songHash を持たない）。
+    """
+    resp = session.get(f"{BASE_URL}/maps/difficulties/all", timeout=60)
+    resp.raise_for_status()
+    data = resp.json()
+    if not isinstance(data, list):
+        return {}
+
+    hashes: Dict[str, str] = {}
+    for diff in data:
+        if not isinstance(diff, dict):
+            continue
+        diff_id = str(diff.get("id") or "").strip()
+        song_hash = str(diff.get("songHash") or "").strip()
+        if diff_id and song_hash:
+            hashes[diff_id] = song_hash
+    return hashes
+
+
+# map レコードへコピーする曲単位の項目（difficulty にも同じ値が入っている）
+_MAP_LEVEL_FIELDS = (
+    "beatsaverCode",
+    "cdnCoverUrl",
+    "coverUrl",
+    "createdAt",
+    "mapAuthor",
+    "songAuthor",
+    "songName",
+    "songSubName",
+)
+
+
+def _fetch_all_maps_via_difficulties(
+    session: requests.Session,
+    on_progress=None,
+) -> List[Dict]:
+    """/v1/maps の代替として difficulty 一覧から map 形式のレコードを組み立てる。
+
+    /v1/maps が 500 を返す間の回避策。難易度単位のページング API を全ページ取得し、
+    mapId でまとめ直して /v1/maps と同じ {..., "difficulties": [...]} 形状にする。
+    """
+    song_hashes = _fetch_song_hashes_by_difficulty_id(session)
+
+    maps_by_id: Dict[str, Dict] = {}
+    ordered_ids: List[str] = []
+    page = 0
+    total_pages: Optional[int] = None
+
+    while True:
+        resp = session.get(
+            f"{BASE_URL}/maps/difficulties",
+            params={"page": page, "size": _PAGE_SIZE},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+        for diff in data.get("content", []):
+            if not isinstance(diff, dict):
+                continue
+            map_id = str(diff.get("mapId") or "").strip()
+            if not map_id:
+                continue
+            song_hash = song_hashes.get(str(diff.get("id") or ""), "")
+            song = maps_by_id.get(map_id)
+            if song is None:
+                song = {key: diff.get(key) for key in _MAP_LEVEL_FIELDS}
+                song["id"] = map_id
+                song["songHash"] = song_hash
+                song["difficulties"] = []
+                maps_by_id[map_id] = song
+                ordered_ids.append(map_id)
+            elif song_hash and not song.get("songHash"):
+                song["songHash"] = song_hash
+            difficulties = song["difficulties"]
+            if isinstance(difficulties, list):
+                difficulties.append(diff)
+
+        if total_pages is None:
+            total_pages = data.get("totalPages", 1)
+        if on_progress is not None:
+            on_progress(page + 1, total_pages)
+
+        if data.get("last", True):
+            break
+        page += 1
+
+    return [maps_by_id[map_id] for map_id in ordered_ids]
+
+
 def fetch_reloaded_map_counts(
     session: Optional[requests.Session] = None,
 ) -> Dict[str, int]:
@@ -454,6 +548,18 @@ def fetch_reloaded_map_counts(
 
     except Exception as exc:  # noqa: BLE001
         log_api_failure("accsaber_reloaded", "fetch_reloaded_map_counts", "request failed while fetching /maps pages", exc)
+        try:
+            all_maps = _fetch_all_maps_via_difficulties(session)
+            if all_maps:
+                _save_map_counts_from_all_maps(all_maps)
+                return _count_non_pending_map_counts(all_maps)
+        except Exception as diff_exc:  # noqa: BLE001
+            log_api_failure(
+                "accsaber_reloaded",
+                "fetch_reloaded_map_counts",
+                "difficulties fallback failed while fetching map counts",
+                diff_exc,
+            )
         try:
             batch_counts = _merge_file_cache_with_recent_batches(session)
             if batch_counts:
@@ -954,6 +1060,18 @@ def fetch_all_maps_full(
             data = resp.json()
         except Exception as exc:
             log_api_failure("accsaber_reloaded", "fetch_all_maps_full", f"request failed page={page}", exc)
+            # /v1/maps が落ちている間は難易度一覧から組み立て直す。
+            try:
+                return _fetch_all_maps_via_difficulties(session, on_progress)
+            except RuntimeError:
+                raise  # on_progress からのキャンセルはそのまま伝える
+            except Exception as diff_exc:  # noqa: BLE001
+                log_api_failure(
+                    "accsaber_reloaded",
+                    "fetch_all_maps_full",
+                    "difficulties fallback failed while fetching all maps",
+                    diff_exc,
+                )
             raise
 
         all_maps.extend(data.get("content", []))
