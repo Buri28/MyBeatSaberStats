@@ -12,6 +12,7 @@ import time
 import traceback
 
 from ..snapshot import BASE_DIR, StarClearStat
+from ..http_client import make_session
 
 CACHE_DIR = BASE_DIR / "cache"
 LOG_DIR = BASE_DIR / "logs"
@@ -1201,7 +1202,7 @@ def collect_beatleader_star_stats(
         return []
 
     if session is None:
-        session = requests.Session()
+        session = make_session()
 
     def _step(message: str, fraction: float) -> None:
         if progress is not None:

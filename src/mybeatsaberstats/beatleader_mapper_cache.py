@@ -9,6 +9,7 @@ import requests
 
 from .collector.beatleader import _get_beatleader_leaderboards_ranked, _get_beatleader_player_scores
 from .snapshot import BASE_DIR
+from .http_client import make_session
 
 
 _CACHE_DIR = BASE_DIR / "cache"
@@ -192,7 +193,7 @@ def refresh_bl_mapper_played_cache(
     elif refresh_mode == "full":
         fetch_until = datetime(2000, 1, 1)
 
-    session = requests.Session()
+    session = make_session()
     try:
         if progress is not None:
             progress(0, 3, "Refreshing BeatLeader ranked maps cache...")

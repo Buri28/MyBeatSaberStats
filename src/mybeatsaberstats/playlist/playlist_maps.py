@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -9,6 +10,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 import requests
 
 from ..beatsaver_cache import BEATSAVER_API_BASE
+from ..http_client import make_session
 from ..playlist_view import (
     MapEntry,
     _CACHE_DIR,
@@ -25,6 +27,56 @@ from ..playlist_view import (
     load_bl_maps,
     load_ss_maps,
 )
+
+
+_BL_LEADERBOARD_CACHE_PATH = _CACHE_DIR / "beatleader_leaderboards_by_hash.json"
+_BL_LEADERBOARD_CACHE_LOCK = threading.Lock()
+#: プロセス内に保持する永続キャッシュの実体。ページごとに読み直さないよう一度だけ読む。
+_BL_LEADERBOARD_MEMO: Optional[Dict[str, Dict[Tuple[str, str], str]]] = None
+
+
+def _load_bl_leaderboard_disk_cache() -> Dict[str, Dict[Tuple[str, str], str]]:
+    """hash -> {(mode, difficulty): leaderboard_id} の永続キャッシュを読む。
+
+    以前はプロセス内メモリにしか持っていなかったため、アプリを再起動するたびに
+    同じ hash を BeatLeader に問い合わせ直していた。
+    """
+    try:
+        raw = json.loads(_BL_LEADERBOARD_CACHE_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    entries = raw.get("entries") if isinstance(raw, dict) else None
+    if not isinstance(entries, dict):
+        return {}
+    result: Dict[str, Dict[Tuple[str, str], str]] = {}
+    for song_hash, mapping in entries.items():
+        if not isinstance(mapping, dict):
+            continue
+        converted: Dict[Tuple[str, str], str] = {}
+        for key, leaderboard_id in mapping.items():
+            # 保存時に "mode|difficulty" の文字列へ潰しているので復元する
+            mode, _, difficulty = str(key).partition("|")
+            if mode and difficulty:
+                converted[(mode, difficulty)] = str(leaderboard_id or "")
+        result[str(song_hash).upper()] = converted
+    return result
+
+
+def _save_bl_leaderboard_disk_cache(cache: Dict[str, Dict[Tuple[str, str], str]]) -> None:
+    payload = {
+        "fetched_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "entries": {
+            song_hash: {f"{mode}|{difficulty}": lb_id for (mode, difficulty), lb_id in mapping.items()}
+            for song_hash, mapping in cache.items()
+        },
+    }
+    try:
+        _BL_LEADERBOARD_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _BL_LEADERBOARD_CACHE_PATH.write_text(
+            json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+        )
+    except Exception:
+        return
 
 
 def _fetch_bl_leaderboards_by_hash(session: requests.Session, song_hash: str) -> Dict[Tuple[str, str], str]:
@@ -53,9 +105,23 @@ def _prefetch_bl_leaderboards_for_docs(
     session: requests.Session,
     docs: List[dict],
     cache: Dict[str, Dict[Tuple[str, str], str]],
-    max_workers: int = 16,
+    max_workers: int = 4,
 ) -> None:
-    """docs に含まれる song hash の BeatLeader leaderboard を並列取得して cache へ格納する。"""
+    """docs に含まれる song hash の BeatLeader leaderboard を並列取得して cache へ格納する。
+
+    BeatLeader は 1 hash につき 1 リクエストが必要なので、リクエスト数を減らすため
+    永続キャッシュを先に参照し、本当に未知の hash だけを問い合わせる。
+    並列数も抑えてある（実際の送出間隔は http_client 側でもホスト単位で制御される）。
+    """
+    global _BL_LEADERBOARD_MEMO
+
+    # 既知の結果はディスクキャッシュから取り込み、API を叩かずに済ませる。
+    # この関数はページごとに呼ばれるので、ファイル読み込みは最初の 1 回だけにする。
+    with _BL_LEADERBOARD_CACHE_LOCK:
+        if _BL_LEADERBOARD_MEMO is None:
+            _BL_LEADERBOARD_MEMO = _load_bl_leaderboard_disk_cache()
+        disk_cache = _BL_LEADERBOARD_MEMO
+
     hashes: List[str] = []
     seen: set = set()
     for doc in docs:
@@ -65,12 +131,19 @@ def _prefetch_bl_leaderboards_for_docs(
             versions[0] if versions else {},
         )
         song_hash = (version.get("hash") or "").upper()
-        if song_hash and song_hash not in seen and song_hash not in cache:
-            seen.add(song_hash)
-            hashes.append(song_hash)
+        if not song_hash or song_hash in seen or song_hash in cache:
+            continue
+        seen.add(song_hash)
+        cached_entry = disk_cache.get(song_hash)
+        if cached_entry is not None:
+            # 過去に取得済み → API を叩かない
+            cache[song_hash] = cached_entry
+            continue
+        hashes.append(song_hash)
     if not hashes:
         return
     workers = max(1, min(max_workers, len(hashes)))
+    fetched: Dict[str, Dict[Tuple[str, str], str]] = {}
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {
             executor.submit(_fetch_bl_leaderboards_by_hash, session, h): h
@@ -79,9 +152,23 @@ def _prefetch_bl_leaderboards_for_docs(
         for future in as_completed(futures):
             song_hash = futures[future]
             try:
-                cache[song_hash] = future.result()
+                result = future.result()
             except Exception:
-                cache[song_hash] = {}
+                result = {}
+            cache[song_hash] = result
+            # 空の結果（取得失敗・BL 未登録）は永続化しない。
+            # 失敗を焼き付けてしまうと、次回以降も誤った空扱いになるため。
+            if result:
+                fetched[song_hash] = result
+
+    if fetched:
+        with _BL_LEADERBOARD_CACHE_LOCK:
+            # 他プロセス／別スレッドが書いた分を失わないよう、保存直前に読み直して統合する
+            merged = _load_bl_leaderboard_disk_cache()
+            merged.update(_BL_LEADERBOARD_MEMO or {})
+            merged.update(fetched)
+            _save_bl_leaderboard_disk_cache(merged)
+            _BL_LEADERBOARD_MEMO = merged
 
 
 def _fetch_bl_top_replay_url(session: requests.Session, leaderboard_id: str, countries: str = "") -> str:
@@ -305,7 +392,7 @@ def load_beatsaver_maps(
     on_progress: Optional[Callable[[int, int, str], None]] = None,
     on_batch: Optional[Callable[[List[MapEntry]], None]] = None,
     session: Optional[requests.Session] = None,
-    bl_lookup_workers: int = 16,
+    bl_lookup_workers: int = 4,
 ) -> List[MapEntry]:
     """BeatSaver 検索 API とローカル score cache を突き合わせて Maps 一覧を構築する。
 
@@ -364,7 +451,7 @@ def load_beatsaver_maps(
         on_progress(0, 1, "Preparing... BL ranked index")
     bl_ranked_idx = _build_bl_hash_index(load_bl_maps())
 
-    session = session or requests.Session()
+    session = session or make_session()
     entries: List[MapEntry] = []
     pages = 1
     search_query = query.strip()

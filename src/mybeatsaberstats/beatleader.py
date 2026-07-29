@@ -12,6 +12,7 @@ import requests
 import time
 
 from .snapshot import BASE_DIR
+from .http_client import make_session
 
 
 BASE_URL = "https://api.beatleader.xyz"
@@ -104,7 +105,7 @@ def fetch_player(player_id: str, session: Optional[requests.Session] = None) -> 
         return None
 
     if session is None:
-        session = requests.Session()
+        session = make_session()
 
     url = f"{BASE_URL}/player/{player_id}"
     timeouts = (3, 5, 8)
@@ -188,7 +189,7 @@ def fetch_players_ranking(
     """
 
     if session is None:
-        session = requests.Session()
+        session = make_session()
 
     params_base: dict[str, str] = {
         "sortBy": "pp",
