@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+from weakref import WeakKeyDictionary
 
 import requests
 
@@ -680,11 +682,137 @@ class AccSaberReloadedPlayer:
     rank_country: int
 
 
+#: search で名前が衝突した場合に見に行くページ数の上限。
+#: これを超えたら諦めて従来の全走査へフォールバックする。
+_SEARCH_MAX_PAGES = 3
+
+
+#: セッション単位のプロフィールキャッシュ。同一スナップショット取得中に
+#: /users/{id} を何度も叩かないようにする（名前・称号・XP で参照するため）。
+_USER_PROFILE_CACHE: "WeakKeyDictionary[requests.Session, Dict[str, Optional[Dict]]]" = WeakKeyDictionary()
+_USER_PROFILE_LOCK = threading.Lock()
+
+
+def fetch_user_profile(
+    player_id: str,
+    session: requests.Session,
+    use_cache: bool = True,
+) -> Optional[Dict]:
+    """/v1/users/{id} のプロフィールを取得する。
+
+    name / country / levelData / xpRanking などが入っている。
+    リーダーボードを名前で絞り込むための名前取得にも使う。
+
+    同じセッションでの再取得はキャッシュから返す。称号・XP・カテゴリ順位が
+    それぞれこの情報を必要とするため、素直に呼ぶと同じ URL を 3 回叩いてしまう。
+    """
+    if not player_id:
+        return None
+
+    if use_cache:
+        with _USER_PROFILE_LOCK:
+            cached = _USER_PROFILE_CACHE.get(session, {})
+            if player_id in cached:
+                return cached[player_id]
+
+    try:
+        resp = session.get(f"{BASE_URL}/users/{player_id}", timeout=30)
+        if _is_rate_limited(resp, "fetch_user_profile", f"player_id={player_id}"):
+            return None
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:  # noqa: BLE001
+        log_api_failure("accsaber_reloaded", "fetch_user_profile", f"request failed player_id={player_id}", exc)
+        return None
+
+    profile = data if isinstance(data, dict) else None
+    if use_cache and profile is not None:
+        # 失敗（None）はキャッシュしない。一時的なエラーを固定化しないため。
+        try:
+            with _USER_PROFILE_LOCK:
+                _USER_PROFILE_CACHE.setdefault(session, {})[player_id] = profile
+        except TypeError:
+            # weakref を張れないセッション実装（テストのフェイクなど）は素通し
+            pass
+    return profile
+
+
+def _find_entry_by_search(
+    url: str,
+    player_id: str,
+    player_name: str,
+    session: requests.Session,
+    api_name: str,
+) -> Optional[Dict]:
+    """リーダーボードを名前で絞り込み、該当プレイヤーの行を返す。
+
+    リーダーボードは userId で直接引く API が無く、従来は先頭から
+    全ページを走査していた（順位が低いほど大量のリクエストが必要だった）。
+    `search` クエリで名前一致に絞ると、ほとんどの場合 1 リクエストで済む。
+
+    見つからない場合は None を返し、呼び出し元は全走査へフォールバックする。
+    同名プレイヤーが多いケースを考慮して数ページだけ追う。
+    """
+    if not player_name:
+        return None
+
+    for page in range(_SEARCH_MAX_PAGES):
+        try:
+            resp = session.get(
+                url,
+                params={"size": _PAGE_SIZE, "page": page, "search": player_name},
+                timeout=30,
+            )
+            if _is_rate_limited(resp, api_name, f"search player_id={player_id} page={page}"):
+                return None
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as exc:  # noqa: BLE001
+            log_api_failure(
+                "accsaber_reloaded",
+                api_name,
+                f"search failed url={url} player_id={player_id} name={player_name} page={page}",
+                exc,
+            )
+            return None
+
+        content = data.get("content")
+        if not isinstance(content, list) or not content:
+            return None
+
+        for entry in content:
+            if isinstance(entry, dict) and str(entry.get("userId", "")) == player_id:
+                return entry
+
+        if data.get("last", True):
+            return None
+
+    return None
+
+
+def _entry_to_player(player_id: str, entry: Dict) -> Optional[AccSaberReloadedPlayer]:
+    """リーダーボードの 1 行を AccSaberReloadedPlayer に変換する。"""
+    try:
+        return AccSaberReloadedPlayer(
+            player_id=player_id,
+            name=str(entry.get("userName", "")),
+            country=str(entry.get("country", "")),
+            ap=float(entry.get("ap", 0.0)),
+            average_acc=float(entry.get("averageAcc", 0.0)),
+            ranked_plays=int(entry.get("rankedPlays", 0)),
+            rank_global=int(entry.get("ranking", 0)),
+            rank_country=int(entry.get("countryRanking", 0)),
+        )
+    except (TypeError, ValueError):
+        return None
+
+
 def _search_in_leaderboard(
     category_uuid: str,
     player_id: str,
     country: Optional[str],
     session: requests.Session,
+    player_name: Optional[str] = None,
 ) -> Optional[AccSaberReloadedPlayer]:
     """指定カテゴリのリーダーボードからプレイヤーを検索する。
 
@@ -693,8 +821,19 @@ def _search_in_leaderboard(
     XP ランキングと同じクエリパラメータ方式に統一している）
     見つからない場合は None を返す。
     レスポンスの `ranking` フィールドには全体順位が、`countryRanking` には国内順位が入る。
+
+    player_name が分かっている場合は `search` クエリで名前一致に絞り込み、
+    ほぼ 1 リクエストで解決する。見つからなければ従来どおり全ページを走査する
+    （名前変更直後や同名プレイヤーが多い場合の保険）。
     """
     url = f"{BASE_URL}/leaderboards/{category_uuid}"
+
+    if player_name:
+        entry = _find_entry_by_search(url, player_id, player_name, session, "_search_in_leaderboard")
+        if entry is not None:
+            player = _entry_to_player(player_id, entry)
+            if player is not None:
+                return player
 
     params: Dict = {"size": _PAGE_SIZE}
     if country:
@@ -724,19 +863,7 @@ def _search_in_leaderboard(
             if not isinstance(entry, dict):
                 continue
             if str(entry.get("userId", "")) == player_id:
-                try:
-                    return AccSaberReloadedPlayer(
-                        player_id=player_id,
-                        name=str(entry.get("userName", "")),
-                        country=str(entry.get("country", "")),
-                        ap=float(entry.get("ap", 0.0)),
-                        average_acc=float(entry.get("averageAcc", 0.0)),
-                        ranked_plays=int(entry.get("rankedPlays", 0)),
-                        rank_global=int(entry.get("ranking", 0)),
-                        rank_country=int(entry.get("countryRanking", 0)),
-                    )
-                except (TypeError, ValueError):
-                    return None
+                return _entry_to_player(player_id, entry)
 
         # 最終ページなら終了
         if data.get("last", True):
@@ -765,10 +892,17 @@ def fetch_player_all_categories(
     if session is None:
         session = make_session()
 
+    # 名前が分かればリーダーボードを search で絞り込めるので、
+    # プロフィールを 1 回だけ引いて 4 カテゴリで使い回す。
+    profile = fetch_user_profile(player_id, session)
+    player_name = str((profile or {}).get("name") or "")
+
     result: Dict[str, Optional[AccSaberReloadedPlayer]] = {}
     for category, uuid in CATEGORY_IDS.items():
         try:
-            result[category] = _search_in_leaderboard(uuid, player_id, country, session)
+            result[category] = _search_in_leaderboard(
+                uuid, player_id, country, session, player_name=player_name
+            )
         except Exception:  # noqa: BLE001
             result[category] = None
 
@@ -794,9 +928,12 @@ def fetch_player_xp(
 ) -> Optional[AccSaberReloadedXP]:
     """プレイヤーの XP・レベル・XP ランクを取得する。
 
-    /v1/leaderboards/xp から country フィルターでページを走査し、
-    対象プレイヤーを見つけたら AccSaberReloadedXP を返す。
+    /v1/leaderboards/xp から対象プレイヤーを探して AccSaberReloadedXP を返す。
     見つからない場合は None。
+
+    まず名前で `search` 絞り込みを試し、駄目なら country フィルターで全走査する。
+    （totalXp は /v1/users/{id} には含まれずこのリーダーボードにしか無いため、
+    プロフィール取得だけでは代替できない）
     """
     if not player_id:
         return None
@@ -804,11 +941,27 @@ def fetch_player_xp(
     if session is None:
         session = make_session()
 
+    url = f"{BASE_URL}/leaderboards/xp"
+
+    profile = fetch_user_profile(player_id, session)
+    player_name = str((profile or {}).get("name") or "")
+    if player_name:
+        entry = _find_entry_by_search(url, player_id, player_name, session, "fetch_player_xp")
+        if entry is not None:
+            try:
+                return AccSaberReloadedXP(
+                    xp=float(entry.get("totalXp", 0.0)),
+                    level=int(entry.get("level", 0)),
+                    rank_global=int(entry.get("ranking", 0)),
+                    rank_country=int(entry.get("countryRanking", 0)),
+                )
+            except (TypeError, ValueError):
+                pass
+
     params: Dict = {"size": _PAGE_SIZE}
     if country:
         params["country"] = country.upper()
 
-    url = f"{BASE_URL}/leaderboards/xp"
     page = 0
     while True:
         try:
@@ -859,12 +1012,9 @@ def fetch_player_level_title(
         return None
     if session is None:
         session = make_session()
-    try:
-        resp = session.get(f"{BASE_URL}/users/{player_id}", timeout=30)
-        resp.raise_for_status()
-        data = resp.json()
-    except Exception as exc:  # noqa: BLE001
-        log_api_failure("accsaber_reloaded", "fetch_player_level_title", f"request failed player_id={player_id}", exc)
+    # 同一セッションで既に取得済みならキャッシュから返る（追加リクエストなし）
+    data = fetch_user_profile(player_id, session)
+    if data is None:
         return None
     level_data = data.get("levelData") if isinstance(data, dict) else None
     if isinstance(level_data, dict):

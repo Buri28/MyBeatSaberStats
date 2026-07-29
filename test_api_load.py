@@ -169,6 +169,105 @@ def test_bl_leaderboard_disk_cache_avoids_refetch(tmp_path: Path, monkeypatch: p
     assert cache2[song_hash] == {("Standard", "ExpertPlus"): "lb-1"}
 
 
+class _FakeAccSaberSession:
+    """AccSaber API を模したセッション。リクエスト内容を記録する。"""
+
+    def __init__(self, player_id: str, name: str, leaderboard_pages: int = 20) -> None:
+        self.player_id = player_id
+        self.name = name
+        self.leaderboard_pages = leaderboard_pages
+        self.requests: list[tuple[str, dict]] = []
+
+    def get(self, url, params=None, timeout=None):  # noqa: ANN001, ANN202
+        params = params or {}
+        self.requests.append((url, dict(params)))
+
+        if "/users/" in url:
+            return _FakeResponse({"id": self.player_id, "name": self.name, "country": "JP"})
+
+        entry = {
+            "userId": self.player_id,
+            "userName": self.name,
+            "country": "JP",
+            "ap": 100.5,
+            "averageAcc": 0.98,
+            "rankedPlays": 42,
+            "ranking": 3800,
+            "countryRanking": 28,
+            "totalXp": 370218.4,
+            "level": 80,
+        }
+        if params.get("search"):
+            # 名前で絞ると 1 ページに収まる
+            return _FakeResponse({"content": [entry], "last": True})
+
+        # 全走査: 最終ページにだけ本人がいる
+        page = int(params.get("page", 0))
+        is_last = page >= self.leaderboard_pages - 1
+        content = [entry] if is_last else [{"userId": "other", "ranking": page}]
+        return _FakeResponse({"content": content, "last": is_last})
+
+
+def test_accsaber_uses_search_instead_of_full_scan() -> None:
+    """カテゴリ順位が search 1 回で取れ、全走査しない。"""
+    import mybeatsaberstats.accsaber_reloaded as acc
+
+    pid = "76561198324870685"
+    session = _FakeAccSaberSession(pid, "Buri")
+    result = acc.fetch_player_all_categories(pid, country="JP", session=cast(requests.Session, session))
+
+    assert all(v is not None for v in result.values())
+    assert result["overall"].ap == 100.5
+    assert result["overall"].rank_global == 3800
+    # プロフィール 1 回 + 4 カテゴリ = 5 リクエスト（全走査なら 4×20=80）
+    assert len(session.requests) == 5, session.requests
+    assert all("search" in p for u, p in session.requests if "/leaderboards/" in u)
+
+
+def test_accsaber_falls_back_to_full_scan_when_search_misses() -> None:
+    """search で本人が見つからない場合は従来の全走査に落ちる。"""
+    import mybeatsaberstats.accsaber_reloaded as acc
+
+    pid = "76561198324870685"
+    session = _FakeAccSaberSession(pid, "Buri", leaderboard_pages=5)
+
+    # search では別人しか返さないようにする
+    original_get = session.get
+
+    def _get(url, params=None, timeout=None):  # noqa: ANN001, ANN202
+        params = params or {}
+        if params.get("search"):
+            session.requests.append((url, dict(params)))
+            return _FakeResponse({"content": [{"userId": "someone-else"}], "last": True})
+        return original_get(url, params, timeout)
+
+    session.get = _get  # type: ignore[assignment]
+
+    player = acc._search_in_leaderboard(
+        acc.CATEGORY_IDS["overall"], pid, "JP", cast(requests.Session, session), player_name="Buri"
+    )
+    assert player is not None, "フォールバックが働いていない"
+    assert player.ap == 100.5
+    scan_requests = [p for u, p in session.requests if "search" not in p and "/leaderboards/" in u]
+    assert len(scan_requests) == 5
+
+
+def test_accsaber_profile_is_fetched_once_per_session() -> None:
+    """/users/{id} が同一セッションで何度も叩かれない。"""
+    import mybeatsaberstats.accsaber_reloaded as acc
+
+    pid = "76561198324870685"
+    session = _FakeAccSaberSession(pid, "Buri")
+    s = cast(requests.Session, session)
+
+    acc.fetch_player_all_categories(pid, country="JP", session=s)
+    acc.fetch_player_xp(pid, country="JP", session=s)
+    acc.fetch_player_level_title(pid, session=s)
+
+    user_calls = [u for u, _ in session.requests if "/users/" in u]
+    assert len(user_calls) == 1, user_calls
+
+
 def test_session_sets_user_agent() -> None:
     """全リクエストにアプリ名入りの User-Agent が付く。"""
     session = hc.make_session()
