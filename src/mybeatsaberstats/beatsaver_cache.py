@@ -8,9 +8,12 @@ from typing import Callable, Dict, Iterable, Optional
 import requests
 
 from .snapshot import BASE_DIR
+from .http_client import make_session
 
 _CACHE_PATH = BASE_DIR / "cache" / "beatsaver_map_details.json"
-_BEATSAVER_REQUEST_TIMEOUT = (3, 6)
+_BEATSAVER_REQUEST_TIMEOUT = (3, 10)
+#: /maps/hash/ が 1 リクエストで受け付けるハッシュ数の上限
+_BEATSAVER_HASH_BATCH_SIZE = 50
 
 
 # BeatSaver の API ベース URL。
@@ -194,25 +197,71 @@ def _has_full_beatsaver_meta(entry: Optional[dict]) -> bool:
 
 
 def _fetch_beatsaver_map_by_hash(session: requests.Session, song_hash: str) -> Optional[dict]:
+    return _fetch_beatsaver_maps_by_hashes(session, [song_hash]).get(_normalize_hash(song_hash))
+
+
+def _fetch_beatsaver_maps_by_hashes(
+    session: requests.Session, song_hashes: list[str]
+) -> Dict[str, dict]:
+    """BeatSaver の一括ハッシュ取得 API で、複数譜面のメタ情報をまとめて取る。
+
+    /maps/hash/{hash1,hash2,...} は 1 リクエストで最大 50 件を返せる。
+    以前は 1 ハッシュ = 1 リクエストだったため、初回同期で数千リクエストが
+    連続していた。まとめ取りでリクエスト数を約 1/50 に減らす。
+    """
+    normalized = [_normalize_hash(h) for h in song_hashes]
+    normalized = [h for h in normalized if h]
+    if not normalized:
+        return {}
+
     try:
         resp = session.get(
-            f"{BEATSAVER_API_BASE}/maps/hash/{song_hash}",
+            f"{BEATSAVER_API_BASE}/maps/hash/{','.join(normalized)}",
             timeout=_BEATSAVER_REQUEST_TIMEOUT,
         )
         if resp.status_code == 404:
-            return None
+            return {}
         resp.raise_for_status()
         payload = resp.json()
     except Exception:
-        return None
+        return {}
 
-    if isinstance(payload, list):
+    results: Dict[str, dict] = {}
+
+    def _absorb(item: object, requested_hash: str = "") -> None:
+        """map ペイロードを meta 化して、要求したハッシュをキーに格納する。
+
+        譜面が更新されていると versions に複数版が入り、meta 側の hash が
+        こちらの要求した hash と食い違うことがある。呼び出し元は要求した hash で
+        引くので、必ず要求 hash をキーにする（meta の hash をキーにすると
+        毎回「未取得」と判定され、同じ hash を永久に取りに行ってしまう）。
+        """
+        if not isinstance(item, dict):
+            return
+        meta = _meta_from_map_payload(item, fallback_hash=requested_hash)
+        if meta is None:
+            return
+        key = requested_hash or _normalize_hash(meta.get("hash"))
+        if not key:
+            return
+        # キャッシュの引き当ては要求ハッシュで行うため、hash フィールドも揃えておく
+        meta["hash"] = key
+        results[key] = meta
+
+    single_map_payload = isinstance(payload, dict) and bool(payload.get("versions"))
+
+    if isinstance(payload, dict) and not single_map_payload:
+        # 複数指定時は {"<hash小文字>": <map>, ...} 形式で返る
+        for raw_hash, item in payload.items():
+            _absorb(item, requested_hash=_normalize_hash(raw_hash))
+    elif isinstance(payload, list):
         for item in payload:
-            meta = _meta_from_map_payload(item, fallback_hash=song_hash)
-            if meta is not None:
-                return meta
-        return None
-    return _meta_from_map_payload(payload, fallback_hash=song_hash)
+            _absorb(item)
+    else:
+        # 単一ハッシュ指定時は map オブジェクトそのものが返る
+        _absorb(payload, requested_hash=normalized[0] if len(normalized) == 1 else "")
+
+    return results
 
 
 def update_beatsaver_meta_cache(
@@ -253,20 +302,29 @@ def update_beatsaver_meta_cache(
         missing_hashes.append(song_hash)
 
     if missing_hashes:
-        active_session = session or requests.Session()
+        active_session = session or make_session()
         total = len(missing_hashes)
-        for index, song_hash in enumerate(missing_hashes, start=1):
-            meta = _fetch_beatsaver_map_by_hash(active_session, song_hash)
-            if meta is not None:
-                cache[song_hash] = meta
-                updated = True
-            elif song_hash in normalized_seeds:
-                seeded = _seed_meta_from_hash_and_key(song_hash, normalized_seeds[song_hash])
-                if seeded is not None:
-                    cache[song_hash] = seeded
+        done = 0
+        for offset in range(0, total, _BEATSAVER_HASH_BATCH_SIZE):
+            batch = missing_hashes[offset:offset + _BEATSAVER_HASH_BATCH_SIZE]
+            fetched = _fetch_beatsaver_maps_by_hashes(active_session, batch)
+            for song_hash in batch:
+                meta = fetched.get(song_hash)
+                if meta is not None:
+                    cache[song_hash] = meta
                     updated = True
-            if on_progress is not None:
-                on_progress(index, total)
+                elif song_hash in normalized_seeds:
+                    seeded = _seed_meta_from_hash_and_key(song_hash, normalized_seeds[song_hash])
+                    if seeded is not None:
+                        cache[song_hash] = seeded
+                        updated = True
+                done += 1
+                if on_progress is not None:
+                    on_progress(done, total)
+            # 大量に取得する場合でも、途中で落ちた分を捨てずに済むよう逐次保存する
+            if updated:
+                _save_beatsaver_meta_cache(cache)
+                updated = False
 
     if updated:
         _save_beatsaver_meta_cache(cache)

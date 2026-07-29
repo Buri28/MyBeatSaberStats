@@ -10,6 +10,7 @@ import requests
 
 from .api_error_log import log_api_failure
 from .snapshot import BASE_DIR
+from .http_client import make_session
 
 BASE_URL = "https://api.accsaberreloaded.com/v1"
 
@@ -24,12 +25,39 @@ CATEGORY_IDS: Dict[str, str] = {
 # overall は maps エンドポイントでは集計しない（true+standard+tech の合計で算出）
 _MAP_COUNT_CATEGORY_IDS: Dict[str, str] = {k: v for k, v in CATEGORY_IDS.items() if k != "overall"}
 
-_PAGE_SIZE = 50
+# AccSaber Reloaded は個人運営の小規模サービスなので、リクエスト回数を最小限にしたい。
+# API は size=200 まで受け付ける（マイルストーン取得で実績あり）ため、
+# 50 → 200 に引き上げてページング回数を約 1/4 に削減する。
+_PAGE_SIZE = 200
+
+#: 想定外の応答（last が常に false など）で無限にページを取り続けないための保険。
+#: 正常系を打ち切ってしまわないよう、実データより十分大きく取る。
+#: _PAGE_SIZE=200 なので 500 ページ = 10 万件相当で、リーダーボードの全プレイヤー数や
+#: 全譜面数を大きく上回る。ここに到達するのは API 異常時だけ。
+_MAX_PAGES_GUARD = 500
 
 _MAP_COUNTS_CACHE_FILE: Path = BASE_DIR / "cache" / "accsaber_reloaded_map_counts.json"
 
 # AccSaber Reloaded 全マップデータのキャッシュファイル
 _ALL_MAPS_CACHE_FILE: Path = BASE_DIR / "cache" / "accsaber_reloaded_maps.json"
+
+
+def _is_rate_limited(resp: requests.Response, api_name: str, detail: str) -> bool:
+    """レート制限を受けたレスポンスか判定し、そうならログに残す。
+
+    http_client が Retry-After に従ってリトライした上でなお 429 の場合にここへ来る。
+    黙って打ち切ると欠損に気付けないため、明示的に記録する。
+    """
+    if getattr(resp, "status_code", None) != 429:
+        return False
+    log_api_failure(
+        "accsaber_reloaded",
+        api_name,
+        f"rate limited (HTTP 429) after retries: {detail} / "
+        "取得を中断しました。しばらく時間を置いて再試行してください。",
+    )
+    print(f"AccSaber APIのレート制限に達しました。取得を中断します: {detail}")
+    return True
 
 
 def is_pending_difficulty(diff: dict) -> bool:
@@ -233,6 +261,9 @@ def _fetch_batch_count_deltas_since(
 
         if reached_older_batch or data.get("last", True):
             break
+        if page >= _MAX_PAGES_GUARD:
+            # 応答が終端を示さない場合でも暴走しないよう打ち切る
+            break
         page += 1
 
     return counts
@@ -270,6 +301,9 @@ def _iter_recent_batches_since(
             batches.append(batch)
 
         if reached_older_batch or data.get("last", True):
+            break
+        if page >= _MAX_PAGES_GUARD:
+            # 応答が終端を示さない場合でも暴走しないよう打ち切る
             break
         page += 1
 
@@ -362,7 +396,7 @@ def load_all_maps_with_recent_batch_fallback(
     if cached_maps is None:
         return None
     if session is None:
-        session = requests.Session()
+        session = make_session()
     try:
         merged_maps = _merge_all_maps_with_recent_batches(session)
         if isinstance(merged_maps, list):
@@ -503,6 +537,9 @@ def _fetch_all_maps_via_difficulties(
 
         if data.get("last", True):
             break
+        if page >= _MAX_PAGES_GUARD:
+            # 応答が終端を示さない場合でも暴走しないよう打ち切る
+            break
         page += 1
 
     _backfill_missing_song_hashes(maps_by_id.values(), session)
@@ -552,14 +589,14 @@ def fetch_reloaded_map_counts(
     戻り値: {"true": N, "standard": N, "tech": N, "overall": N}
     """
     if session is None:
-        session = requests.Session()
+        session = make_session()
 
     # UUID → カテゴリ名 の逆引き辞書
     _uuid_to_cat: Dict[str, str] = {v: k for k, v in _MAP_COUNT_CATEGORY_IDS.items()}
 
     try:
         page = 0
-        page_size = 50
+        page_size = _PAGE_SIZE
         all_maps: List[Dict] = []
         while True:
             resp = session.get(
@@ -571,6 +608,9 @@ def fetch_reloaded_map_counts(
             data = resp.json()
             all_maps.extend(data.get("content", []))
             if data.get("last", True):
+                break
+            if page >= _MAX_PAGES_GUARD:
+                # 応答が終端を示さない場合でも暴走しないよう打ち切る
                 break
             page += 1
 
@@ -664,6 +704,12 @@ def _search_in_leaderboard(
     while True:
         try:
             resp = session.get(url, params={**params, "page": page}, timeout=30)
+            if _is_rate_limited(
+                resp,
+                "_search_in_leaderboard",
+                f"category_uuid={category_uuid} player_id={player_id} page={page}",
+            ):
+                break
             resp.raise_for_status()
             data = resp.json()
         except Exception as exc:  # noqa: BLE001
@@ -695,6 +741,9 @@ def _search_in_leaderboard(
         # 最終ページなら終了
         if data.get("last", True):
             break
+        if page >= _MAX_PAGES_GUARD:
+            # 応答が終端を示さない場合でも暴走しないよう打ち切る
+            break
         page += 1
 
     return None
@@ -714,7 +763,7 @@ def fetch_player_all_categories(
         return {cat: None for cat in CATEGORY_IDS}
 
     if session is None:
-        session = requests.Session()
+        session = make_session()
 
     result: Dict[str, Optional[AccSaberReloadedPlayer]] = {}
     for category, uuid in CATEGORY_IDS.items():
@@ -753,7 +802,7 @@ def fetch_player_xp(
         return None
 
     if session is None:
-        session = requests.Session()
+        session = make_session()
 
     params: Dict = {"size": _PAGE_SIZE}
     if country:
@@ -790,6 +839,9 @@ def fetch_player_xp(
 
         if data.get("last", True):
             break
+        if page >= _MAX_PAGES_GUARD:
+            # 応答が終端を示さない場合でも暴走しないよう打ち切る
+            break
         page += 1
 
     return None
@@ -806,7 +858,7 @@ def fetch_player_level_title(
     if not player_id:
         return None
     if session is None:
-        session = requests.Session()
+        session = make_session()
     try:
         resp = session.get(f"{BASE_URL}/users/{player_id}", timeout=30)
         resp.raise_for_status()
@@ -834,7 +886,7 @@ def fetch_player_milestone_counts(
         return None
 
     if session is None:
-        session = requests.Session()
+        session = make_session()
 
     url = f"{BASE_URL}/users/{player_id}/milestones"
     completed = 0
@@ -859,6 +911,9 @@ def fetch_player_milestone_counts(
             pass
 
         if data.get("last", True) or not content:
+            break
+        if page >= _MAX_PAGES_GUARD:
+            # 応答が終端を示さない場合でも暴走しないよう打ち切る
             break
         page += 1
 
@@ -903,7 +958,7 @@ def fetch_player_highest_title(
     if not player_id:
         return None
     if session is None:
-        session = requests.Session()
+        session = make_session()
 
     best: Optional[AccSaberTitle] = None
     page = 0
@@ -946,6 +1001,9 @@ def fetch_player_highest_title(
 
         if data.get("last", True):
             break
+        if page >= _MAX_PAGES_GUARD:
+            # 応答が終端を示さない場合でも暴走しないよう打ち切る
+            break
         page += 1
 
     return best
@@ -975,7 +1033,7 @@ def download_title_icon(
     if path.exists() and path.stat().st_size > 0:
         return path
     if session is None:
-        session = requests.Session()
+        session = make_session()
     try:
         resp = session.get(icon_url, timeout=30)
         resp.raise_for_status()
@@ -1023,7 +1081,7 @@ def fetch_player_skill_levels(
         return result
 
     if session is None:
-        session = requests.Session()
+        session = make_session()
 
     try:
         resp = session.get(f"{BASE_URL}/users/{player_id}/skill", timeout=30)
@@ -1078,11 +1136,12 @@ def fetch_all_maps_full(
     RuntimeError を投げると取得を中断できる（キャンセル用）。
     """
     if session is None:
-        session = requests.Session()
+        session = make_session()
 
     all_maps: List[Dict] = []
     page = 0
     total_pages: Optional[int] = None
+    rate_limited = False
 
     while True:
         try:
@@ -1091,6 +1150,12 @@ def fetch_all_maps_full(
                 params={"page": page, "size": _PAGE_SIZE},
                 timeout=30,
             )
+            if _is_rate_limited(resp, "fetch_all_maps_full", f"maps page={page}"):
+                # レート制限時に difficulties フォールバックへ流れると、
+                # 制限中のサーバへさらに全件クロールを掛けることになる。
+                # ここでは中断だけして、部分データをキャッシュへ焼き付けない。
+                rate_limited = True
+                break
             resp.raise_for_status()
             data = resp.json()
         except Exception as exc:
@@ -1119,7 +1184,14 @@ def fetch_all_maps_full(
 
         if data.get("last", True):
             break
+        if page >= _MAX_PAGES_GUARD:
+            # 応答が終端を示さない場合でも暴走しないよう打ち切る
+            break
         page += 1
+
+    if rate_limited:
+        # 不完全な一覧をキャッシュへ保存させないため、失敗として扱う
+        raise RuntimeError("AccSaber APIのレート制限により全マップ取得を中断しました")
 
     return all_maps
 
@@ -1138,7 +1210,7 @@ def fetch_player_scored_diff_ids(
         return {}
 
     if session is None:
-        session = requests.Session()
+        session = make_session()
 
     _uuid_to_cat = {v: k for k, v in CATEGORY_IDS.items()}
     result: Dict[str, set] = {"true": set(), "standard": set(), "tech": set()}
@@ -1168,6 +1240,9 @@ def fetch_player_scored_diff_ids(
                 result[cat].add(diff_id)
 
         if data.get("last", True):
+            break
+        if page >= _MAX_PAGES_GUARD:
+            # 応答が終端を示さない場合でも暴走しないよう打ち切る
             break
         page += 1
 
@@ -1199,7 +1274,7 @@ def fetch_and_save_all_maps_cache(
         log_api_failure("accsaber_reloaded", "fetch_and_save_all_maps_cache", f"cache refresh failed path={_ALL_MAPS_CACHE_FILE}", exc)
         try:
             if session is None:
-                session = requests.Session()
+                session = make_session()
             _merge_all_maps_with_recent_batches(session)
         except Exception as batch_exc:  # noqa: BLE001
             log_api_failure(
@@ -1243,7 +1318,7 @@ def fetch_and_save_player_scores_cache(
     if not player_id:
         return
     if session is None:
-        session = requests.Session()
+        session = make_session()
     all_scores: List[Dict] = []
     try:
         page = 0
@@ -1257,6 +1332,9 @@ def fetch_and_save_player_scores_cache(
             data = resp.json()
             all_scores.extend(data.get("content", []))
             if data.get("last", True):
+                break
+            if page >= _MAX_PAGES_GUARD:
+                # 応答が終端を示さない場合でも暴走しないよう打ち切る
                 break
             page += 1
         now_z = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")

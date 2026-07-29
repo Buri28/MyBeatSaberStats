@@ -101,6 +101,7 @@ from .settings_store import (
     save_playlist_export_dir as _save_playlist_export_dir_setting,
 )
 from .theme import detect_system_dark, is_dark, table_stylesheet
+from .http_client import make_session
 
 
 class _SwapSortArrowStyle(QProxyStyle):
@@ -1913,7 +1914,7 @@ def _fetch_rl_ap_index(
         return _build_index(_cached)
 
     if session is None:
-        session = requests.Session()
+        session = make_session()
     from .accsaber_reloaded import BASE_URL as _RL_BASE, _PAGE_SIZE as _RL_PAGE
     all_scores: list = []
     page = 0
@@ -1961,7 +1962,7 @@ def load_accsaber_reloaded_maps(
         target_cat_uuids = {uuid} if uuid else set()
 
     # AccSaber Reloaded の全マップを取得（キャッシュ優先）
-    session = requests.Session()
+    session = make_session()
 
     def _rl_progress(page: int, total: int) -> None:
         if on_progress:
@@ -3692,7 +3693,7 @@ class PlaylistWindow(QMainWindow):
         self._bl_mapper_stats_progress_dlg = None
         self._bl_mapper_stats_silent = False
         self._deferred_maps_restore_scheduled = False
-        self._bl_api_session = requests.Session()
+        self._bl_api_session = make_session()
         self._replay_viewer_mode = "bl"  # "bl" | "arc"
         self._bl_top_replay_cache = {}
         self._bl_preview_replay_index = None

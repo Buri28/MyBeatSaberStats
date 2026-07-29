@@ -6,6 +6,7 @@ from typing import List, Optional
 import requests
 
 from .api_error_log import log_api_failure
+from .http_client import make_session
 
 
 BASE_URL = "https://scoresaber.com/api/players"
@@ -34,7 +35,7 @@ def fetch_players(
     """
 
     if session is None:
-        session = requests.Session()
+        session = make_session()
 
     # requests の params は文字列系を想定しているので str に揃える
     params: dict[str, str] = {"page": str(page)}

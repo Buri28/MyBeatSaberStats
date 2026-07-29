@@ -43,6 +43,7 @@ from ..accsaber_reloaded import fetch_reloaded_map_counts as _fetch_reloaded_map
 from ..accsaber_reloaded import fetch_and_save_all_maps_cache as _fetch_and_save_rl_maps
 from ..accsaber_reloaded import fetch_and_save_player_scores_cache as _fetch_and_save_rl_player_scores
 from ..accsaber_reloaded import compute_effective_played_counts_from_cache as _compute_rl_effective_played_counts
+from ..http_client import make_session
 
 # キャッシュディレクトリ(app.py と同じ BASE_DIR / "cache" を利用)
 CACHE_DIR = BASE_DIR / "cache"
@@ -749,7 +750,7 @@ class _BackgroundFetch:
     def __init__(self, fn: Callable[["_BackgroundFetch"], None]) -> None:
         self.exc: Optional[Exception] = None
         self.progress_state: tuple[int, Optional[int]] = (0, None)
-        self.session = requests.Session()
+        self.session = make_session()
 
         def _run() -> None:
             try:
@@ -821,7 +822,7 @@ def create_snapshot_for_steam_id(
     # 以下の処理では requests.Session を必須とする関数を多数呼び出すため、
     # この関数内では session を必ず非 None の Session インスタンスに正規化して扱う。
     if session is None:
-        session = requests.Session()
+        session = make_session()
     assert session is not None
 
     # ScoreSaber / BeatLeader の Ranked Maps キャッシュを先に更新しておく。

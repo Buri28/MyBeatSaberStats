@@ -20,6 +20,31 @@ SCORESABER_LEADERBOARDS_URL = "https://scoresaber.com/api/leaderboards"
 SCORESABER_PLAYER_SCORES_URL = "https://scoresaber.com/api/player/{player_id}/scores"
 SCORESABER_PLAYER_FULL_URL = "https://scoresaber.com/api/player/{player_id}/full"
 
+#: 無限ページングを防ぐための保険。
+#: 正常系を途中で打ち切って取りこぼさないよう、実データより十分大きく取る。
+#: 1 ページ 100 件なので 1000 ページ = 10 万件相当。ranked 譜面（数千件）も
+#: 重量級プレイヤーのスコア数もこれを下回るため、到達するのは API 異常時だけ。
+_MAX_PAGES_GUARD = 1000
+
+
+def _is_rate_limited(resp: requests.Response, api_name: str, detail: str) -> bool:
+    """レート制限を受けたレスポンスかどうか判定し、そうならログに残す。
+
+    http_client 側で Retry-After に従ったリトライを行った上でなお 429 が返る場合に
+    ここへ来る。黙って途中打ち切りにすると「データが欠けている」ことに気付けないため、
+    明示的にログへ記録する。
+    """
+    if getattr(resp, "status_code", None) != 429:
+        return False
+    log_api_failure(
+        "scoresaber",
+        api_name,
+        f"rate limited (HTTP 429) after retries: {detail} / "
+        "取得を中断しました。しばらく時間を置いて再試行してください。",
+    )
+    print(f"ScoreSaber APIのレート制限に達しました。取得を中断します: {detail}")
+    return True
+
 
 def _normalize_leaderboard_key(value: object) -> Optional[str]:
     if value is None:
@@ -431,6 +456,8 @@ def _get_scoresaber_leaderboards_ranked(
                 print(f"SS Ranked Maps (DateRanked desc) page {page_no}: {resp_dt.url}")
                 if resp_dt.status_code == 404:
                     break
+                if _is_rate_limited(resp_dt, "_get_scoresaber_ranked_maps", f"ranked maps page={page_no}"):
+                    break
                 resp_dt.raise_for_status()
                 data_dt = resp_dt.json()
                 lbs_dt = data_dt.get("leaderboards") or []
@@ -459,6 +486,9 @@ def _get_scoresaber_leaderboards_ranked(
                 except (TypeError, ValueError):
                     per_page_dt = 100
                 if len(lbs_dt) < per_page_dt:
+                    break
+                if page_no >= _MAX_PAGES_GUARD:
+                    print(f"SS Ranked Maps: ページ数上限 {_MAX_PAGES_GUARD} に達したため打ち切ります")
                     break
                 page_no += 1
         except Exception:  # noqa: BLE001
@@ -540,6 +570,10 @@ def _get_scoresaber_leaderboards_ranked(
                         f"ScoreSaberリーダーボードの再構築ページ {i} を取得中... URL: {resp_page.url} params: {params_page}"
                     )
                     if resp_page.status_code == 404:
+                        rebuild_failed = True
+                        break
+                    if _is_rate_limited(resp_page, "_get_scoresaber_ranked_maps", f"rebuild page={i}"):
+                        # 中途半端なキャッシュで上書きしないよう失敗扱いにする
                         rebuild_failed = True
                         break
                     resp_page.raise_for_status()
@@ -978,6 +1012,8 @@ def _get_scoresaber_player_scores(
             print(f"Fetching ScoreSaber player scores page {page} for star stats... URL: {resp.url} params: {params}")
             if resp.status_code == 404:
                 break
+            if _is_rate_limited(resp, "_get_scoresaber_player_scores", f"player={scoresaber_id} page={page}"):
+                break
             resp.raise_for_status()
         except Exception as exc:  # noqa: BLE001
             log_api_failure(
@@ -1036,6 +1072,10 @@ def _get_scoresaber_player_scores(
 
         if len(items) < limit_param or (max_pages_sc is not None and page >= max_pages_sc):
             print("ScoreSaberのキャッシュ取得完了条件に達しました。" f"ページ: {page} アイテム数: {len(items)}")
+            break
+
+        if page >= _MAX_PAGES_GUARD:
+            print(f"ScoreSaberのスコア取得: ページ数上限 {_MAX_PAGES_GUARD} に達したため打ち切ります")
             break
 
         page += 1
