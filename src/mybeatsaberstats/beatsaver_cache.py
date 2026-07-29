@@ -13,6 +13,12 @@ _CACHE_PATH = BASE_DIR / "cache" / "beatsaver_map_details.json"
 _BEATSAVER_REQUEST_TIMEOUT = (3, 6)
 
 
+# BeatSaver の API ベース URL。
+# api.beatsaver.com は全エンドポイントが 404 を返すようになったため、
+# 本体ドメイン配下の /api を使う（ダウンロード URL は元々こちらを使っている）。
+BEATSAVER_API_BASE = "https://beatsaver.com/api"
+
+
 def _normalize_hash(song_hash: object) -> str:
     return str(song_hash or "").strip().upper()
 
@@ -190,7 +196,7 @@ def _has_full_beatsaver_meta(entry: Optional[dict]) -> bool:
 def _fetch_beatsaver_map_by_hash(session: requests.Session, song_hash: str) -> Optional[dict]:
     try:
         resp = session.get(
-            f"https://api.beatsaver.com/maps/hash/{song_hash}",
+            f"{BEATSAVER_API_BASE}/maps/hash/{song_hash}",
             timeout=_BEATSAVER_REQUEST_TIMEOUT,
         )
         if resp.status_code == 404:
