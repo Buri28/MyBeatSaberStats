@@ -255,6 +255,107 @@ def test_fetch_reloaded_map_counts_uses_batch_fallback_when_maps_api_fails(monke
     assert get_reloaded_map_counts_from_cache() == counts
 
 
+def test_fetch_all_maps_via_difficulties_backfills_pending_song_hash() -> None:
+    """difficulties/all は ranked 分の hash しか返さないので by-code で補うこと。"""
+    import mybeatsaberstats.accsaber_reloaded as mod
+
+    class _FakeResponse:
+        def __init__(self, payload) -> None:  # noqa: ANN001
+            self._payload = payload
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self):  # noqa: ANN201
+            return self._payload
+
+    class _FakeSession:
+        def get(self, url, params=None, timeout=None):  # noqa: ANN001, ANN202
+            if url.endswith("/maps/difficulties/all"):
+                # ranked の分だけ songHash を持つ
+                return _FakeResponse([{"id": "diff-ranked", "songHash": "RANKEDHASH"}])
+            if url.endswith("/maps/difficulties"):
+                return _FakeResponse(
+                    {
+                        "content": [
+                            {
+                                "id": "diff-ranked",
+                                "mapId": "map-ranked",
+                                "beatsaverCode": "aaaaa",
+                                "songName": "Ranked Song",
+                                "status": "RANKED",
+                            },
+                            {
+                                "id": "diff-pending",
+                                "mapId": "map-pending",
+                                "beatsaverCode": "bbbbb",
+                                "songName": "Pending Song",
+                                "status": "QUEUE",
+                                "criteriaStatus": "PENDING",
+                            },
+                        ],
+                        "last": True,
+                        "totalPages": 1,
+                    }
+                )
+            if url.endswith("/maps/by-code/bbbbb"):
+                return _FakeResponse({"beatsaverCode": "bbbbb", "songHash": "PENDINGHASH"})
+            raise AssertionError(url)
+
+    maps = mod._fetch_all_maps_via_difficulties(cast(requests.Session, _FakeSession()))
+
+    hashes = {str(song.get("beatsaverCode")): song.get("songHash") for song in maps}
+    assert hashes == {"aaaaa": "RANKEDHASH", "bbbbb": "PENDINGHASH"}
+
+
+def test_search_in_leaderboard_filters_country_by_query_param() -> None:
+    """旧 /leaderboards/{uuid}/country/{cc} は 404 になったのでクエリ方式であること。"""
+    import mybeatsaberstats.accsaber_reloaded as mod
+
+    seen: list = []
+
+    class _FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return {
+                "content": [
+                    {
+                        "userId": "76561198324870685",
+                        "userName": "Buri",
+                        "country": "JP",
+                        "ap": 23877.551515,
+                        "averageAcc": 0.980895,
+                        "rankedPlays": 542,
+                        "ranking": 483,
+                        "countryRanking": 28,
+                    }
+                ],
+                "last": True,
+            }
+
+    class _FakeSession:
+        def get(self, url, params=None, timeout=None):  # noqa: ANN001, ANN202
+            seen.append((url, params))
+            return _FakeResponse()
+
+    player = mod._search_in_leaderboard(
+        mod.CATEGORY_IDS["overall"],
+        "76561198324870685",
+        "jp",
+        cast(requests.Session, _FakeSession()),
+    )
+
+    url, params = seen[0]
+    assert url == f"{mod.BASE_URL}/leaderboards/{mod.CATEGORY_IDS['overall']}"
+    assert "/country/" not in url
+    assert params["country"] == "JP"
+    assert player is not None
+    assert (player.ap, player.rank_global, player.rank_country) == (23877.551515, 483, 28)
+    assert player.average_acc == 0.980895
+
+
 def test_load_all_maps_with_recent_batch_fallback_merges_full_maps(monkeypatch, tmp_path) -> None:
     import mybeatsaberstats.accsaber_reloaded as mod
 
