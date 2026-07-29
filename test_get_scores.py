@@ -1,13 +1,24 @@
-import sys
+"""ScoreSaber スコア取得の手動確認スクリプト。
+
+pytest の収集対象になるファイル名だが自動テストではないため、
+実際の API 呼び出しは __main__ 実行時だけに限定している。
+"""
+
 import requests
 
-from mybeatsaberstats.collector.collector import get_scoresaber_player_scores
+from mybeatsaberstats.collector.scoresaber import _get_scoresaber_player_scores
 
-print('starting script')
-sys.path.insert(0, 'src')
-print('imported ok')
-s = requests.Session()
-res = get_scoresaber_player_scores('3117609721598571', s)
-print('len', len(res))
-if res:
-    print(list(res[0].keys()))
+
+def main() -> None:
+    session = requests.Session()
+    try:
+        scores = _get_scoresaber_player_scores("3117609721598571", session)
+    finally:
+        session.close()
+    print("len", len(scores))
+    if scores:
+        print(list(scores[0].keys()))
+
+
+if __name__ == "__main__":
+    main()
