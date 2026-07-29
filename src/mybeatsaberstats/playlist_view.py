@@ -27,7 +27,7 @@ import requests
 
 from PySide6.QtCore import (
     Qt, QObject, Signal, QUrl, QSize, QDate, QTimer, QEvent,
-    QModelIndex, QPersistentModelIndex, QRect,
+    QPersistentModelIndex, QRect,
 )
 from PySide6.QtGui import QColor, QImage, QPainter, QFont, QPixmap, QDesktopServices, QIcon, QPalette
 from PySide6.QtSvg import QSvgRenderer
@@ -305,7 +305,14 @@ class _NoFocusItemDelegate(QStyledItemDelegate):
                 if not index.isValid():
                     self._destroy_editor(child)  # 行が作り直された
                     continue
-                if view.visualRect(QModelIndex(index)) != cell_rect:
+                # QPersistentModelIndex から QModelIndex は直接作れないため、
+                # モデルへ問い合わせて現在の QModelIndex を取り直す。
+                model = view.model()
+                if model is None:
+                    self._destroy_editor(child)
+                    continue
+                current_index = model.index(index.row(), index.column(), index.parent())
+                if view.visualRect(current_index) != cell_rect:
                     self._destroy_editor(child)  # 並べ替え・スクロール等でセルが動いた
                     continue
                 window = child.window()
@@ -6229,11 +6236,25 @@ class PlaylistWindow(QMainWindow):
             self._update_bl_mapper_cache_status("invalid payload")
             return
         self._update_bl_mapper_cache_status()
+        # Mapper cache と一緒に BeatLeader プレイヤースコアのキャッシュも更新されるため、
+        # entries へ再適用したうえで表を作り直す。これを省くと MP 列は集計前の
+        # フォールバック値、Played 列は空のまま残ってしまう。
+        self._refresh_after_bl_mapper_cache_update()
         if silent:
             return
         action = show_bl_mapper_top_dialog(self, payload)
         if action in ("since", "full"):
             self._start_bl_mapper_stats_task(action)
+
+    def _refresh_after_bl_mapper_cache_update(self) -> None:
+        """Mapper cache 更新後に MP / Played 列を最新のキャッシュで作り直す。
+
+        MP 列は _refresh_table() が読み直す Mapper cache 由来、Played 列は entries
+        側の値なので、entries の再適用と表の再構築の両方が必要になる。
+        """
+        self._refresh_maps_entries_from_player_caches()
+        if self._is_maps_tab() and self._all_entries:
+            self._apply_filter()
 
     def _on_bl_mapper_stats_error(self, message: str) -> None:
         """Mapper Played 集計失敗時に UI 状態を戻してエラーを通知する。"""
