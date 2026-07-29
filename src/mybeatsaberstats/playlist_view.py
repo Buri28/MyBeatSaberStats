@@ -587,7 +587,7 @@ SOURCE_SS = "ScoreSaber"
 SOURCE_BL = "BeatLeader"
 SOURCE_ACC_RL = "AccSaber"
 SOURCE_BS = "BeatSaver"
-SOURCE_OPEN = "Open File"
+SOURCE_OPEN = "Open Playlist"
 def _secondary_button_stylesheet() -> str:
     if is_dark():
         return (
@@ -5977,16 +5977,16 @@ class PlaylistWindow(QMainWindow):
         elif self._rb_open.isChecked():
             file_path_str = self._open_edit.text().strip()
             if not file_path_str:
-                QMessageBox.warning(self, "Open File", "Please specify a .bplist or .json file.")
+                QMessageBox.warning(self, "Open Playlist", "Please specify a .bplist or .json file.")
                 self._btn_load.setEnabled(True)
                 return
             pending_open_path = Path(file_path_str)
             if not pending_open_path.exists():
-                QMessageBox.warning(self, "Open File", f"File not found:\n{pending_open_path}")
+                QMessageBox.warning(self, "Open Playlist", f"File not found:\n{pending_open_path}")
                 self._btn_load.setEnabled(True)
                 return
             if pending_open_path.suffix.lower() not in (".bplist", ".json"):
-                QMessageBox.warning(self, "Open File", "Unsupported file type. Please open a .bplist or .json file.")
+                QMessageBox.warning(self, "Open Playlist", "Unsupported file type. Please open a .bplist or .json file.")
                 self._btn_load.setEnabled(True)
                 return
             pending_open_service = str(self._svc_combo.currentData() or "none")

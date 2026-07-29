@@ -505,7 +505,39 @@ def _fetch_all_maps_via_difficulties(
             break
         page += 1
 
+    _backfill_missing_song_hashes(maps_by_id.values(), session)
+
     return [maps_by_id[map_id] for map_id in ordered_ids]
+
+
+def _backfill_missing_song_hashes(songs, session: requests.Session) -> None:
+    """songHash が埋まらなかった曲を maps/by-code から個別に補う。
+
+    /v1/maps/difficulties/all は ranked 分の songHash しか返さないため、
+    pending（QUEUE / QUALIFIED）の曲はここで補完しないと bplist から落ちてしまう。
+    1 曲ごとの取得なので、失敗しても他の曲の処理は続行する。
+    """
+    for song in songs:
+        if song.get("songHash"):
+            continue
+        code = str(song.get("beatsaverCode") or "").strip()
+        if not code:
+            continue
+        try:
+            full = _fetch_map_by_code(code, session)
+        except Exception as exc:  # noqa: BLE001
+            log_api_failure(
+                "accsaber_reloaded",
+                "_backfill_missing_song_hashes",
+                f"failed to fetch songHash beatsaverCode={code}",
+                exc,
+            )
+            continue
+        if not isinstance(full, dict):
+            continue
+        song_hash = str(full.get("songHash") or "").strip()
+        if song_hash:
+            song["songHash"] = song_hash
 
 
 def fetch_reloaded_map_counts(
@@ -616,19 +648,22 @@ def _search_in_leaderboard(
 ) -> Optional[AccSaberReloadedPlayer]:
     """指定カテゴリのリーダーボードからプレイヤーを検索する。
 
-    country を指定すると国別エンドポイント（/leaderboards/{uuid}/country/{cc}）を使い、
-    ページ数を大幅に削減できる。見つからない場合は None を返す。
+    country を指定すると country クエリで国別に絞り込み、ページ数を大幅に削減できる。
+    （旧 /leaderboards/{uuid}/country/{cc} は廃止され 404 になったため、
+    XP ランキングと同じクエリパラメータ方式に統一している）
+    見つからない場合は None を返す。
     レスポンスの `ranking` フィールドには全体順位が、`countryRanking` には国内順位が入る。
     """
+    url = f"{BASE_URL}/leaderboards/{category_uuid}"
+
+    params: Dict = {"size": _PAGE_SIZE}
     if country:
-        url = f"{BASE_URL}/leaderboards/{category_uuid}/country/{country.upper()}"
-    else:
-        url = f"{BASE_URL}/leaderboards/{category_uuid}"
+        params["country"] = country.upper()
 
     page = 0
     while True:
         try:
-            resp = session.get(url, params={"page": page, "size": _PAGE_SIZE}, timeout=30)
+            resp = session.get(url, params={**params, "page": page}, timeout=30)
             resp.raise_for_status()
             data = resp.json()
         except Exception as exc:  # noqa: BLE001
