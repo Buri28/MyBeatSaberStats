@@ -5270,6 +5270,11 @@ class PlaylistWindow(QMainWindow):
             _apply_beatsaver_meta(entry, None)
 
         self._maps_all_entries = restored_entries
+        # 保存状態には前回表示時点の played 情報しか入っていないため、
+        # Maps 読み込み完了時（_on_load_finished_impl）と同じく
+        # キャッシュ済みの SS / BL スコアをここでも再適用する。
+        # 表の再構築はこの直後の _apply_filter() が行うので行単位の更新は不要。
+        _refresh_entries_from_cached_player_scores(self._maps_all_entries, self._steam_id)
         self._maps_filtered = list(self._maps_all_entries)
         self._maps_loaded_source_key = self._maps_source_key
         self._maps_loaded_steam_id = self._steam_id
