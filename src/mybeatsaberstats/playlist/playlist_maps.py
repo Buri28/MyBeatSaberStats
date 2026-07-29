@@ -8,6 +8,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 import requests
 
+from ..beatsaver_cache import BEATSAVER_API_BASE
 from ..playlist_view import (
     MapEntry,
     _CACHE_DIR,
@@ -385,7 +386,7 @@ def load_beatsaver_maps(
         if from_dt_api is not None and to_dt_api is not None:
             search_params["from"] = from_dt_api.isoformat().replace("+00:00", "Z")
             search_params["to"] = to_dt_api.isoformat().replace("+00:00", "Z")
-        resp = session.get(f"https://api.beatsaver.com/search/text/{page}", params=search_params, timeout=15)
+        resp = session.get(f"{BEATSAVER_API_BASE}/search/text/{page}", params=search_params, timeout=15)
         resp.raise_for_status()
         payload = resp.json()
         docs = payload.get("docs") or []
