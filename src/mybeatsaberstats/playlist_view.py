@@ -1938,6 +1938,18 @@ def load_accsaber_reloaded_maps(
     category: str = "all",
     on_progress=None,
 ) -> List[MapEntry]:
+    """AccSaber Reloaded のマップ一覧を構築し、API 別リクエスト数をログへ出す。"""
+    from .http_client import request_scope
+
+    with request_scope(f"AccSaber マップ取得 category={category}"):
+        return _load_accsaber_reloaded_maps(steam_id, category, on_progress)
+
+
+def _load_accsaber_reloaded_maps(
+    steam_id: Optional[str] = None,
+    category: str = "all",
+    on_progress=None,
+) -> List[MapEntry]:
     """AccSaber Reloaded の全マップを API から取得し BL ランク情報を付与する。
 
     category: "all" | "true" | "standard" | "tech"

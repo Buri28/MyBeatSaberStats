@@ -268,6 +268,53 @@ def test_accsaber_profile_is_fetched_once_per_session() -> None:
     assert len(user_calls) == 1, user_calls
 
 
+def test_map_by_code_is_not_fetched_twice() -> None:
+    """/v1/maps が 500 のとき、同じ by-code を 2 系統から二重に取りに行かない。"""
+    import mybeatsaberstats.accsaber_reloaded as acc
+
+    calls: list[str] = []
+
+    class _S:
+        def get(self, url, timeout=None):  # noqa: ANN001, ANN202
+            calls.append(url)
+            return _FakeResponse({"id": "m1", "beatsaverCode": "4f185", "songHash": "AAA"})
+
+    s = cast(requests.Session, _S())
+    first = acc._fetch_map_by_code("4f185", s)
+    second = acc._fetch_map_by_code("4f185", s)
+
+    assert first == second
+    assert len(calls) == 1, calls
+
+
+def test_difficulties_fallback_runs_once_per_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    """difficulties フォールバックの全件クロールがセッション内で 1 回に畳まれる。"""
+    import mybeatsaberstats.accsaber_reloaded as acc
+
+    crawls = {"n": 0}
+
+    def _fake_hashes(session):  # noqa: ANN001, ANN202
+        crawls["n"] += 1
+        return {}
+
+    monkeypatch.setattr(acc, "_fetch_song_hashes_by_difficulty_id", _fake_hashes)
+    monkeypatch.setattr(acc, "_backfill_missing_song_hashes", lambda songs, session: None)
+
+    class _S:
+        def get(self, url, params=None, timeout=None):  # noqa: ANN001, ANN202
+            return _FakeResponse({
+                "content": [{"mapId": "m1", "categoryId": "c", "beatsaverCode": "4f185"}],
+                "last": True,
+            })
+
+    s = cast(requests.Session, _S())
+    first = acc._fetch_all_maps_via_difficulties(s)
+    second = acc._fetch_all_maps_via_difficulties(s)
+
+    assert first == second
+    assert crawls["n"] == 1, "全件クロールが 2 回走っている"
+
+
 def test_session_sets_user_agent() -> None:
     """全リクエストにアプリ名入りの User-Agent が付く。"""
     session = hc.make_session()
@@ -301,6 +348,126 @@ def test_scoresaber_requests_are_serialized() -> None:
     gaps = [b - a for a, b in zip(timestamps, timestamps[1:])]
     policy = hc._policy_for("https://scoresaber.com/api/players")
     assert all(gap >= policy.min_interval * 0.9 for gap in gaps), gaps
+
+
+def test_request_scope_counts_per_host(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """スコープを抜けるとホスト別のリクエスト数がログへ出る。"""
+    monkeypatch.setattr(hc, "REQUEST_LOG_PATH", tmp_path / "api_requests.log")
+    hc.reset_request_stats()
+
+    urls = [
+        "https://scoresaber.com/api/players",
+        "https://scoresaber.com/api/players",
+        "https://api.beatleader.xyz/player/1",
+    ]
+
+    def _fake_request(self, method, url, **kwargs):  # noqa: ANN001, ANN202
+        return _FakeResponse({})
+
+    with mock.patch.object(requests.Session, "request", _fake_request):
+        session = hc.make_session()
+        with hc.request_scope("テスト処理"):
+            for u in urls:
+                session.get(u)
+
+    logged = (tmp_path / "api_requests.log").read_text(encoding="utf-8")
+    assert "テスト処理: 合計 3 リクエスト" in logged
+    assert "scoresaber.com: 2 回" in logged
+    assert "api.beatleader.xyz: 1 回" in logged
+    # 多く叩いた API が先に並ぶ
+    assert logged.index("scoresaber.com") < logged.index("api.beatleader.xyz")
+    # エンドポイント内訳が出る（ID はプレースホルダに正規化される）
+    assert "GET /api/players: 2 回" in logged
+    assert "GET /player/{id}: 1 回" in logged
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("https://api.accsaberreloaded.com/v1/users/76561198324870685", "GET /v1/users/{id}"),
+        ("https://api.accsaberreloaded.com/v1/users/76561198324870685/milestones?page=3",
+         "GET /v1/users/{id}/milestones"),
+        ("https://api.accsaberreloaded.com/v1/leaderboards/b0000000-0000-0000-0000-000000000005",
+         "GET /v1/leaderboards/{uuid}"),
+        ("https://api.beatleader.xyz/leaderboards/hash/" + "A" * 40,
+         "GET /leaderboards/hash/{hash}"),
+        ("https://beatsaver.com/api/maps/hash/" + "A" * 40 + "," + "B" * 40,
+         "GET /api/maps/hash/{hashes}"),
+        ("https://scoresaber.com/api/player/76561198324870685/scores",
+         "GET /api/player/{id}/scores"),
+        ("https://scoresaber.com/api/leaderboards", "GET /api/leaderboards"),
+        # BeatSaver の一括 ID 指定はログが長くなるので必ず潰す
+        ("https://beatsaver.com/api/maps/ids/52697,4c05f,52c50", "GET /api/maps/ids/{ids}"),
+        ("https://beatsaver.com/api/maps/ids/52697", "GET /api/maps/ids/{ids}"),
+        ("https://api.accsaberreloaded.com/v1/maps/by-code/52697", "GET /v1/maps/by-code/{code}"),
+    ],
+)
+def test_endpoint_normalization(url: str, expected: str) -> None:
+    """URL の可変部分がプレースホルダへ正規化される。"""
+    assert hc._endpoint_of("GET", url) == expected
+
+
+def test_request_scope_reports_errors_and_throttling(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """404 / 500 / 429 がそれぞれ区別して記録される。"""
+    monkeypatch.setattr(hc, "REQUEST_LOG_PATH", tmp_path / "api_requests.log")
+    hc.reset_request_stats()
+
+    statuses = [404, 500, 200]
+
+    def _fake_request(self, method, url, **kwargs):  # noqa: ANN001, ANN202
+        return _FakeResponse({}, statuses.pop(0))
+
+    with mock.patch.object(requests.Session, "request", _fake_request):
+        session = hc.make_session()
+        with hc.request_scope("エラー混在"):
+            for _ in range(3):
+                session.get("https://beatsaver.com/api/maps/hash/x")
+
+    logged = (tmp_path / "api_requests.log").read_text(encoding="utf-8")
+    assert "合計 3 リクエスト" in logged
+    assert "エラー 1 回" in logged
+    assert "404 1 回" in logged
+
+
+def test_request_scope_logs_even_on_exception(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """処理が例外で落ちてもサマリは出力される。"""
+    monkeypatch.setattr(hc, "REQUEST_LOG_PATH", tmp_path / "api_requests.log")
+    hc.reset_request_stats()
+
+    def _fake_request(self, method, url, **kwargs):  # noqa: ANN001, ANN202
+        return _FakeResponse({})
+
+    with mock.patch.object(requests.Session, "request", _fake_request):
+        session = hc.make_session()
+        with pytest.raises(ValueError):
+            with hc.request_scope("途中で失敗"):
+                session.get("https://scoresaber.com/api/players")
+                raise ValueError("boom")
+
+    logged = (tmp_path / "api_requests.log").read_text(encoding="utf-8")
+    assert "途中で失敗: 合計 1 リクエスト" in logged
+
+
+def test_nested_request_scopes_do_not_double_count(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """入れ子のスコープでは内側の分が外側から二重に引かれない。"""
+    monkeypatch.setattr(hc, "REQUEST_LOG_PATH", tmp_path / "api_requests.log")
+    hc.reset_request_stats()
+
+    def _fake_request(self, method, url, **kwargs):  # noqa: ANN001, ANN202
+        return _FakeResponse({})
+
+    with mock.patch.object(requests.Session, "request", _fake_request):
+        session = hc.make_session()
+        with hc.request_scope("外側"):
+            session.get("https://scoresaber.com/api/players")
+            with hc.request_scope("内側"):
+                session.get("https://scoresaber.com/api/players")
+                session.get("https://scoresaber.com/api/players")
+
+    logged = (tmp_path / "api_requests.log").read_text(encoding="utf-8")
+    assert "内側: 合計 2 リクエスト" in logged
+    # 外側は内側を含む全体の 3 件
+    assert "外側: 合計 3 リクエスト" in logged
 
 
 def test_429_is_retried_following_retry_after() -> None:

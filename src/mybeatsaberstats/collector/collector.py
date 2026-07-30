@@ -43,7 +43,7 @@ from ..accsaber_reloaded import fetch_reloaded_map_counts as _fetch_reloaded_map
 from ..accsaber_reloaded import fetch_and_save_all_maps_cache as _fetch_and_save_rl_maps
 from ..accsaber_reloaded import fetch_and_save_player_scores_cache as _fetch_and_save_rl_player_scores
 from ..accsaber_reloaded import compute_effective_played_counts_from_cache as _compute_rl_effective_played_counts
-from ..http_client import make_session
+from ..http_client import make_session, request_scope
 
 # キャッシュディレクトリ(app.py と同じ BASE_DIR / "cache" を利用)
 CACHE_DIR = BASE_DIR / "cache"
@@ -774,6 +774,30 @@ class _BackgroundFetch:
 
 
 def create_snapshot_for_steam_id(
+    steam_id: str,
+    session: Optional[requests.Session] = None,
+    snapshot_dir: Optional[Path] = None,
+    progress: Optional[Callable[[str, float], None]] = None,
+    options: Optional[SnapshotOptions] = None,
+    on_warning: Optional[Callable[[str], None]] = None,
+) -> Snapshot:
+    """スナップショットを作成し、API 別のリクエスト数をログへ出力する。
+
+    実処理は :func:`_create_snapshot_for_steam_id` に委譲し、ここでは
+    「どの API に何回投げたか」を集計するスコープを張るだけ。
+    """
+    with request_scope(f"スナップショット取得 steam_id={steam_id}"):
+        return _create_snapshot_for_steam_id(
+            steam_id,
+            session=session,
+            snapshot_dir=snapshot_dir,
+            progress=progress,
+            options=options,
+            on_warning=on_warning,
+        )
+
+
+def _create_snapshot_for_steam_id(
     steam_id: str,
     session: Optional[requests.Session] = None,
     snapshot_dir: Optional[Path] = None,
