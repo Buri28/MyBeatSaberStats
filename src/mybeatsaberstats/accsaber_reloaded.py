@@ -11,6 +11,7 @@ from weakref import WeakKeyDictionary
 import requests
 
 from .api_error_log import log_api_failure
+from .beatsaver_cache import BEATSAVER_API_BASE
 from .snapshot import BASE_DIR
 from .http_client import make_session
 
@@ -199,6 +200,26 @@ def _save_all_maps_cache(all_maps: List[Dict], fetched_at: Optional[str] = None)
     _save_map_counts_from_all_maps(all_maps)
 
 
+#: 全マップキャッシュを「新しい」とみなす時間。
+#: AccSaber の譜面追加は batch 単位（数日〜週次）で、かつ batch 差分の取り込みで
+#: 前進できるため、全件取得はこの間隔で十分。
+_ALL_MAPS_CACHE_TTL_HOURS = 24
+
+
+def _is_all_maps_cache_fresh(ttl_hours: int = _ALL_MAPS_CACHE_TTL_HOURS) -> bool:
+    """全マップキャッシュが TTL 内かどうかを返す。"""
+    payload = _load_all_maps_cache_payload()
+    if not isinstance(payload, dict):
+        return False
+    if not isinstance(payload.get("maps"), list) or not payload["maps"]:
+        return False
+    fetched_at = _parse_utc_timestamp(payload.get("fetched_at"))
+    if fetched_at is None:
+        return False
+    age_hours = (datetime.now(timezone.utc) - fetched_at).total_seconds() / 3600.0
+    return 0 <= age_hours < ttl_hours
+
+
 def _parse_utc_timestamp(value: object) -> Optional[datetime]:
     if not isinstance(value, str) or not value:
         return None
@@ -312,18 +333,42 @@ def _iter_recent_batches_since(
     return batches
 
 
+#: セッション単位の by-code 取得キャッシュ。
+#: /v1/maps が 500 を返すとき、譜面数の集計と全マップ取得の 2 系統が別々に
+#: batch フォールバックへ落ちて同じコードを二重に取りに行っていたため。
+_MAP_BY_CODE_CACHE: "WeakKeyDictionary[requests.Session, Dict[str, Optional[Dict]]]" = WeakKeyDictionary()
+_MAP_BY_CODE_LOCK = threading.Lock()
+
+
 def _fetch_map_by_code(
     beatsaver_code: str,
     session: requests.Session,
 ) -> Optional[Dict]:
-    """map by code endpoint から full map レコードを取得する。"""
+    """map by code endpoint から full map レコードを取得する。
+
+    同一セッション内では結果をキャッシュし、同じコードを二度取りに行かない。
+    """
     code = str(beatsaver_code or "").strip()
     if not code:
         return None
+
+    with _MAP_BY_CODE_LOCK:
+        cached = _MAP_BY_CODE_CACHE.get(session, {})
+        if code in cached:
+            return cached[code]
+
     resp = session.get(f"{BASE_URL}/maps/by-code/{code}", timeout=30)
     resp.raise_for_status()
     data = resp.json()
-    return data if isinstance(data, dict) else None
+    result = data if isinstance(data, dict) else None
+
+    try:
+        with _MAP_BY_CODE_LOCK:
+            _MAP_BY_CODE_CACHE.setdefault(session, {})[code] = result
+    except TypeError:
+        # weakref を張れないセッション実装（テストのフェイクなど）は素通し
+        pass
+    return result
 
 
 def _merge_all_maps_with_recent_batches(
@@ -486,6 +531,13 @@ _MAP_LEVEL_FIELDS = (
 )
 
 
+#: セッション単位の difficulties フォールバック結果キャッシュ。
+#: /v1/maps が 500 のとき「譜面数の集計」と「全マップ取得」の 2 系統が
+#: それぞれ全件クロールを走らせてしまうため、1 回分に畳む。
+_ALL_MAPS_VIA_DIFF_CACHE: "WeakKeyDictionary[requests.Session, List[Dict]]" = WeakKeyDictionary()
+_ALL_MAPS_VIA_DIFF_LOCK = threading.Lock()
+
+
 def _fetch_all_maps_via_difficulties(
     session: requests.Session,
     on_progress=None,
@@ -494,7 +546,16 @@ def _fetch_all_maps_via_difficulties(
 
     /v1/maps が 500 を返す間の回避策。難易度単位のページング API を全ページ取得し、
     mapId でまとめ直して /v1/maps と同じ {..., "difficulties": [...]} 形状にする。
+
+    全件クロールになるため、同一セッション内では結果をキャッシュして再利用する。
     """
+    with _ALL_MAPS_VIA_DIFF_LOCK:
+        cached = _ALL_MAPS_VIA_DIFF_CACHE.get(session)
+    if cached is not None:
+        if on_progress is not None:
+            on_progress(1, 1)
+        return cached
+
     song_hashes = _fetch_song_hashes_by_difficulty_id(session)
 
     maps_by_id: Dict[str, Dict] = {}
@@ -546,7 +607,106 @@ def _fetch_all_maps_via_difficulties(
 
     _backfill_missing_song_hashes(maps_by_id.values(), session)
 
-    return [maps_by_id[map_id] for map_id in ordered_ids]
+    result = [maps_by_id[map_id] for map_id in ordered_ids]
+    if result:
+        try:
+            with _ALL_MAPS_VIA_DIFF_LOCK:
+                _ALL_MAPS_VIA_DIFF_CACHE[session] = result
+        except TypeError:
+            # weakref を張れないセッション実装（テストのフェイクなど）は素通し
+            pass
+    return result
+
+
+# beatsaverCode → songHash の永続キャッシュ。
+# BeatSaver コードとハッシュの対応は不変なので、期限を設けず使い回せる。
+_SONG_HASH_CACHE_FILE: Path = BASE_DIR / "cache" / "accsaber_reloaded_song_hash_by_code.json"
+_SONG_HASH_CACHE_LOCK = threading.Lock()
+
+
+def _load_song_hash_by_code() -> Dict[str, str]:
+    try:
+        data = json.loads(_SONG_HASH_CACHE_FILE.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return {}
+    entries = data.get("entries") if isinstance(data, dict) else None
+    if not isinstance(entries, dict):
+        return {}
+    return {
+        str(code): str(song_hash)
+        for code, song_hash in entries.items()
+        if str(code) and str(song_hash or "")
+    }
+
+
+def _save_song_hash_by_code(entries: Dict[str, str]) -> None:
+    payload = {
+        "fetched_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "entries": entries,
+    }
+    try:
+        _SONG_HASH_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _SONG_HASH_CACHE_FILE.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+#: BeatSaver の一括 ID 取得が 1 リクエストで受け付ける件数。
+_BEATSAVER_IDS_BATCH_SIZE = 50
+
+
+def _resolve_song_hashes_via_beatsaver(
+    codes: List[str],
+    session: requests.Session,
+) -> Dict[str, str]:
+    """beatsaverCode → songHash を BeatSaver の一括 API でまとめて解決する。
+
+    AccSaber の /v1/maps/difficulties/all は ranked 分の songHash しか返さないため、
+    pending 譜面は 1 件ずつ /v1/maps/by-code を叩く必要があった（数十リクエスト）。
+    beatsaverCode は BeatSaver のマップ ID なので、BeatSaver の
+    /api/maps/ids/{id1,id2,...}（50 件/リクエスト）で一括解決できる。
+
+    小規模な AccSaber ではなく BeatSaver 側へ寄せることで、
+    リクエスト数を約 1/50 に減らしつつ AccSaber の負荷をほぼゼロにする。
+    ranked 譜面 50 件で AccSaber の songHash と完全一致することを確認済み。
+    """
+    resolved: Dict[str, str] = {}
+    unique = [c for c in dict.fromkeys(codes) if c]
+    if not unique:
+        return resolved
+
+    for offset in range(0, len(unique), _BEATSAVER_IDS_BATCH_SIZE):
+        batch = unique[offset:offset + _BEATSAVER_IDS_BATCH_SIZE]
+        url = f"{BEATSAVER_API_BASE}/maps/ids/{','.join(batch)}"
+        try:
+            resp = session.get(url, timeout=30)
+            resp.raise_for_status()
+            payload = resp.json()
+        except Exception as exc:  # noqa: BLE001
+            log_api_failure(
+                "accsaber_reloaded",
+                "_resolve_song_hashes_via_beatsaver",
+                f"bulk hash lookup failed codes={len(batch)}",
+                exc,
+            )
+            continue
+
+        if not isinstance(payload, dict):
+            continue
+        for code in batch:
+            entry = payload.get(code) or payload.get(code.lower())
+            if not isinstance(entry, dict):
+                continue
+            versions = entry.get("versions") or []
+            song_hash = ""
+            for version in versions:
+                if isinstance(version, dict) and version.get("hash"):
+                    song_hash = str(version["hash"]).upper()
+                    break
+            if song_hash:
+                resolved[code] = song_hash
+
+    return resolved
 
 
 def _backfill_missing_song_hashes(songs, session: requests.Session) -> None:
@@ -555,12 +715,47 @@ def _backfill_missing_song_hashes(songs, session: requests.Session) -> None:
     /v1/maps/difficulties/all は ranked 分の songHash しか返さないため、
     pending（QUEUE / QUALIFIED）の曲はここで補完しないと bplist から落ちてしまう。
     1 曲ごとの取得なので、失敗しても他の曲の処理は続行する。
+
+    解決の優先順:
+
+    1. 永続キャッシュ（beatsaverCode → songHash は不変なので期限なし）
+    2. BeatSaver の一括 ID 取得（50 件/リクエスト）
+    3. それでも埋まらない分だけ AccSaber の /v1/maps/by-code を 1 件ずつ
+
+    AccSaber は小規模なので、まとめ取りできる BeatSaver 側へ寄せる。
     """
+    with _SONG_HASH_CACHE_LOCK:
+        known = _load_song_hash_by_code()
+
+    # まずキャッシュで埋め、残った未解決コードを集める
+    pending: Dict[str, List[dict]] = {}
     for song in songs:
         if song.get("songHash"):
             continue
         code = str(song.get("beatsaverCode") or "").strip()
         if not code:
+            continue
+        cached_hash = known.get(code)
+        if cached_hash:
+            song["songHash"] = cached_hash
+            continue
+        pending.setdefault(code, []).append(song)
+
+    if not pending:
+        return
+
+    fetched: Dict[str, str] = {}
+
+    # BeatSaver でまとめて解決する
+    resolved = _resolve_song_hashes_via_beatsaver(list(pending), session)
+    for code, song_hash in resolved.items():
+        for song in pending.get(code, []):
+            song["songHash"] = song_hash
+        fetched[code] = song_hash
+
+    # BeatSaver で解決できなかった分だけ AccSaber へ問い合わせる
+    for code, waiting in pending.items():
+        if code in fetched:
             continue
         try:
             full = _fetch_map_by_code(code, session)
@@ -576,7 +771,15 @@ def _backfill_missing_song_hashes(songs, session: requests.Session) -> None:
             continue
         song_hash = str(full.get("songHash") or "").strip()
         if song_hash:
-            song["songHash"] = song_hash
+            for song in waiting:
+                song["songHash"] = song_hash
+            fetched[code] = song_hash
+
+    if fetched:
+        with _SONG_HASH_CACHE_LOCK:
+            merged = _load_song_hash_by_code()
+            merged.update(fetched)
+            _save_song_hash_by_code(merged)
 
 
 def fetch_reloaded_map_counts(
@@ -584,56 +787,38 @@ def fetch_reloaded_map_counts(
 ) -> Dict[str, int]:
     """AccSaber Reloaded の各カテゴリのランク済み難易度数を取得してキャッシュする。
 
-    /v1/maps を全ページ取得し、各 difficulty の categoryId を数える。
-    (タイトル単位ではなく難易度単位でカウントするため全ページ走査が必要)
+    難易度一覧 (/v1/maps/difficulties) から各 difficulty の categoryId を数える。
     overall = true + standard + tech の合計で算出。
     取得失敗時はファイルキャッシュの前回値を使用。
     戻り値: {"true": N, "standard": N, "tech": N, "overall": N}
+
+    全マップキャッシュが新しい場合はそれを数えるだけで済ませ、API は叩かない。
     """
     if session is None:
         session = make_session()
 
-    # UUID → カテゴリ名 の逆引き辞書
-    _uuid_to_cat: Dict[str, str] = {v: k for k, v in _MAP_COUNT_CATEGORY_IDS.items()}
+    # キャッシュが十分新しいなら、そこから数えるだけでリクエストは不要
+    if _is_all_maps_cache_fresh():
+        cached_maps = load_all_maps_from_cache()
+        if cached_maps:
+            return _count_non_pending_map_counts(cached_maps)
 
     try:
-        page = 0
-        page_size = _PAGE_SIZE
-        all_maps: List[Dict] = []
-        while True:
-            resp = session.get(
-                f"{BASE_URL}/maps",
-                params={"page": page, "size": page_size},
-                timeout=30,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            all_maps.extend(data.get("content", []))
-            if data.get("last", True):
-                break
-            if page >= _MAX_PAGES_GUARD:
-                # 応答が終端を示さない場合でも暴走しないよう打ち切る
-                break
-            page += 1
-
-        _save_map_counts_from_all_maps(all_maps)
-
-        return _count_non_pending_map_counts(all_maps)
+        # /v1/maps は 500 を返し続けているため、難易度一覧から組み立てる。
+        # （同一セッション内では fetch_all_maps_full と結果を共有する）
+        all_maps = _fetch_all_maps_via_difficulties(session)
+        if all_maps:
+            _save_map_counts_from_all_maps(all_maps)
+            return _count_non_pending_map_counts(all_maps)
+        raise RuntimeError("difficulties から譜面数を取得できませんでした")
 
     except Exception as exc:  # noqa: BLE001
-        log_api_failure("accsaber_reloaded", "fetch_reloaded_map_counts", "request failed while fetching /maps pages", exc)
-        try:
-            all_maps = _fetch_all_maps_via_difficulties(session)
-            if all_maps:
-                _save_map_counts_from_all_maps(all_maps)
-                return _count_non_pending_map_counts(all_maps)
-        except Exception as diff_exc:  # noqa: BLE001
-            log_api_failure(
-                "accsaber_reloaded",
-                "fetch_reloaded_map_counts",
-                "difficulties fallback failed while fetching map counts",
-                diff_exc,
-            )
+        log_api_failure(
+            "accsaber_reloaded",
+            "fetch_reloaded_map_counts",
+            "failed to count maps via /maps/difficulties",
+            exc,
+        )
         try:
             batch_counts = _merge_file_cache_with_recent_batches(session)
             if batch_counts:
@@ -1251,8 +1436,12 @@ def fetch_player_skill_levels(
         cat = _SKILL_CODE_TO_CAT.get(str(entry.get("categoryCode") or ""))
         if not cat:
             continue
+        # None / 空文字 / 数値化できない値は未取得扱い（None）のままにする
+        raw_level = entry.get("skillLevel")
+        if raw_level is None or (isinstance(raw_level, str) and not raw_level.strip()):
+            continue
         try:
-            result[cat] = float(entry.get("skillLevel"))
+            result[cat] = float(raw_level)
         except (TypeError, ValueError):
             result[cat] = None
 
@@ -1284,66 +1473,17 @@ def fetch_all_maps_full(
 
     on_progress(current_page: int, total_pages: int) が指定されていれば各ページで呼び出す。
     RuntimeError を投げると取得を中断できる（キャンセル用）。
+
+    取得元は /v1/maps/difficulties（難易度単位のページング API）。
+    かつて使っていた /v1/maps は 2026-06-22 以降 INTERNAL_ERROR (500) を返し続けており、
+    AccSaber 自身のフロントエンドも getMaps を使わず getDifficulties に移行している。
+    毎回 500 を踏んでからフォールバックするのは無駄なリクエストなので、
+    最初から difficulties 経由で組み立てる。
     """
     if session is None:
         session = make_session()
 
-    all_maps: List[Dict] = []
-    page = 0
-    total_pages: Optional[int] = None
-    rate_limited = False
-
-    while True:
-        try:
-            resp = session.get(
-                f"{BASE_URL}/maps",
-                params={"page": page, "size": _PAGE_SIZE},
-                timeout=30,
-            )
-            if _is_rate_limited(resp, "fetch_all_maps_full", f"maps page={page}"):
-                # レート制限時に difficulties フォールバックへ流れると、
-                # 制限中のサーバへさらに全件クロールを掛けることになる。
-                # ここでは中断だけして、部分データをキャッシュへ焼き付けない。
-                rate_limited = True
-                break
-            resp.raise_for_status()
-            data = resp.json()
-        except Exception as exc:
-            log_api_failure("accsaber_reloaded", "fetch_all_maps_full", f"request failed page={page}", exc)
-            # /v1/maps が落ちている間は難易度一覧から組み立て直す。
-            try:
-                return _fetch_all_maps_via_difficulties(session, on_progress)
-            except RuntimeError:
-                raise  # on_progress からのキャンセルはそのまま伝える
-            except Exception as diff_exc:  # noqa: BLE001
-                log_api_failure(
-                    "accsaber_reloaded",
-                    "fetch_all_maps_full",
-                    "difficulties fallback failed while fetching all maps",
-                    diff_exc,
-                )
-            raise
-
-        all_maps.extend(data.get("content", []))
-
-        if total_pages is None:
-            total_pages = data.get("totalPages", 1)
-
-        if on_progress is not None:
-            on_progress(page + 1, total_pages)
-
-        if data.get("last", True):
-            break
-        if page >= _MAX_PAGES_GUARD:
-            # 応答が終端を示さない場合でも暴走しないよう打ち切る
-            break
-        page += 1
-
-    if rate_limited:
-        # 不完全な一覧をキャッシュへ保存させないため、失敗として扱う
-        raise RuntimeError("AccSaber APIのレート制限により全マップ取得を中断しました")
-
-    return all_maps
+    return _fetch_all_maps_via_difficulties(session, on_progress)
 
 
 def fetch_player_scored_diff_ids(
@@ -1416,7 +1556,28 @@ def fetch_and_save_all_maps_cache(
             "fetched_at": "2026-04-07T12:00:00Z",
             "maps": [...]
         }
+
+    キャッシュが十分新しい場合は API を叩かず、recent batch での前進だけを行う。
+    AccSaber の譜面追加は batch 単位（数日〜週次）なので、毎回の全件取得は不要。
     """
+    if _is_all_maps_cache_fresh():
+        # 新しいキャッシュがあるので全件取得はしない。
+        # 直近の batch 差分だけ取り込んで前進させる（数リクエストで済む）。
+        try:
+            if session is None:
+                session = make_session()
+            _merge_all_maps_with_recent_batches(session)
+        except Exception as exc:  # noqa: BLE001
+            log_api_failure(
+                "accsaber_reloaded",
+                "fetch_and_save_all_maps_cache",
+                "recent batch merge failed while cache was fresh",
+                exc,
+            )
+        if on_progress is not None:
+            on_progress(1, 1)
+        return
+
     try:
         all_maps = fetch_all_maps_full(session=session, on_progress=on_progress)
         _save_all_maps_cache(all_maps)

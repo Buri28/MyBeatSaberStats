@@ -18,10 +18,14 @@
 from __future__ import annotations
 
 import json
+import re
 import threading
 import time
+from contextlib import contextmanager
+from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 from urllib.parse import urlparse
 
 import requests
@@ -164,6 +168,222 @@ def _record_throttle(url: str) -> None:
         throttle_events[host] = throttle_events.get(host, 0) + 1
 
 
+# ---------------------------------------------------------------------------
+# リクエスト数の計測とログ出力
+# ---------------------------------------------------------------------------
+
+REQUEST_LOG_PATH = BASE_DIR / "logs" / "api_requests.log"
+
+
+@dataclass
+class HostStats:
+    """1 ホストへのリクエスト実績。"""
+
+    requests: int = 0          # 実際に送信した HTTP リクエスト数（リトライも 1 回と数える）
+    rate_limited: int = 0      # 429 / 503 を受けた回数
+    errors: int = 0            # 4xx / 5xx を受けた回数（404 を除く）
+    not_found: int = 0         # 404 の回数
+    wait_seconds: float = 0.0  # レート制御で待った合計秒数
+
+    def copy(self) -> "HostStats":
+        return HostStats(
+            requests=self.requests,
+            rate_limited=self.rate_limited,
+            errors=self.errors,
+            not_found=self.not_found,
+            wait_seconds=self.wait_seconds,
+        )
+
+    def diff(self, base: "HostStats") -> "HostStats":
+        return HostStats(
+            requests=self.requests - base.requests,
+            rate_limited=self.rate_limited - base.rate_limited,
+            errors=self.errors - base.errors,
+            not_found=self.not_found - base.not_found,
+            wait_seconds=self.wait_seconds - base.wait_seconds,
+        )
+
+
+#: (ホスト, "METHOD /path/template") をキーにした実績。
+_STATS: Dict[Tuple[str, str], HostStats] = {}
+_STATS_LOCK = threading.Lock()
+
+_UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
+_HEX_RE = re.compile(r"^[0-9a-f]{32,}$", re.I)
+
+
+def _host_of(url: str) -> str:
+    return (urlparse(str(url)).hostname or "unknown").lower()
+
+
+def _normalize_segment(segment: str) -> str:
+    """パスの 1 セグメントを、可変部分ならプレースホルダへ置き換える。"""
+    if not segment:
+        return segment
+    if segment.isdigit():
+        # プレイヤー ID・ページ番号など
+        return "{id}"
+    if _UUID_RE.match(segment):
+        # AccSaber のカテゴリ UUID・難易度 UUID など
+        return "{uuid}"
+    if "," in segment:
+        # 一括指定（BeatSaver の /maps/hash/{h1},{h2},... や /maps/ids/{id1},{id2},...）。
+        # 個々の値をそのまま出すとログが極端に長くなるため必ず潰す。
+        parts = [p for p in segment.split(",") if p]
+        if parts and all(_HEX_RE.match(p) for p in parts):
+            return "{hashes}"
+        return "{ids}"
+    if _HEX_RE.match(segment):
+        # 譜面ハッシュ（40 桁 hex など）
+        return "{hash}"
+    return segment
+
+
+def _endpoint_of(method: str, url: str) -> str:
+    """URL を "GET /users/{id}/milestones" のような識別子へ正規化する。
+
+    プレイヤー ID・UUID・譜面ハッシュといった可変部分をプレースホルダに
+    置き換えることで、同じエンドポイントへの呼び出しをまとめて数えられる。
+    クエリ文字列（page など）は落とす。
+    """
+    path = urlparse(str(url)).path or "/"
+
+    segments: list[str] = []
+    for raw in path.split("/"):
+        # 直前が "by-code" / "hash" なら、続く値は必ず可変部分（数字でも hex でもない
+        # BeatSaver コードなど）なのでプレースホルダに潰す
+        if segments and segments[-1] in ("by-code", "code", "key"):
+            segments.append("{code}")
+            continue
+        if segments and segments[-1] == "ids":
+            segments.append("{ids}")
+            continue
+        segments.append(_normalize_segment(raw))
+
+    normalized = "/".join(segments) or "/"
+    return f"{method.upper()} {normalized}"
+
+
+def _record_request(host: str, endpoint: str, status_code: Optional[int], waited: float) -> None:
+    with _STATS_LOCK:
+        stats = _STATS.setdefault((host, endpoint), HostStats())
+        stats.requests += 1
+        stats.wait_seconds += waited
+        if status_code is None:
+            stats.errors += 1
+        elif status_code in (429, 503):
+            stats.rate_limited += 1
+        elif status_code == 404:
+            stats.not_found += 1
+        elif status_code >= 400:
+            stats.errors += 1
+
+
+def get_request_stats() -> Dict[Tuple[str, str], HostStats]:
+    """(ホスト, エンドポイント) 別のリクエスト実績のスナップショットを返す。"""
+    with _STATS_LOCK:
+        return {key: stats.copy() for key, stats in _STATS.items()}
+
+
+def reset_request_stats() -> None:
+    """カウンタを 0 に戻す。"""
+    with _STATS_LOCK:
+        _STATS.clear()
+
+
+def _notes_for(s: HostStats) -> str:
+    notes = []
+    if s.rate_limited:
+        notes.append(f"429/503 {s.rate_limited} 回")
+    if s.errors:
+        notes.append(f"エラー {s.errors} 回")
+    if s.not_found:
+        notes.append(f"404 {s.not_found} 回")
+    return " ※" + ", ".join(notes) if notes else ""
+
+
+def format_request_summary(
+    label: str,
+    stats: Dict[Tuple[str, str], HostStats],
+    elapsed: Optional[float] = None,
+) -> str:
+    """ホスト別・エンドポイント別のリクエスト数を 1 つの文字列に整形する。"""
+    active = {key: s for key, s in stats.items() if s.requests > 0}
+    total = sum(s.requests for s in active.values())
+
+    header = f"[{datetime.now().isoformat(timespec='seconds')}] {label}: 合計 {total} リクエスト"
+    if elapsed is not None:
+        header += f" / {elapsed:.1f}秒"
+    if not active:
+        return header + "（リクエストなし）"
+
+    # ホスト単位に畳んだ合計を作る
+    per_host: Dict[str, HostStats] = {}
+    per_host_endpoints: Dict[str, Dict[str, HostStats]] = {}
+    for (host, endpoint), s in active.items():
+        agg = per_host.setdefault(host, HostStats())
+        agg.requests += s.requests
+        agg.rate_limited += s.rate_limited
+        agg.errors += s.errors
+        agg.not_found += s.not_found
+        agg.wait_seconds += s.wait_seconds
+        per_host_endpoints.setdefault(host, {})[endpoint] = s
+
+    lines = [header]
+    # 多く叩いた API から順に並べ、その下にエンドポイント内訳を出す
+    for host, s in sorted(per_host.items(), key=lambda kv: kv[1].requests, reverse=True):
+        detail = f"  {host}: {s.requests} 回"
+        if s.wait_seconds >= 0.05:
+            detail += f" (レート制御待ち {s.wait_seconds:.1f}秒)"
+        lines.append(detail + _notes_for(s))
+
+        endpoints = per_host_endpoints.get(host, {})
+        for endpoint, es in sorted(endpoints.items(), key=lambda kv: kv[1].requests, reverse=True):
+            lines.append(f"    {endpoint}: {es.requests} 回" + _notes_for(es))
+    return "\n".join(lines)
+
+
+def log_request_summary(
+    label: str,
+    stats: Dict[Tuple[str, str], HostStats],
+    elapsed: Optional[float] = None,
+) -> None:
+    """サマリをコンソールと logs/api_requests.log の両方へ出力する。"""
+    summary = format_request_summary(label, stats, elapsed)
+    print(summary)
+    try:
+        REQUEST_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with REQUEST_LOG_PATH.open("a", encoding="utf-8") as fh:
+            fh.write(summary + "\n")
+    except Exception:
+        pass
+
+
+@contextmanager
+def request_scope(label: str):
+    """一連の API 呼び出しを囲み、抜けるときにホスト別リクエスト数をログへ出す。
+
+    使い方::
+
+        with request_scope("スナップショット取得"):
+            ...  # この中の全リクエストが集計される
+
+    ワーカースレッドから出たリクエストも含めて数えられるよう、グローバルな
+    カウンタの差分で集計する。例外で抜けた場合もサマリは出力する。
+    """
+    before = get_request_stats()
+    started = time.monotonic()
+    try:
+        yield
+    finally:
+        after = get_request_stats()
+        delta = {
+            key: stats.diff(before.get(key, HostStats()))
+            for key, stats in after.items()
+        }
+        log_request_summary(label, delta, elapsed=time.monotonic() - started)
+
+
 class PoliteSession(requests.Session):
     """ホスト単位でレート制限と 429 リトライを行う ``requests.Session``。
 
@@ -179,12 +399,24 @@ class PoliteSession(requests.Session):
             kwargs["timeout"] = self.default_timeout
 
         policy = _policy_for(str(url))
+        host = _host_of(url)
+        endpoint = _endpoint_of(method, url)
         policy.acquire_slot()
         try:
             last_resp: Optional[requests.Response] = None
             for attempt in range(1, policy.max_retries + 1):
+                wait_started = time.monotonic()
                 policy.wait_turn()
-                resp = super().request(method, url, **kwargs)
+                waited = time.monotonic() - wait_started
+
+                try:
+                    resp = super().request(method, url, **kwargs)
+                except Exception:
+                    # 接続エラーなども「投げたリクエスト」として記録する
+                    _record_request(host, endpoint, None, waited)
+                    raise
+
+                _record_request(host, endpoint, resp.status_code, waited)
 
                 if resp.status_code not in (429, 503):
                     return resp

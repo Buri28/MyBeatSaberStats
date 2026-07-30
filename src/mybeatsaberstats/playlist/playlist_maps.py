@@ -10,7 +10,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 import requests
 
 from ..beatsaver_cache import BEATSAVER_API_BASE
-from ..http_client import make_session
+from ..http_client import make_session, request_scope
 from ..playlist_view import (
     MapEntry,
     _CACHE_DIR,
@@ -379,6 +379,45 @@ def load_bplist_maps(
 
 
 def load_beatsaver_maps(
+    steam_id: Optional[str] = None,
+    query: str = "",
+    days: int = 7,
+    min_rating: float = 0.0,
+    min_votes: int = 0,
+    max_maps: Optional[int] = None,
+    from_dt: Optional[datetime] = None,
+    to_dt: Optional[datetime] = None,
+    unranked_only: bool = True,
+    exclude_ai: bool = True,
+    on_progress: Optional[Callable[[int, int, str], None]] = None,
+    on_batch: Optional[Callable[[List[MapEntry]], None]] = None,
+    session: Optional[requests.Session] = None,
+    bl_lookup_workers: int = 4,
+) -> List[MapEntry]:
+    """BeatSaver 検索を実行し、API 別のリクエスト数をログへ出力する。
+
+    実処理は :func:`_load_beatsaver_maps` に委譲する。
+    """
+    with request_scope(f"Maps 検索 query={query!r}"):
+        return _load_beatsaver_maps(
+            steam_id=steam_id,
+            query=query,
+            days=days,
+            min_rating=min_rating,
+            min_votes=min_votes,
+            max_maps=max_maps,
+            from_dt=from_dt,
+            to_dt=to_dt,
+            unranked_only=unranked_only,
+            exclude_ai=exclude_ai,
+            on_progress=on_progress,
+            on_batch=on_batch,
+            session=session,
+            bl_lookup_workers=bl_lookup_workers,
+        )
+
+
+def _load_beatsaver_maps(
     steam_id: Optional[str] = None,
     query: str = "",
     days: int = 7,
