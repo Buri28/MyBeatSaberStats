@@ -9,6 +9,7 @@ import requests
 
 from .snapshot import BASE_DIR
 from .http_client import make_session
+from .api_error_log import log_api_failure
 
 _CACHE_PATH = BASE_DIR / "cache" / "beatsaver_map_details.json"
 _BEATSAVER_REQUEST_TIMEOUT = (3, 10)
@@ -87,6 +88,12 @@ def _merge_meta_entry(existing: dict, incoming: dict) -> dict:
     for key, value in incoming.items():
         if key == "hash":
             continue
+        if isinstance(value, bool):
+            # Python では False == 0 なので、下の falsy 判定に入れると
+            # beatsaver_curated / beatsaver_verified_mapper の False が
+            # 「未設定」と誤判定されて書き込まれない。bool は常に採用する。
+            merged[key] = value
+            continue
         if value in (None, "", 0, 0.0):
             continue
         merged[key] = value
@@ -121,10 +128,27 @@ def _meta_from_map_payload(payload: dict, fallback_hash: str = "", fallback_key:
         return None
 
     versions = payload.get("versions") or []
-    version = next(
-        (item for item in versions if isinstance(item, dict) and (item.get("hash") or item.get("key"))),
-        versions[0] if versions and isinstance(versions[0], dict) else {},
-    )
+    # 譜面が再アップロードされていると versions に複数版が並ぶ。
+    # 先頭を無条件に採る（旧実装）と、要求した hash とは別バージョンの
+    # downloadURL / coverURL がそのハッシュのエントリに書き込まれ、
+    # ワンクリックダウンロードが意図しない版を落としてしまう。
+    # 要求ハッシュと一致する版があれば必ずそれを使う。
+    wanted_hash = _normalize_hash(fallback_hash)
+    version = None
+    if wanted_hash:
+        version = next(
+            (
+                item
+                for item in versions
+                if isinstance(item, dict) and _normalize_hash(item.get("hash")) == wanted_hash
+            ),
+            None,
+        )
+    if version is None:
+        version = next(
+            (item for item in versions if isinstance(item, dict) and (item.get("hash") or item.get("key"))),
+            versions[0] if versions and isinstance(versions[0], dict) else {},
+        )
     metadata = payload.get("metadata") or {}
     stats = payload.get("stats") or {}
     song_hash = _normalize_hash(version.get("hash") or fallback_hash)
@@ -223,7 +247,15 @@ def _fetch_beatsaver_maps_by_hashes(
             return {}
         resp.raise_for_status()
         payload = resp.json()
-    except Exception:
+    except Exception as exc:  # noqa: BLE001
+        # まとめ取りなので 1 回の失敗で最大 50 件が欠ける。
+        # 黙って捨てると「なぜかカバーが出ない」状態の原因が追えないため記録する。
+        log_api_failure(
+            "beatsaver",
+            "_fetch_beatsaver_maps_by_hashes",
+            f"bulk hash lookup failed hashes={len(normalized)}",
+            exc,
+        )
         return {}
 
     results: Dict[str, dict] = {}
@@ -316,8 +348,13 @@ def update_beatsaver_meta_cache(
                 elif song_hash in normalized_seeds:
                     seeded = _seed_meta_from_hash_and_key(song_hash, normalized_seeds[song_hash])
                     if seeded is not None:
-                        cache[song_hash] = seeded
-                        updated = True
+                        # シードは中身が空の骨組みなので、素で代入すると既存の
+                        # カバー URL や曲名を消してしまう。必ずマージすること
+                        # （バッチ取得が 1 回失敗すると最大 50 件が巻き添えになる）。
+                        merged = _merge_meta_entry(cache.get(song_hash) or {}, seeded)
+                        if merged != cache.get(song_hash):
+                            cache[song_hash] = merged
+                            updated = True
                 done += 1
                 if on_progress is not None:
                     on_progress(done, total)
