@@ -101,7 +101,7 @@ from .settings_store import (
     save_playlist_export_dir as _save_playlist_export_dir_setting,
 )
 from .theme import detect_system_dark, is_dark, table_stylesheet
-from .http_client import make_session
+from .http_client import make_session, get_shared_session as _get_shared_session
 
 
 class _SwapSortArrowStyle(QProxyStyle):
@@ -6864,7 +6864,7 @@ class PlaylistWindow(QMainWindow):
 
         def _task() -> None:
             try:
-                resp = requests.get(cover_url, timeout=10)
+                resp = _get_shared_session().get(cover_url, timeout=10, headers={"Accept": "*/*"})
                 resp.raise_for_status()
                 self._preview_signals.loaded.emit(token, cover_url, resp.content)
             except Exception as exc:  # noqa: BLE001
@@ -6990,7 +6990,9 @@ class PlaylistWindow(QMainWindow):
 
             def _task() -> None:
                 try:
-                    resp = requests.get(url, timeout=10)
+                    # サムネイルは一覧の行数だけ並列に飛ぶため、
+                    # CDN への同時接続数を http_client 側で抑える
+                    resp = _get_shared_session().get(url, timeout=10, headers={"Accept": "*/*"})
                     resp.raise_for_status()
                     self._thumbnail_signals.loaded.emit(url, resp.content)
                 except Exception as exc:  # noqa: BLE001
@@ -7246,7 +7248,7 @@ class PlaylistWindow(QMainWindow):
         target_dir = custom_levels_dir / self._build_beatsaver_folder_name(entry)
         try:
             custom_levels_dir.mkdir(parents=True, exist_ok=True)
-            response = requests.get(download_url, timeout=60)
+            response = _get_shared_session().get(download_url, timeout=60, headers={"Accept": "*/*"})
             response.raise_for_status()
 
             with tempfile.TemporaryDirectory(prefix="mbss_bsdl_") as tmp_dir_str:

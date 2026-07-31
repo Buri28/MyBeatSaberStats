@@ -45,6 +45,7 @@ from PySide6.QtCore import QUrl
 from .snapshot import Snapshot, SNAPSHOT_DIR, BASE_DIR, RESOURCES_DIR, StarClearStat, resource_path
 from .theme import table_stylesheet, toggle as _toggle_theme, is_dark, label_cell_color, label_cell_text_color, init_theme as _init_theme, button_label as _theme_button_label, current_theme_mode as _current_theme_mode, set_theme_mode as _set_theme_mode
 from .updater import StartupUpdateChecker, get_current_version
+from .http_client import get_shared_session as _get_shared_session
 from .accsaber_reloaded import fetch_all_maps_full as _rl_fetch_all_maps
 from .accsaber_reloaded import build_unplayed_bplist as _rl_build_unplayed_bplist
 from .accsaber_reloaded import fetch_player_all_categories as _rl_fetch_player
@@ -1251,9 +1252,9 @@ class RemotePixmapLabel(QLabel):
 
     def _fetch(self, request_id: int, url: str) -> None:
         try:
-            import requests as _requests
-
-            response = _requests.get(url, timeout=8)
+            # 直接 requests.get すると User-Agent もレート制御も付かないため、
+            # 共有セッション（http_client）経由で投げる。
+            response = _get_shared_session().get(url, timeout=8, headers={"Accept": "*/*"})
             response.raise_for_status()
             self._signals.fetched.emit(request_id, url, response.content)
         except Exception:
@@ -1325,7 +1326,8 @@ class EventsPanel(QWidget):
     # --- 取得 ---
 
     def _fetch(self) -> None:
-        import requests as _requests
+        # User-Agent とホスト単位のレート制御を効かせるため共有セッションを使う
+        _requests = _get_shared_session()
 
         acc_event: Optional[dict] = None
         bl_event: Optional[dict] = None
@@ -1456,7 +1458,8 @@ class PlayerAvatarWidget(QLabel):
 
     def _fetch(self, service: str, player_id: str) -> None:
         try:
-            import requests as _requests
+            # User-Agent とホスト単位のレート制御を効かせるため共有セッションを使う
+            _requests = _get_shared_session()
             if service == "ss":
                 url = f"https://scoresaber.com/api/player/{player_id}/basic"
                 r = _requests.get(url, timeout=8)
@@ -1469,7 +1472,7 @@ class PlayerAvatarWidget(QLabel):
                 img_url = r.json().get("avatar", "")
             if not img_url:
                 return
-            img_r = _requests.get(img_url, timeout=8)
+            img_r = _requests.get(img_url, timeout=8, headers={"Accept": "*/*"})
             img_r.raise_for_status()
             self._signals.fetched.emit(service, img_r.content)
         except Exception:

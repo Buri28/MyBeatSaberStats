@@ -39,7 +39,7 @@ from ..accsaber_reloaded import fetch_player_skill_levels as _fetch_accsaber_rel
 from ..accsaber_reloaded import fetch_player_highest_title as _fetch_accsaber_reloaded_title
 from ..accsaber_reloaded import download_title_icon as _download_accsaber_reloaded_title_icon
 from ..accsaber_reloaded import fetch_player_level_title as _fetch_accsaber_reloaded_level_title
-from ..accsaber_reloaded import fetch_reloaded_map_counts as _fetch_reloaded_map_counts
+from ..accsaber_reloaded import get_reloaded_map_counts_from_cache as _get_rl_map_counts_cached
 from ..accsaber_reloaded import fetch_and_save_all_maps_cache as _fetch_and_save_rl_maps
 from ..accsaber_reloaded import fetch_and_save_player_scores_cache as _fetch_and_save_rl_player_scores
 from ..accsaber_reloaded import compute_effective_played_counts_from_cache as _compute_rl_effective_played_counts
@@ -1253,14 +1253,23 @@ def _create_snapshot_for_steam_id(
     accsaber_reloaded_true_total_maps: Optional[int] = None
     accsaber_reloaded_standard_total_maps: Optional[int] = None
     accsaber_reloaded_tech_total_maps: Optional[int] = None
+    def _apply_rl_map_counts(counts: Dict[str, int]) -> None:
+        """取得した総譜面数をスナップショット用の変数へ反映する。"""
+        nonlocal accsaber_reloaded_overall_total_maps, accsaber_reloaded_true_total_maps
+        nonlocal accsaber_reloaded_standard_total_maps, accsaber_reloaded_tech_total_maps
+        if not counts:
+            return
+        accsaber_reloaded_overall_total_maps = counts.get("overall")
+        accsaber_reloaded_true_total_maps = counts.get("true")
+        accsaber_reloaded_standard_total_maps = counts.get("standard")
+        accsaber_reloaded_tech_total_maps = counts.get("tech")
+
     if options.fetch_accsaber_reloaded:
-        # AccSaber (Reloaded) 総譜面数を更新する（accsaber_reloaded_map_counts.json）
+        # AccSaber (Reloaded) 総譜面数の暫定値をキャッシュから読む（API は叩かない）。
+        # 全マップキャッシュを更新した後に読み直して上書きするので、ここは
+        # 「マップキャッシュ更新まで到達できなかった場合」の保険。
         try:
-            _rl_map_counts = _fetch_reloaded_map_counts(session=session)
-            accsaber_reloaded_overall_total_maps = _rl_map_counts.get("overall")
-            accsaber_reloaded_true_total_maps = _rl_map_counts.get("true")
-            accsaber_reloaded_standard_total_maps = _rl_map_counts.get("standard")
-            accsaber_reloaded_tech_total_maps = _rl_map_counts.get("tech")
+            _apply_rl_map_counts(_get_rl_map_counts_cached())
         except Exception:  # noqa: BLE001
             pass
 
@@ -1407,6 +1416,18 @@ def _create_snapshot_for_steam_id(
             _fetch_and_save_rl_maps(session=session)
         except Exception as exc:  # noqa: BLE001
             _rethrow_if_cancelled(exc)
+
+        # 総譜面数はここで読み直す。
+        # 新譜面は _fetch_and_save_rl_maps が batch 差分として取り込み、
+        # 同時に accsaber_reloaded_map_counts.json も更新している。
+        # 先に読んでしまうと分母が常に「1 回前の実行の値」になり、
+        # 新譜が来た直後に分子 > 分母になってしまう。
+        # ファイルを読むだけなので追加の API 発行は無い。
+        try:
+            _apply_rl_map_counts(_get_rl_map_counts_cached())
+        except Exception as exc:  # noqa: BLE001
+            _rethrow_if_cancelled(exc)
+
         # AccSaber Reloaded プレイヤースコアをキャッシュに保存する
         try:
             _step(0.66, "Fetching AccSaber Reloaded player scores for cache...")

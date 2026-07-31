@@ -66,7 +66,9 @@ class _HostPolicy:
 
     def __init__(self, min_interval: float, max_concurrency: int, max_retries: int = 3) -> None:
         self.min_interval = min_interval
-        self.max_retries = max_retries
+        # 0 以下だと request() のリトライループが 1 度も回らず、
+        # 返すべきレスポンスが未束縛になるため必ず 1 以上にする。
+        self.max_retries = max(1, max_retries)
         self._semaphore = threading.Semaphore(max_concurrency)
         self._lock = threading.Lock()
         self._next_allowed = 0.0
@@ -78,7 +80,12 @@ class _HostPolicy:
         self._semaphore.release()
 
     def wait_turn(self) -> None:
-        """最小間隔（およびクールダウン）を満たすまで待つ。"""
+        """最小間隔（およびクールダウン）を満たすまで待つ。
+
+        429 由来のクールダウンはサーバから指示された待ち時間なので、
+        ここでは必ず最後まで待つ（打ち切って投げると事態を悪化させるため）。
+        「粘りすぎ」の抑制は呼び出し側のリトライ予算で行う。
+        """
         while True:
             with self._lock:
                 now = time.monotonic()
@@ -394,6 +401,12 @@ class PoliteSession(requests.Session):
     #: timeout 未指定の呼び出しに適用する既定値 (connect, read)
     default_timeout = (5, 15)
 
+    #: 1 回の request() が 429/503 のバックオフに費やしてよい合計秒数。
+    #: これが無いと max_retries=4 × Retry-After 60 秒 = 最悪 240 秒、
+    #: 1 本の呼び出しが戻ってこない（スナップショット取得が止まって見える）。
+    #: 予算を超えたらリトライを諦め、429 のレスポンスをそのまま呼び出し元へ返す。
+    max_retry_wait = 45.0
+
     def request(self, method, url, **kwargs):  # type: ignore[override]
         if kwargs.get("timeout") is None:
             kwargs["timeout"] = self.default_timeout
@@ -401,10 +414,16 @@ class PoliteSession(requests.Session):
         policy = _policy_for(str(url))
         host = _host_of(url)
         endpoint = _endpoint_of(method, url)
-        policy.acquire_slot()
-        try:
-            last_resp: Optional[requests.Response] = None
-            for attempt in range(1, policy.max_retries + 1):
+
+        last_resp: Optional[requests.Response] = None
+        backoff_budget = self.max_retry_wait
+
+        for attempt in range(1, policy.max_retries + 1):
+            # スロットは 1 回の送信ごとに取り直す。
+            # バックオフの待機中まで握り続けると、同じホスト宛の他スレッドが
+            # （クールダウンとは別に）同時接続枠の空きを待たされてしまう。
+            policy.acquire_slot()
+            try:
                 wait_started = time.monotonic()
                 policy.wait_turn()
                 waited = time.monotonic() - wait_started
@@ -417,23 +436,32 @@ class PoliteSession(requests.Session):
                     raise
 
                 _record_request(host, endpoint, resp.status_code, waited)
+            finally:
+                policy.release_slot()
 
-                if resp.status_code not in (429, 503):
-                    return resp
+            if resp.status_code not in (429, 503):
+                return resp
 
-                _record_throttle(str(url))
-                wait = _retry_after_seconds(resp, attempt)
-                # このホスト宛の他スレッドのリクエストもまとめて止める
-                policy.penalize(wait)
-                last_resp = resp
-                if attempt >= policy.max_retries:
-                    break
-                resp.close()
-            # リトライを使い切った場合は最後のレスポンスを返し、
-            # 判断（エラー扱いにするか）は呼び出し元に委ねる。
-            return last_resp if last_resp is not None else resp
-        finally:
-            policy.release_slot()
+            _record_throttle(str(url))
+            wait = _retry_after_seconds(resp, attempt)
+            # このホスト宛の他スレッドのリクエストもまとめて止める。
+            # 待つのを諦める場合でも、サーバの指示は必ず全体へ反映させる。
+            policy.penalize(wait)
+
+            if last_resp is not None:
+                last_resp.close()
+            last_resp = resp
+
+            if attempt >= policy.max_retries:
+                break
+            if wait > backoff_budget:
+                # これ以上粘ると呼び出し元を長時間止めてしまう
+                break
+            backoff_budget -= wait
+
+        # リトライを使い切った / 予算切れの場合は最後のレスポンスを返し、
+        # 判断（エラー扱いにするか）は呼び出し元に委ねる。
+        return last_resp if last_resp is not None else resp
 
 
 def make_session(extra_headers: Optional[Dict[str, str]] = None) -> PoliteSession:
