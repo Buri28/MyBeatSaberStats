@@ -21,6 +21,7 @@ import json
 import re
 import threading
 import time
+import weakref
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
@@ -462,6 +463,34 @@ class PoliteSession(requests.Session):
         # リトライを使い切った / 予算切れの場合は最後のレスポンスを返し、
         # 判断（エラー扱いにするか）は呼び出し元に委ねる。
         return last_resp if last_resp is not None else resp
+
+
+_GET_MEMO: "weakref.WeakKeyDictionary[requests.Session, Dict[str, Tuple[float, requests.Response]]]" = weakref.WeakKeyDictionary()
+_GET_MEMO_LOCK = threading.Lock()
+
+
+def get_memoized(session: requests.Session, url: str, ttl: float = 120.0, **kwargs) -> requests.Response:
+    """同じセッション・同じ URL の成功した GET 応答を ttl 秒だけ使い回す。
+
+    スナップショット 1 回の中で、プレイヤー情報（/player/{id} など）を基本情報・統計・スコア取得の
+    それぞれが取りに行き、同じ URL を 2〜3 回叩いていた。その重複を無くすためのもの。
+    200 以外の応答は覚えない（一時的な失敗を固定しないため）。
+    """
+    now = time.monotonic()
+    with _GET_MEMO_LOCK:
+        per_session = _GET_MEMO.get(session)
+        hit = per_session.get(url) if per_session else None
+    if hit is not None and now - hit[0] < ttl:
+        return hit[1]
+    resp = session.get(url, **kwargs)
+    if resp.status_code == 200:
+        try:
+            with _GET_MEMO_LOCK:
+                _GET_MEMO.setdefault(session, {})[url] = (now, resp)
+        except TypeError:
+            # weakref を張れないセッション実装（テストのフェイクなど）は覚えない
+            pass
+    return resp
 
 
 def make_session(extra_headers: Optional[Dict[str, str]] = None) -> PoliteSession:

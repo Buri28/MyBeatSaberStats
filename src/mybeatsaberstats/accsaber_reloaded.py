@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -14,6 +15,7 @@ from .api_error_log import log_api_failure
 from .beatsaver_cache import BEATSAVER_API_BASE
 from .snapshot import BASE_DIR
 from .http_client import make_session
+from .fileio import atomic_write_bytes, atomic_write_text
 
 BASE_URL = "https://api.accsaberreloaded.com/v1"
 
@@ -155,7 +157,7 @@ def _save_map_counts_file_cache(per_cat: Dict[str, Dict]) -> None:
         data: Dict = {"fetched_at": now_z}
         data.update(per_cat)
         _MAP_COUNTS_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        _MAP_COUNTS_CACHE_FILE.write_text(
+        atomic_write_text(_MAP_COUNTS_CACHE_FILE, 
             json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
         )
     except Exception:  # noqa: BLE001
@@ -189,12 +191,19 @@ def _load_all_maps_cache_payload() -> Dict:
     return {}
 
 
-def _save_all_maps_cache(all_maps: List[Dict], fetched_at: Optional[str] = None) -> None:
-    """全マップキャッシュを保存し、総譜面数キャッシュも同期する。"""
+def _save_all_maps_cache(
+    all_maps: List[Dict], fetched_at: Optional[str] = None, batches_merged_at: Optional[str] = None,
+) -> None:
+    """全マップキャッシュを保存し、総譜面数キャッシュも同期する。
+
+    batches_merged_at: recent batch をここまで取り込んだ時刻（次はこれ以降の batch だけ見る）。
+    """
     now_z = fetched_at or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     data = {"fetched_at": now_z, "maps": all_maps}
+    if batches_merged_at:
+        data["batches_merged_at"] = batches_merged_at
     _ALL_MAPS_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    _ALL_MAPS_CACHE_FILE.write_text(
+    atomic_write_text(_ALL_MAPS_CACHE_FILE, 
         json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     _save_map_counts_from_all_maps(all_maps)
@@ -371,10 +380,17 @@ def _fetch_map_by_code(
     return result
 
 
+# recent batch の確認は、アプリを開いている間はこの間隔より頻繁にしない。
+# 以前はプレイリストの読み込み・スナップショットの復元のたびに API を呼んでいた。
+_RECENT_BATCH_CHECK_INTERVAL_SEC = 600.0
+_recent_batch_checked_at: float = 0.0
+
+
 def _merge_all_maps_with_recent_batches(
     session: requests.Session,
 ) -> Optional[List[Dict]]:
     """全マップキャッシュを recent batch で前進させる。"""
+    global _recent_batch_checked_at
     payload = _load_all_maps_cache_payload()
     if not isinstance(payload, dict):
         return None
@@ -383,8 +399,16 @@ def _merge_all_maps_with_recent_batches(
     fetched_at = _parse_utc_timestamp(payload.get("fetched_at"))
     if not isinstance(cached_maps, list) or fetched_at is None:
         return None
+    # 前回 batch を取り込んだ時刻があれば、そこから先だけを見る
+    merged_at = _parse_utc_timestamp(payload.get("batches_merged_at"))
+    since = max(fetched_at, merged_at) if merged_at is not None else fetched_at
 
-    recent_batches = _iter_recent_batches_since(fetched_at, session)
+    now_mono = time.monotonic()
+    if _recent_batch_checked_at and now_mono - _recent_batch_checked_at < _RECENT_BATCH_CHECK_INTERVAL_SEC:
+        return cached_maps
+    _recent_batch_checked_at = now_mono
+
+    recent_batches = _iter_recent_batches_since(since, session)
     if not recent_batches:
         return cached_maps
 
@@ -416,9 +440,11 @@ def _merge_all_maps_with_recent_batches(
         merged_by_map_id[key] = song
 
     changed = False
+    all_fetched = True
     for code in recent_codes:
         full_map = _fetch_map_by_code(code, session)
         if not isinstance(full_map, dict):
+            all_fetched = False
             continue
         key = str(full_map.get("id") or full_map.get("mapId") or full_map.get("beatsaverCode") or "").strip()
         if not key:
@@ -432,6 +458,14 @@ def _merge_all_maps_with_recent_batches(
     merged_maps = [merged_by_map_id[key] for key in ordered_keys if key in merged_by_map_id]
     if changed:
         _save_all_maps_cache(merged_maps)
+    elif all_fetched:
+        # 中身は同じでも、batch を取り込んだ時刻だけは記録する。記録しないと、同じ batch の譜面を
+        # 次も by-code で取り直してしまう。fetched_at（24 時間ごとの全件取得の判定）は進めない。
+        _save_all_maps_cache(
+            merged_maps,
+            fetched_at=str(payload.get("fetched_at")),
+            batches_merged_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        )
     return merged_maps
 
 
@@ -646,7 +680,7 @@ def _save_song_hash_by_code(entries: Dict[str, str]) -> None:
     }
     try:
         _SONG_HASH_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        _SONG_HASH_CACHE_FILE.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        atomic_write_text(_SONG_HASH_CACHE_FILE, json.dumps(payload, ensure_ascii=False), encoding="utf-8")
     except Exception:  # noqa: BLE001
         pass
 
@@ -922,6 +956,20 @@ def fetch_user_profile(
     return profile
 
 
+def _entry_user_id(entry: Dict) -> str:
+    """リーダーボードの 1 行からプレイヤー ID を取り出す。
+
+    カテゴリ別リーダーボードは `userId`、XP リーダーボードは `player.id`（入れ子）。
+    XP 側は以前 `userId` だったが、2026-10-28 に確かめた時点では `player.id` になっていた。
+    """
+    user_id = entry.get("userId")
+    if user_id is None:
+        player = entry.get("player")
+        if isinstance(player, dict):
+            user_id = player.get("id")
+    return str(user_id) if user_id is not None else ""
+
+
 def _find_entry_by_search(
     url: str,
     player_id: str,
@@ -966,7 +1014,7 @@ def _find_entry_by_search(
             return None
 
         for entry in content:
-            if isinstance(entry, dict) and str(entry.get("userId", "")) == player_id:
+            if isinstance(entry, dict) and _entry_user_id(entry) == player_id:
                 return entry
 
         if data.get("last", True):
@@ -1047,7 +1095,7 @@ def _search_in_leaderboard(
         for entry in content:
             if not isinstance(entry, dict):
                 continue
-            if str(entry.get("userId", "")) == player_id:
+            if _entry_user_id(entry) == player_id:
                 return _entry_to_player(player_id, entry)
 
         # 最終ページなら終了
@@ -1100,10 +1148,10 @@ def fetch_player_all_categories(
 
 @dataclass
 class AccSaberReloadedXP:
-    xp: float
+    xp: Optional[float]  # XP リーダーボードからしか取れない。プロフィールで補ったときは None
     level: int
-    rank_global: int
-    rank_country: int
+    rank_global: Optional[int]
+    rank_country: Optional[int]
 
 
 def fetch_player_xp(
@@ -1114,11 +1162,11 @@ def fetch_player_xp(
     """プレイヤーの XP・レベル・XP ランクを取得する。
 
     /v1/leaderboards/xp から対象プレイヤーを探して AccSaberReloadedXP を返す。
-    見つからない場合は None。
 
     まず名前で `search` 絞り込みを試し、駄目なら country フィルターで全走査する。
-    （totalXp は /v1/users/{id} には含まれずこのリーダーボードにしか無いため、
-    プロフィール取得だけでは代替できない）
+    それでも見つからなければ、プロフィール（/v1/users/{id}）のレベルと XP 順位で補う。
+    totalXp はこのリーダーボードにしか無いので、補ったときの xp は None。
+    プロフィールも取れなければ None。
     """
     if not player_id:
         return None
@@ -1164,7 +1212,7 @@ def fetch_player_xp(
         for entry in content:
             if not isinstance(entry, dict):
                 continue
-            if str(entry.get("userId", "")) == player_id:
+            if _entry_user_id(entry) == player_id:
                 try:
                     return AccSaberReloadedXP(
                         xp=float(entry.get("totalXp", 0.0)),
@@ -1182,7 +1230,31 @@ def fetch_player_xp(
             break
         page += 1
 
-    return None
+    return _xp_from_profile(profile)
+
+
+def _xp_from_profile(profile: Optional[Dict]) -> Optional[AccSaberReloadedXP]:
+    """XP リーダーボードで見つからないとき、プロフィールのレベルと XP 順位で補う。
+
+    プロフィールには totalXp が無いので xp は None になる。
+    """
+    if not isinstance(profile, dict):
+        return None
+    level_data = profile.get("levelData")
+    if not isinstance(level_data, dict):
+        return None
+    def _opt_int(value: object) -> Optional[int]:
+        try:
+            return int(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    level = _opt_int(level_data.get("level")) or 0
+    rank_global = _opt_int(profile.get("xpRanking"))
+    rank_country = _opt_int(profile.get("xpCountryRanking"))
+    if level <= 0:
+        return None
+    return AccSaberReloadedXP(xp=None, level=level, rank_global=rank_global, rank_country=rank_country)
 
 
 def fetch_player_level_title(
@@ -1372,8 +1444,8 @@ def download_title_icon(
     try:
         resp = session.get(icon_url, timeout=30)
         resp.raise_for_status()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(resp.content)
+        # 書きかけのファイルを画面側が読んで壊れた画像にならないよう、一時ファイルから置き換える
+        atomic_write_bytes(path, resp.content)
         return path
     except Exception as exc:  # noqa: BLE001
         log_api_failure("accsaber_reloaded", "download_title_icon", f"download failed url={icon_url}", exc)
@@ -1652,7 +1724,7 @@ def fetch_and_save_player_scores_cache(
         cache_data = {"fetched_at": now_z, "scores": all_scores}
         path = _rl_player_scores_cache_path(player_id)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(cache_data, ensure_ascii=False, indent=2), encoding="utf-8")
+        atomic_write_text(path, json.dumps(cache_data, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception:  # noqa: BLE001
         pass
 

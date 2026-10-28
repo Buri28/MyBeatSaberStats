@@ -10,6 +10,7 @@ import requests
 from .collector.beatleader import _get_beatleader_leaderboards_ranked, _get_beatleader_player_scores
 from .snapshot import BASE_DIR
 from .http_client import make_session
+from .fileio import atomic_write_text
 
 
 _CACHE_DIR = BASE_DIR / "cache"
@@ -87,7 +88,7 @@ def _save_bl_mapper_played_cache(steam_id: str, payload: dict) -> dict:
     }
     path = _mapper_cache_path(steam_id)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(normalized, ensure_ascii=False, indent=2), encoding="utf-8")
+    atomic_write_text(path, json.dumps(normalized, ensure_ascii=False, indent=2), encoding="utf-8")
     return normalized
 
 

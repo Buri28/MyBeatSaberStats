@@ -7,6 +7,7 @@ using System.IO.Compression;
 using System.Linq;
 using System.Net;
 using System.Reflection;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Globalization;
@@ -153,6 +154,8 @@ sealed class ReleaseInfo
     public string Body;
     public string PublishedAt;
     public string ZipUrl;
+    // GitHub が公開している release zip の sha256（無いときは空）
+    public string ZipSha256;
     public string Version;
 
     public override string ToString()
@@ -548,6 +551,7 @@ sealed class UpdateDialog : Form
         string stageDir = UpdateInstaller.CreateStageDirectory();
         string zipPath = Path.Combine(stageDir, "release.zip");
         GitHubReleaseClient.DownloadFile(release.ZipUrl, zipPath);
+        GitHubReleaseClient.VerifySha256(zipPath, release.ZipSha256);
 
         string helperExe = UpdateInstaller.CopySelfToTemporaryHelper();
         UpdateInstaller.LaunchHelper(
@@ -631,6 +635,22 @@ static class GitHubReleaseClient
             client.DownloadFile(url, path);
     }
 
+    // ダウンロードした zip が GitHub の公開している sha256 と一致するか確かめる。
+    // 一致しなければ展開・実行せずに止める。sha256 が分からない（古いリリース）ときは確かめない。
+    public static void VerifySha256(string path, string expectedSha256)
+    {
+        if (string.IsNullOrEmpty(expectedSha256))
+            return;
+        string actual;
+        using (var sha = SHA256.Create())
+        using (var stream = File.OpenRead(path))
+            actual = BitConverter.ToString(sha.ComputeHash(stream)).Replace("-", string.Empty).ToLowerInvariant();
+        if (!string.Equals(actual, expectedSha256.Trim().ToLowerInvariant(), StringComparison.Ordinal))
+            throw new InvalidOperationException(
+                "ダウンロードした更新パッケージが壊れているか、別のものに置き換わっています。\n\nsha256 不一致\nexpected: "
+                + expectedSha256 + "\nactual: " + actual);
+    }
+
     private static string DownloadText(string url)
     {
         using (var client = CreateClient())
@@ -657,6 +677,7 @@ static class GitHubReleaseClient
             PublishedAt = dto.published_at ?? string.Empty,
             Version = (dto.tag_name ?? string.Empty).TrimStart('v', 'V'),
             ZipUrl = FindZipUrl(dto.assets ?? new List<GitHubAssetDto>(), assetPrefix),
+            ZipSha256 = FindZipSha256(dto.assets ?? new List<GitHubAssetDto>(), assetPrefix),
         };
     }
 
@@ -673,6 +694,20 @@ static class GitHubReleaseClient
                 return asset.browser_download_url ?? asset.url;
         }
         return null;
+    }
+
+    private static string FindZipSha256(List<GitHubAssetDto> assets, string assetPrefix)
+    {
+        string url = FindZipUrl(assets, assetPrefix);
+        foreach (GitHubAssetDto asset in assets)
+        {
+            if ((asset.browser_download_url ?? asset.url) != url)
+                continue;
+            string digest = asset.digest ?? string.Empty;
+            if (digest.StartsWith("sha256:", StringComparison.OrdinalIgnoreCase))
+                return digest.Substring("sha256:".Length).Trim();
+        }
+        return string.Empty;
     }
 
     private static string NormalizeTag(string tag)
@@ -700,13 +735,15 @@ static class GitHubReleaseClient
         public string name { get; set; }
         public string browser_download_url { get; set; }
         public string url { get; set; }
+        public string digest { get; set; }
     }
 }
 
 static class UpdateInstaller
 {
     private static readonly string[] PreservedRootFiles = { "Update.exe", "MyBeatSaberUpdater.exe" };
-    private static readonly string[] PreservedRootDirectories = { "cache", "snapshots" };
+    // ユーザーのデータ（キャッシュ・設定・スナップショット・ログ）。更新で消さない。
+    private static readonly string[] PreservedRootDirectories = { "cache", "snapshots", "logs" };
     private static readonly UTF8Encoding Utf8NoBom = new UTF8Encoding(false);
 
     public static string InferTargetExePath(string installDir)

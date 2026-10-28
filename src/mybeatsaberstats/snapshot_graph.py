@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
 )
 
 from .snapshot import Snapshot, BASE_DIR
+from .fileio import atomic_write_text
 
 
 @dataclass
@@ -261,6 +262,8 @@ class LineChartWidget(QWidget):
             v = v_min + frac * (v_max - v_min)
             painter.setPen(tick_pen)
             painter.drawLine(area.left() - 4, y, area.left(), y)
+            # 目盛りは「届いた値」ではなく軸の位置を示す数字なので、四捨五入する
+            # （切り捨てると 0〜3 の目盛りが 0,0,1,2,3 になり、位置とずれる）
             if self._y_as_int:
                 text = str(int(round(v)))
             else:
@@ -489,7 +492,8 @@ class SnapshotGraphDialog(QDialog):
             self.to_date.setDate(today)
             return
 
-        dt_list = [_parse_snapshot_datetime(s) for s in self._snapshots]
+        # 日付はローカル時刻で数える（目盛りもローカル時刻の %m-%d で描いている）
+        dt_list = [_parse_snapshot_datetime(s).astimezone() for s in self._snapshots]
         d_min = min(dt_list).date()
         d_max = max(dt_list).date()
 
@@ -825,7 +829,7 @@ class SnapshotGraphDialog(QDialog):
             }
             path = self._settings_path()
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         except Exception:  # noqa: BLE001
             # 保存失敗は致命的ではないので黙って無視
             return
@@ -972,8 +976,8 @@ class _GraphItemWidget(QWidget):
         # 日単位で 1 点に集約する（同じ日のスナップショットが複数ある場合は「その日の最後の値」を採用）
         day_values: dict[date, float] = {}
         for snap in self._snapshots:
-            dt_utc = _parse_snapshot_datetime(snap)
-            d = dt_utc.date()
+            # UTC の日付で数えると、日本時間 0〜9 時のスナップショットが前の日の点になる。ローカル時刻の日付で数える。
+            d = _parse_snapshot_datetime(snap).astimezone().date()
             if not (d_from_py <= d <= d_to_py):
                 continue
 

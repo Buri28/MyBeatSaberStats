@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Dict, Iterable, Optional
@@ -10,11 +11,15 @@ import requests
 from .snapshot import BASE_DIR
 from .http_client import make_session
 from .api_error_log import log_api_failure
+from .fileio import atomic_write_text
 
 _CACHE_PATH = BASE_DIR / "cache" / "beatsaver_map_details.json"
 _BEATSAVER_REQUEST_TIMEOUT = (3, 10)
 #: /maps/hash/ が 1 リクエストで受け付けるハッシュ数の上限
 _BEATSAVER_HASH_BATCH_SIZE = 50
+# 画面のスレッドと裏のメタ取得スレッドが同時に保存すると、片方の更新が消える。
+# 保存は「ディスクの最新を読み直す → 変わった譜面だけ反映 → 書く」をこのロックの中で行う。
+_CACHE_LOCK = threading.RLock()
 
 
 # BeatSaver の API ベース URL。
@@ -71,6 +76,25 @@ def load_beatsaver_meta_cache() -> Dict[str, dict]:
     return normalized
 
 
+def _save_beatsaver_meta_changes(changes: Dict[str, dict], replaced: Optional[set] = None) -> None:
+    """changes の譜面だけを、ディスクの最新のキャッシュに反映して保存する。
+
+    replaced に入っている譜面は API から取り直した完全な値なので、そのまま置き換える
+    （マージすると、ランク外になって stars が 0 になった値などが古いまま残る）。それ以外はマージする。
+    """
+    if not changes:
+        return
+    replaced = replaced or set()
+    with _CACHE_LOCK:
+        latest = load_beatsaver_meta_cache()
+        for song_hash, entry in changes.items():
+            if song_hash in replaced:
+                latest[song_hash] = entry
+            else:
+                latest[song_hash] = _merge_meta_entry(latest.get(song_hash) or {}, entry)
+        _save_beatsaver_meta_cache(latest)
+
+
 def _save_beatsaver_meta_cache(entries: Dict[str, dict]) -> None:
     payload = {
         "fetched_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -78,7 +102,7 @@ def _save_beatsaver_meta_cache(entries: Dict[str, dict]) -> None:
     }
     try:
         _CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        _CACHE_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        atomic_write_text(_CACHE_PATH, json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception:
         return
 
@@ -103,24 +127,24 @@ def _merge_meta_entry(existing: dict, incoming: dict) -> dict:
 
 
 def upsert_beatsaver_meta_cache(meta_entries: Iterable[dict]) -> Dict[str, dict]:
-    cache = load_beatsaver_meta_cache()
-    updated = False
-    for meta in meta_entries:
-        if not isinstance(meta, dict):
-            continue
-        song_hash = _normalize_hash(meta.get("hash"))
-        if not song_hash:
-            continue
-        incoming = dict(meta)
-        incoming["hash"] = song_hash
-        existing = cache.get(song_hash, {})
-        merged = _merge_meta_entry(existing, incoming)
-        if merged != existing:
-            cache[song_hash] = merged
-            updated = True
-    if updated:
-        _save_beatsaver_meta_cache(cache)
-    return cache
+    with _CACHE_LOCK:
+        cache = load_beatsaver_meta_cache()
+        changes: Dict[str, dict] = {}
+        for meta in meta_entries:
+            if not isinstance(meta, dict):
+                continue
+            song_hash = _normalize_hash(meta.get("hash"))
+            if not song_hash:
+                continue
+            incoming = dict(meta)
+            incoming["hash"] = song_hash
+            existing = cache.get(song_hash, {})
+            merged = _merge_meta_entry(existing, incoming)
+            if merged != existing:
+                cache[song_hash] = merged
+                changes[song_hash] = merged
+        _save_beatsaver_meta_changes(changes)
+        return cache
 
 
 def _meta_from_map_payload(payload: dict, fallback_hash: str = "", fallback_key: str = "") -> Optional[dict]:
@@ -309,7 +333,8 @@ def update_beatsaver_meta_cache(
         if _normalize_hash(song_hash)
     }
 
-    updated = False
+    changes: Dict[str, dict] = {}
+    replaced: set = set()
     for song_hash, beatsaver_key in normalized_seeds.items():
         if not beatsaver_key:
             continue
@@ -321,7 +346,7 @@ def update_beatsaver_meta_cache(
             merged = _merge_meta_entry(existing or {}, seeded)
             if merged != existing:
                 cache[song_hash] = merged
-                updated = True
+                changes[song_hash] = merged
 
     missing_hashes = []
     for raw_hash in song_hashes:
@@ -344,7 +369,8 @@ def update_beatsaver_meta_cache(
                 meta = fetched.get(song_hash)
                 if meta is not None:
                     cache[song_hash] = meta
-                    updated = True
+                    changes[song_hash] = meta
+                    replaced.add(song_hash)
                 elif song_hash in normalized_seeds:
                     seeded = _seed_meta_from_hash_and_key(song_hash, normalized_seeds[song_hash])
                     if seeded is not None:
@@ -354,15 +380,14 @@ def update_beatsaver_meta_cache(
                         merged = _merge_meta_entry(cache.get(song_hash) or {}, seeded)
                         if merged != cache.get(song_hash):
                             cache[song_hash] = merged
-                            updated = True
+                            changes[song_hash] = merged
                 done += 1
                 if on_progress is not None:
                     on_progress(done, total)
             # 大量に取得する場合でも、途中で落ちた分を捨てずに済むよう逐次保存する
-            if updated:
-                _save_beatsaver_meta_cache(cache)
-                updated = False
+            _save_beatsaver_meta_changes(changes, replaced)
+            changes = {}
+            replaced = set()
 
-    if updated:
-        _save_beatsaver_meta_cache(cache)
+    _save_beatsaver_meta_changes(changes, replaced)
     return cache

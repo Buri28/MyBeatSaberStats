@@ -13,11 +13,17 @@ from ..snapshot import BASE_DIR, StarClearStat
 from typing import Optional, Dict, TypedDict, Callable
 
 from ..api_error_log import log_api_failure
+from ..fileio import atomic_write_text, mark_now, recently_marked
+from ..modifiers import classify_play
+from ..http_client import get_memoized
 
 CACHE_DIR = BASE_DIR / "cache"
 
 SCORESABER_LEADERBOARDS_URL = "https://scoresaber.com/api/leaderboards"
 SCORESABER_PLAYER_SCORES_URL = "https://scoresaber.com/api/player/{player_id}/scores"
+# ランク譜面の全件取り直しをした時刻（「キャッシュ > API の総数」での全件取得を 24 時間に 1 回までにする）
+_RANKED_FULL_TRAVERSAL_STATE = CACHE_DIR / "ranked_full_traversal.json"
+_RANKED_FULL_TRAVERSAL_INTERVAL_HOURS = 24
 SCORESABER_PLAYER_FULL_URL = "https://scoresaber.com/api/player/{player_id}/full"
 
 #: 無限ページングを防ぐための保険。
@@ -90,32 +96,42 @@ def _touch_cache_fetched_at(path: Path) -> None:
         raw = json.loads(path.read_text(encoding="utf-8"))
         if isinstance(raw, dict):
             raw["fetched_at"] = datetime.utcnow().isoformat() + "Z"
-            path.write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
+            atomic_write_text(path, json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception:  # noqa: BLE001
         pass
 
 
-def _save_cached_ranked_maps(path: Path, ranked_maps: dict, max_pages: int, total_maps: int) -> None:
+def _save_cached_ranked_maps(
+    path: Path, ranked_maps: dict, max_pages: int, total_maps: int, fetched_at: Optional[str] = None,
+) -> None:
     """
     ページリストをキャッシュファイル(JSON)として保存する。
+
+    fetched_at を渡すとその値を残す（取得が途中で失敗したとき、次回の遡り範囲を縮めないため）。
     """
     print("Entering _save_cached_ranked_maps")
     normalized_ranked_maps = _normalize_leaderboard_cache(ranked_maps)
     payload = {
-        "fetched_at": datetime.utcnow().isoformat() + "Z",
+        "fetched_at": fetched_at or (datetime.utcnow().isoformat() + "Z"),
         "leaderboards": normalized_ranked_maps,
         "max_pages": max_pages,
         "total_maps": len(normalized_ranked_maps),
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
-        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception:
         return
 
-def _save_cached_player_scores(path: Path, scores: dict) -> None:
+# 初回取得（遡る基準が無い）が途中で失敗したとき、次回は最初から全部遡るための印
+_RESUME_FROM_BEGINNING = "2000-01-01T00:00:00Z"
+
+
+def _save_cached_player_scores(path: Path, scores: dict, resume_stop_ts: Optional[str] = None) -> None:
     """
     ページリストをキャッシュファイル(JSON)として保存する。
+
+    resume_stop_ts: 差分取得が途中で失敗したとき、次回はこの timeSet まで遡って取り直す。
     """
     print("Entering _save_cached_player_scores")
     # キーで降順ソート（leaderboard_id ベース）
@@ -125,9 +141,11 @@ def _save_cached_player_scores(path: Path, scores: dict) -> None:
         "total_play_count": len(scores),
         "scores": scores,
     }
+    if resume_stop_ts:
+        payload["resume_stop_ts"] = resume_stop_ts
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
-        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception:
         return
 
@@ -142,7 +160,7 @@ def _save_cached_pages(path: Path, pages: list[dict]) -> None:
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
-        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception:
         return
 
@@ -248,10 +266,23 @@ def _build_scoresaber_star_stats(leaderboards: dict, scores: list[dict]) -> list
         if isinstance(score_info, dict):
             modifiers = str(score_info.get("modifiers") or "")
 
-        mods_upper = modifiers.upper()
-        is_nf = "NF" in mods_upper
-        is_ss = "SS" in mods_upper
-        is_na = "NA" in mods_upper
+        # クリア / NF / SS / NA の判定は modifiers.classify_play にそろえる（プレイリストの ✔ と同じ基準）
+        play_kind = classify_play(modifiers)
+        is_nf = play_kind == "nf"
+        is_ss = play_kind == "ss"
+        is_na = play_kind == "na"
+
+        # PP は修飾子（クリア / NF / SS / NA）に関係なく、サーバーが pp を付けたスコアを全部入れる。
+        # プロフィールの pp と同じ合計にして、PP のずれ検知（reconcile）が誤判定しないようにする。
+        if isinstance(score_info, dict):
+            try:
+                pp_val = float(score_info.get("pp") or 0)
+                if math.isfinite(pp_val) and pp_val > 0:
+                    prev_pp = state.get("best_pp")
+                    if prev_pp is None or pp_val > prev_pp:
+                        state["best_pp"] = pp_val
+            except (TypeError, ValueError):
+                pass
 
         if is_nf:
             state["nf"] = True
@@ -285,16 +316,6 @@ def _build_scoresaber_star_stats(leaderboards: dict, scores: list[dict]) -> list
                 if best is None or acc > best:
                     state["best_acc"] = acc
 
-            if isinstance(score_info, dict):
-                try:
-                    pp_val = float(score_info.get("pp") or 0)
-                    if math.isfinite(pp_val) and pp_val > 0:
-                        prev_pp = state.get("best_pp")
-                        if prev_pp is None or pp_val > prev_pp:
-                            state["best_pp"] = pp_val
-                except (TypeError, ValueError):
-                    pass
-
     for state in per_leaderboard.values():
         star_bucket = int(state["star"])
         has_clear = bool(state["clear"])
@@ -319,8 +340,7 @@ def _build_scoresaber_star_stats(leaderboards: dict, scores: list[dict]) -> list
 
     cleared_pp_entries: list[tuple[int, float]] = []
     for state in per_leaderboard.values():
-        if not bool(state["clear"]):
-            continue
+        # 修飾子で絞らない（上の best_pp のコメント参照）
         pp_val = state.get("best_pp")
         if isinstance(pp_val, (int, float)) and math.isfinite(float(pp_val)) and float(pp_val) > 0:
             cleared_pp_entries.append((int(state["star"]), float(pp_val)))
@@ -398,8 +418,11 @@ def _get_scoresaber_leaderboards_ranked(
     session: requests.Session,
     progress: Optional[Callable[[int, Optional[int]], None]] = None,
     fetch_until: Optional[datetime] = None,
+    status: Optional[dict] = None,
 ) -> dict:
     """ScoreSaber の Ranked leaderboards をキャッシュ付きで全件取得する。
+
+    status に dict を渡すと、途中で失敗して最後まで取れなかったときに status["complete"] = False を入れる。
 
     progress が指定されている場合は、0.0〜1.0 の範囲で簡易的に進捗をコールバックする。
     GUI 側のプログレスバー更新用（初回の全件取得が長時間になる対策）。
@@ -442,6 +465,18 @@ def _get_scoresaber_leaderboards_ranked(
         append_leaderboards: dict = {}
         reached_fetch_until = False
         page_no = 1
+        run_complete = True
+        seen_ids: set[str] = set()
+        api_total: Optional[int] = None
+        # 2000 年まで遡る＝全件取得。このときは見つかった譜面だけでキャッシュを作り直し、ランクから外れた譜面を消す。
+        full_traversal = fetch_until_str <= "2001"
+        previous_fetched_at: Optional[str] = None
+        try:
+            _prev_raw = json.loads(cache_path.read_text(encoding="utf-8")) if cache_path.exists() else None
+            if isinstance(_prev_raw, dict) and isinstance(_prev_raw.get("fetched_at"), str):
+                previous_fetched_at = _prev_raw["fetched_at"]
+        except Exception:  # noqa: BLE001
+            previous_fetched_at = None
         try:
             while True:
                 if progress is not None:
@@ -457,9 +492,15 @@ def _get_scoresaber_leaderboards_ranked(
                 if resp_dt.status_code == 404:
                     break
                 if _is_rate_limited(resp_dt, "_get_scoresaber_ranked_maps", f"ranked maps page={page_no}"):
+                    run_complete = False
                     break
                 resp_dt.raise_for_status()
                 data_dt = resp_dt.json()
+                if api_total is None:
+                    try:
+                        api_total = int((data_dt.get("metadata") or {}).get("total"))
+                    except (TypeError, ValueError):
+                        api_total = None
                 lbs_dt = data_dt.get("leaderboards") or []
                 if not lbs_dt:
                     break
@@ -474,6 +515,7 @@ def _get_scoresaber_leaderboards_ranked(
                     lb_id = _normalize_leaderboard_key(lb.get("id"))
                     if lb_id is None:
                         continue
+                    seen_ids.add(lb_id)
                     # 既存マップも上書き（stars等が月次更新で変わっている可能性があるため）
                     if lb_id not in leaderboards or leaderboards[lb_id] != lb:
                         append_leaderboards[lb_id] = lb
@@ -491,19 +533,55 @@ def _get_scoresaber_leaderboards_ranked(
                     print(f"SS Ranked Maps: ページ数上限 {_MAX_PAGES_GUARD} に達したため打ち切ります")
                     break
                 page_no += 1
-        except Exception:  # noqa: BLE001
-            pass
-        if append_leaderboards:
+        except Exception as exc:  # noqa: BLE001
+            # 進捗ダイアログのキャンセルは握りつぶさない
+            if isinstance(exc, RuntimeError) and str(exc) == "SNAPSHOT_CANCELLED":
+                raise
+            run_complete = False
+        if not run_complete and status is not None:
+            status["complete"] = False
+
+        removed = 0
+        if full_traversal:
+            mark_now(_RANKED_FULL_TRAVERSAL_STATE, "scoresaber")
+            if run_complete and seen_ids and api_total is not None and len(seen_ids) >= api_total:
+                # API の総数まで全部取れたので、見つからなかった譜面（ランクから外れたもの）を消す
+                stale = [lb_id for lb_id in leaderboards if lb_id not in seen_ids]
+                for lb_id in stale:
+                    del leaderboards[lb_id]
+                removed = len(stale)
+            elif run_complete:
+                # 途中で止まった（404・空ページなど）。消すと残りの譜面まで消えるので消さない
+                print(f"SS Ranked Maps: 全件取得が途中で止まりました（{len(seen_ids)}/{api_total} 件）。古い譜面は消しません")
+                run_complete = False
+                if status is not None:
+                    status["complete"] = False
+        elif (
+            run_complete and api_total is not None and len(leaderboards) > api_total
+            and not recently_marked(_RANKED_FULL_TRAVERSAL_STATE, "scoresaber", _RANKED_FULL_TRAVERSAL_INTERVAL_HOURS)
+        ):
+            # キャッシュの方が多い＝ランクから外れた譜面が残っている。全件取り直して消す。
+            # （全件取得からは呼ばないので再帰が続かない。API の総数が食い違っていても 24 時間に 1 回まで）
+            print(
+                f"SS Ranked Maps: キャッシュ {len(leaderboards)} 件 > API {api_total} 件のため、全件取り直します"
+            )
+            return _get_scoresaber_leaderboards_ranked(
+                session, progress=progress, fetch_until=datetime(2000, 1, 1), status=status,
+            )
+
+        if append_leaderboards or removed:
             try:
                 leaderboards = dict(sorted(leaderboards.items(), key=lambda x: x[1].get("id", 0), reverse=True))
                 _save_cached_ranked_maps(cache_path, leaderboards,
                                          max_pages=page_no,
-                                         total_maps=len(leaderboards))
+                                         total_maps=len(leaderboards),
+                                         # 途中で失敗したら取得日時を進めない（次回も同じ範囲まで遡る）
+                                         fetched_at=None if run_complete else previous_fetched_at)
             except Exception:  # noqa: BLE001
                 pass
-        else:
+        elif run_complete:
             # データ変更なし（plays/votesも含めて完全一致）でも fetched_at を更新して
-            # 次回の60日窓が正しく前進するようにする
+            # 次回の60日窓が正しく前進するようにする（失敗したときは進めない）
             _touch_cache_fetched_at(cache_path)
         if progress is not None:
             progress(page_no, page_no)
@@ -871,6 +949,7 @@ def _get_scoresaber_player_scores(
     session: requests.Session,
     progress: Optional[Callable[[int, Optional[int]], None]] = None,
     fetch_until: Optional[datetime] = None,
+    status: Optional[dict] = None,
 ) -> list[dict]:
     """ScoreSaber のプレイヤースコアをキャッシュ付きで全件取得する。
 
@@ -889,8 +968,24 @@ def _get_scoresaber_player_scores(
     
     cached_pages = None
     cached_scores = None
+    resume_stop_ts: Optional[str] = None
     if Path.exists(cache_path):
         cached_scores = _load_cached_player_scores(cache_path)
+        try:
+            _raw_cache = json.loads(cache_path.read_text(encoding="utf-8"))
+            _resume = _raw_cache.get("resume_stop_ts") if isinstance(_raw_cache, dict) else None
+            resume_stop_ts = _resume if isinstance(_resume, str) and _resume else None
+        except Exception:  # noqa: BLE001
+            resume_stop_ts = None
+
+    # 途中で失敗したかどうか。失敗したら resume_stop_ts を残して、次回そこまで遡る。
+    run_complete = True
+
+    def _mark_incomplete() -> None:
+        nonlocal run_complete
+        run_complete = False
+        if status is not None:
+            status["complete"] = False
 
     # キャッシュから最新のtimeSetを取得（差分取得用）
     latest_cached_timeset: Optional[str] = None
@@ -931,6 +1026,11 @@ def _get_scoresaber_player_scores(
         print(f"ScoreSaber fetch_until 指定: {fetch_until_str}")
 
     effective_stop_ts: Optional[str] = fetch_until_str if fetch_until_str is not None else latest_cached_timeset
+    # 前回の差分取得が途中で失敗していたら、そのとき目指していた所まで遡る。
+    # キャッシュの最新 timeSet だけを基準にすると、途中のページの抜けが二度と埋まらない。
+    if resume_stop_ts and (effective_stop_ts is None or resume_stop_ts < effective_stop_ts):
+        print(f"ScoreSaber: 前回の取得が途中で失敗したため {resume_stop_ts} まで遡ります")
+        effective_stop_ts = resume_stop_ts
 
     append_pages: list[dict] = []
     limit_param = 100
@@ -978,6 +1078,7 @@ def _get_scoresaber_player_scores(
             f"freshness check failed scoresaber_id={scoresaber_id}",
             exc,
         )
+        _mark_incomplete()
         # If anything goes wrong during the freshness check, fall back to cached data
         pass
 
@@ -990,7 +1091,10 @@ def _get_scoresaber_player_scores(
         print(f"ScoreSaberの差分取得完了: 最初のページでキャッシュに到達しました。{scoresaber_id}")
         if scores_by_lb_id:
             try:
-                _save_cached_player_scores(cache_path, scores_by_lb_id)
+                _save_cached_player_scores(
+                    cache_path, scores_by_lb_id,
+                    resume_stop_ts=None if run_complete else (effective_stop_ts or _RESUME_FROM_BEGINNING),
+                )
             except Exception:  # noqa: BLE001
                 pass
         return list(scores_by_lb_id.values())
@@ -1013,6 +1117,7 @@ def _get_scoresaber_player_scores(
             if resp.status_code == 404:
                 break
             if _is_rate_limited(resp, "_get_scoresaber_player_scores", f"player={scoresaber_id} page={page}"):
+                _mark_incomplete()
                 break
             resp.raise_for_status()
         except Exception as exc:  # noqa: BLE001
@@ -1022,6 +1127,7 @@ def _get_scoresaber_player_scores(
                 f"paged fetch failed url={url} scoresaber_id={scoresaber_id} params={params}",
                 exc,
             )
+            _mark_incomplete()
             break
 
         try:
@@ -1033,6 +1139,7 @@ def _get_scoresaber_player_scores(
                 f"invalid json url={resp.url} scoresaber_id={scoresaber_id} params={params}",
                 exc,
             )
+            _mark_incomplete()
             break
 
         append_pages.append({"page": page, "params": params, "data": data})
@@ -1082,7 +1189,10 @@ def _get_scoresaber_player_scores(
 
     if scores_by_lb_id:
         try:
-            _save_cached_player_scores(cache_path, scores_by_lb_id)
+            _save_cached_player_scores(
+                cache_path, scores_by_lb_id,
+                resume_stop_ts=None if run_complete else (effective_stop_ts or _RESUME_FROM_BEGINNING),
+            )
         except Exception:  # noqa: BLE001
             pass
     print(f"ScoreSaberのキャッシュ返却: {scoresaber_id} 件数: {len(scores_by_lb_id)}")
@@ -1142,6 +1252,89 @@ def _get_scoresaber_player_scores(
 #     return all_scores
 
 
+def refresh_scoresaber_ranked_scores(
+    scoresaber_id: str,
+    session: requests.Session,
+    progress: Optional[Callable[[int, Optional[int]], None]] = None,
+    status: Optional[dict] = None,
+) -> int:
+    """ランク譜面のスコアだけを pp の高い順（sort=top）に取り直し、スコアキャッシュに上書きする。
+
+    pp が変わるのはランク譜面のスコアだけなので、全スコア（200 ページ以上）ではなく
+    pp の付いたスコア（約 60 ページ）だけ読む。pp が 0 のスコアが出てきたら止める。
+    途中で失敗したら status["complete"] = False を入れ、それまでに取れた分だけ反映する。
+    戻り値は取り直したスコアの件数。
+    """
+    cache_path = CACHE_DIR / f"scoresaber_player_scores_{scoresaber_id}.json"
+    url = SCORESABER_PLAYER_SCORES_URL.format(player_id=scoresaber_id)
+    fetched: dict[str, dict] = {}
+    page = 1
+    max_pages: Optional[int] = None
+    complete = True
+    while True:
+        if progress is not None:
+            progress(page, max_pages)
+        params = {"limit": "100", "sort": "top", "page": str(page)}
+        try:
+            resp = session.get(url, params=params, timeout=15)
+            if resp.status_code == 404:
+                break
+            if _is_rate_limited(resp, "refresh_scoresaber_ranked_scores", f"player={scoresaber_id} page={page}"):
+                complete = False
+                break
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as exc:  # noqa: BLE001
+            log_api_failure(
+                "scoresaber",
+                "refresh_scoresaber_ranked_scores",
+                f"request failed url={url} scoresaber_id={scoresaber_id} params={params}",
+                exc,
+            )
+            complete = False
+            break
+        items = data.get("playerScores") if isinstance(data, dict) else None
+        if not isinstance(items, list) or not items:
+            break
+        reached_unranked = False
+        for item in items:
+            score = item.get("score") if isinstance(item, dict) else None
+            leaderboard = item.get("leaderboard") if isinstance(item, dict) else None
+            if not isinstance(score, dict) or not isinstance(leaderboard, dict):
+                continue
+            try:
+                pp_val = float(score.get("pp") or 0)
+            except (TypeError, ValueError):
+                pp_val = 0.0
+            if pp_val <= 0:
+                # pp の高い順なので、ここから先は pp の付かないスコアだけ
+                reached_unranked = True
+                break
+            lb_id = leaderboard.get("id")
+            if lb_id is not None:
+                fetched[str(lb_id)] = item
+        if reached_unranked or len(items) < 100 or page >= _MAX_PAGES_GUARD:
+            break
+        page += 1
+
+    if not complete and status is not None:
+        status["complete"] = False
+    if not fetched:
+        return 0
+    scores = _load_cached_player_scores(cache_path) or {}
+    scores.update(fetched)
+    # 差分取得の途中失敗の印（resume_stop_ts）は残す
+    resume_stop_ts: Optional[str] = None
+    try:
+        _raw = json.loads(cache_path.read_text(encoding="utf-8")) if cache_path.exists() else None
+        if isinstance(_raw, dict) and isinstance(_raw.get("resume_stop_ts"), str):
+            resume_stop_ts = _raw["resume_stop_ts"]
+    except Exception:  # noqa: BLE001
+        resume_stop_ts = None
+    _save_cached_player_scores(cache_path, scores, resume_stop_ts=resume_stop_ts)
+    return len(fetched)
+
+
 def _get_scoresaber_player_stats(scoresaber_id: str, session: requests.Session) -> dict:
     """
     ScoreSaberのプレイヤー統計情報(playerStats/scoreStats)を取得。
@@ -1150,7 +1343,7 @@ def _get_scoresaber_player_stats(scoresaber_id: str, session: requests.Session) 
     print("Entering _get_scoresaber_player_stats")
     url = SCORESABER_PLAYER_FULL_URL.format(player_id=scoresaber_id)
     try:
-        resp = session.get(url, timeout=10)
+        resp = get_memoized(session, url, timeout=10)
         if resp.status_code == 404:
             return {}
         resp.raise_for_status()
@@ -1222,7 +1415,7 @@ def _fetch_scoresaber_player_basic(
 
     url = SCORESABER_PLAYER_FULL_URL.format(player_id=scoresaber_id)
     try:
-        resp = session.get(url, timeout=10)
+        resp = get_memoized(session, url, timeout=10)
         print(f"Fetching ScoreSaber player info... URL: {resp.url}")
         if resp.status_code == 404:
             return None

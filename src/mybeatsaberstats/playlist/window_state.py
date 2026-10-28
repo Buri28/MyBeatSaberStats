@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Dict
 
 from ..snapshot import BASE_DIR
+from ..fileio import atomic_write_text
 
 
 PLAYLIST_WINDOW_PATH = BASE_DIR / "cache" / "playlist_window.json"
@@ -30,4 +31,4 @@ def load_playlist_window_payload(path: Path = PLAYLIST_WINDOW_PATH) -> Dict[str,
 
 def save_playlist_window_payload(payload: Dict[str, Any], path: Path = PLAYLIST_WINDOW_PATH) -> None:
     """PlaylistWindow の state JSON を UTF-8 で保存する。"""
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")

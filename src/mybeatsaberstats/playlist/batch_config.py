@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Dict, List
 
 from ..snapshot import BASE_DIR
+from ..fileio import atomic_write_text
 
 
 BATCH_CONFIG_PATH = BASE_DIR / "cache" / "batch_configs.json"
@@ -120,7 +121,7 @@ def load_enabled_playlist_batch_configs(path: Path = BATCH_CONFIG_PATH) -> List[
 
 def save_playlist_batch_configs(configs: List[BatchConfig], path: Path = BATCH_CONFIG_PATH) -> None:
     """Batch Export 設定一覧を JSON として保存する。"""
-    path.write_text(json.dumps([config.to_dict() for config in configs], ensure_ascii=False, indent=2), encoding="utf-8")
+    atomic_write_text(path, json.dumps([config.to_dict() for config in configs], ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def _display_sort_label(sort_mode: str) -> str:

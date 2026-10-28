@@ -18,6 +18,7 @@ from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import QApplication
 
 from .snapshot import BASE_DIR
+from .fileio import atomic_write_text
 
 # 設定ファイルパス（cache/settings.json に dark_mode キーで保存）
 _PREF_PATH = BASE_DIR / "cache" / "settings.json"
@@ -74,7 +75,7 @@ def _save_pref(mode: str) -> None:
                 pass
         existing["theme_mode"] = mode
         existing.pop("dark_mode", None)  # 旧フォーマットキーを削除
-        _PREF_PATH.write_text(
+        atomic_write_text(_PREF_PATH, 
             json.dumps(existing, ensure_ascii=False, indent=2), encoding="utf-8"
         )
     except Exception:

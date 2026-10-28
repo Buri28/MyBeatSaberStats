@@ -5,6 +5,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import List
 import sys
+from .fileio import atomic_write_text
 
 # プロジェクトルート (開発時: リポジトリ直下, exe 時: exe のあるディレクトリ)
 if getattr(sys, "frozen", False):
@@ -202,7 +203,7 @@ class Snapshot:
         import json
 
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        atomic_write_text(path, json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
         return path
 
     @staticmethod

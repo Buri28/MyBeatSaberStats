@@ -5,6 +5,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from ..modifiers import classify_play, format_modifiers
 from ..playlist_view import (
     MapEntry,
     _CACHE_DIR,
@@ -89,13 +90,14 @@ def _ss_player_score_info(scores: Dict, lb_id: str, max_score_from_map: int = 0)
     sc = entry.get("score", {})
     player_pp = float(sc.get("pp") or 0)
     base_score = int(sc.get("baseScore") or 0)
-    modifiers = (sc.get("modifiers") or "").upper()
-    mods_str = ",".join(modifiers[i:i+2] for i in range(0, len(modifiers), 2)) if modifiers else ""
+    modifiers = sc.get("modifiers") or ""
+    # ScoreSaber の modifiers は元からカンマ区切り（"SF,PM"）。2 文字ずつ区切ると "SF,,P,M" になって壊れていた。
+    mods_str = format_modifiers(modifiers)
     rank = int(sc.get("rank") or 0)
     acc = (base_score / max_score_from_map * 100.0) if max_score_from_map > 0 and base_score > 0 else 0.0
-    has_nf = "NF" in modifiers
-    cleared = base_score > 0 and not has_nf
-    nf_clear = base_score > 0 and has_nf
+    # ✔ は★統計の Clears と同じ基準（NF / SS / NA が付いていたらクリアにしない）
+    cleared = base_score > 0 and classify_play(modifiers) == "clear"
+    nf_clear = base_score > 0 and not cleared
     return player_pp, cleared, nf_clear, acc, rank, mods_str
 
 
@@ -106,14 +108,14 @@ def _bl_player_score_info(scores: Dict, map_id: str) -> Tuple[float, bool, bool,
         return 0.0, False, False, 0.0, 0, ""
     player_pp = float(entry.get("pp") or 0)
     base_score = int(entry.get("baseScore") or 0)
-    modifiers = (entry.get("modifiers") or "").upper()
-    mods_str = ",".join(m.strip() for m in modifiers.replace(",", " ").split() if m.strip()) if modifiers else ""
+    modifiers = entry.get("modifiers") or ""
+    mods_str = format_modifiers(modifiers)
     accuracy = float(entry.get("accuracy") or 0)
     rank = int(entry.get("rank") or 0)
     acc = accuracy * 100.0 if accuracy else 0.0
-    has_nf = "NF" in modifiers
-    cleared = base_score > 0 and not has_nf
-    nf_clear = base_score > 0 and has_nf
+    # ✔ は★統計の Clears と同じ基準（NF / SS / NA が付いていたらクリアにしない）
+    cleared = base_score > 0 and classify_play(modifiers) == "clear"
+    nf_clear = base_score > 0 and not cleared
     return player_pp, cleared, nf_clear, acc, rank, mods_str
 
 
@@ -534,9 +536,19 @@ def _refresh_entries_from_cached_player_scores(entries: List[MapEntry], steam_id
 
         new_played_at_ts = best_match[6] if best_match is not None else 0
         new_bl_played_at_ts = bl_match[6] if bl_match is not None else 0
-        new_bl_leaderboard_id = bl_leaderboard_idx.get(key) or (bl_ranked_entry.leaderboard_id if bl_ranked_entry else "")
-        new_bl_page_url = f"https://beatleader.com/leaderboard/global/{new_bl_leaderboard_id}" if new_bl_leaderboard_id else ""
-        new_bl_replay_url = bl_replay_idx.get(key, "")
+        # キャッシュで見つからないときは、読み込み時に API で取った id を空で上書きしない
+        # （上書きすると BL Watched が "-" になり、プレビューのたびに API を取り直していた）
+        existing_bl_id = entry.leaderboard_id if entry.source != "scoresaber" else ""
+        new_bl_leaderboard_id = (
+            bl_leaderboard_idx.get(key)
+            or (bl_ranked_entry.leaderboard_id if bl_ranked_entry else "")
+            or existing_bl_id
+        )
+        new_bl_page_url = (
+            f"https://beatleader.com/leaderboard/global/{new_bl_leaderboard_id}"
+            if new_bl_leaderboard_id else entry.beatleader_page_url
+        )
+        new_bl_replay_url = bl_replay_idx.get(key, "") or entry.beatleader_replay_url
         new_bl_attempts = bl_ranked_entry.beatleader_attempts if bl_ranked_entry else entry.beatleader_attempts
         new_bl_replays_watched = bl_watched_idx.get(key, entry.beatleader_replays_watched)
 
@@ -549,7 +561,29 @@ def _refresh_entries_from_cached_player_scores(entries: List[MapEntry], steam_id
             entry.beatleader_replay_url,
             entry.beatleader_attempts,
             entry.beatleader_replays_watched,
+            entry.cleared,
+            entry.nf_clear,
+            entry.player_pp,
+            entry.player_acc,
+            entry.player_rank,
+            entry.player_mods,
         )
+
+        # ステータス（✔ / NF / ✖）・pp・精度・順位・修飾子も書き戻す。
+        # 以前は日時だけを書き戻していたので、再起動後にクリアした譜面が ✖ のまま残っていた。
+        # best_match = (pp, cleared, nf_clear, acc, rank, mods, played_at_ts)
+        # source ごとに、プレイヤーのスコアを入れている項目だけを書き戻す:
+        # - beatsaver: player_pp / player_acc / player_rank は Rating / NPS / Votes に使っているので触らない
+        # - accsaber_reloaded: player_rank は AccSaber の順位なので触らない
+        if best_match is not None:
+            entry.cleared = best_match[1]
+            entry.nf_clear = best_match[2]
+            entry.player_mods = best_match[5]
+            if entry.source != "beatsaver":
+                entry.player_pp = best_match[0]
+                entry.player_acc = best_match[3]
+                if entry.source != "accsaber_reloaded":
+                    entry.player_rank = best_match[4]
 
         entry.played_at_ts = new_played_at_ts
         entry.bl_played_at_ts = new_bl_played_at_ts
@@ -570,6 +604,12 @@ def _refresh_entries_from_cached_player_scores(entries: List[MapEntry], steam_id
             entry.beatleader_replay_url,
             entry.beatleader_attempts,
             entry.beatleader_replays_watched,
+            entry.cleared,
+            entry.nf_clear,
+            entry.player_pp,
+            entry.player_acc,
+            entry.player_rank,
+            entry.player_mods,
         )
         if new_state != old_state:
             changed_hashes.add(song_hash)

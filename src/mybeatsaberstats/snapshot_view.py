@@ -8,6 +8,7 @@ import json
 import re
 from PySide6.QtCore import Qt, QTimer, QSize
 from PySide6.QtGui import QColor, QIcon, QPalette
+from .numfmt import fmt, trunc, trunc_int
 from .theme import (
     detect_system_dark,
     label_cell_color,
@@ -44,6 +45,7 @@ from PySide6.QtWidgets import (
 )
 
 from .snapshot import Snapshot, SNAPSHOT_DIR, BASE_DIR, RESOURCES_DIR
+from .fileio import atomic_write_text
 
 
 def _light_app_button_min_height() -> int:
@@ -125,7 +127,7 @@ class PercentageBarDelegate(QStyledItemDelegate):
 
         ratio, r, g, b = self._compute_bar_rgb(value)
 
-        if value >= self._max_value - 1e-3:
+        if value >= self._max_value - 1e-9:
             option.font.setBold(True)
 
         # バー輝度に応じてテキスト色を決定（super() が setForeground 色で上書いた後に再設定）
@@ -1236,7 +1238,7 @@ class SnapshotCompareDialog(QDialog):
             # スナップショット未選択の場合は UI 状態のみ保存して終了
             if snap_a is None and snap_b is None:
                 path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+                atomic_write_text(path, json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
                 return
 
             # 互換性のため、従来のトップレベル情報も更新しておく
@@ -1268,7 +1270,7 @@ class SnapshotCompareDialog(QDialog):
                 per_player[snap_b.steam_id] = entry
 
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            atomic_write_text(path, json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
         except Exception:  # noqa: BLE001
             # 設定保存失敗はアプリ動作に影響させない
             return
@@ -1659,7 +1661,8 @@ class SnapshotCompareDialog(QDialog):
             if isinstance(value, int):
                 return value, f"{value:,}", None, ""
             if isinstance(value, float):
-                return value, f"{value:,.2f}", None, ""
+                value = trunc(value, 2)
+                return value, f"{fmt(value, 2, comma=True)}", None, ""
             return value, str(value), None, ""
 
         a_numeric, text_a, a_extra_numeric, a_extra_label = _extract(a)
@@ -1680,7 +1683,7 @@ class SnapshotCompareDialog(QDialog):
                 diff = -diff
             extra_diff = None
             if isinstance(a_numeric, float) or isinstance(b_numeric, float):
-                diff_item.setText(f"{diff:+,.2f}")
+                diff_item.setText(f"{fmt(diff, 2, comma=True, sign=True)}")
             else:
                 diff_item.setText(f"{diff:+,d}")
 
@@ -1974,8 +1977,8 @@ class SnapshotCompareDialog(QDialog):
             self.table,
             row_main,
             "[SS] Avg Ranked Acc",
-            (round(snap_a.scoresaber_average_ranked_acc, 2), f"{snap_a.scoresaber_average_ranked_acc:.2f}%") if snap_a.scoresaber_average_ranked_acc is not None else None,
-            (round(snap_b.scoresaber_average_ranked_acc, 2), f"{snap_b.scoresaber_average_ranked_acc:.2f}%") if snap_b.scoresaber_average_ranked_acc is not None else None,
+            (trunc(snap_a.scoresaber_average_ranked_acc, 2), f"{fmt(snap_a.scoresaber_average_ranked_acc, 2)}%") if snap_a.scoresaber_average_ranked_acc is not None else None,
+            (trunc(snap_b.scoresaber_average_ranked_acc, 2), f"{fmt(snap_b.scoresaber_average_ranked_acc, 2)}%") if snap_b.scoresaber_average_ranked_acc is not None else None,
         )
         row_main += 1
 
@@ -2042,8 +2045,8 @@ class SnapshotCompareDialog(QDialog):
             self.table,
             row_main,
             "[BL] Avg Ranked Acc",
-            (round(snap_a.beatleader_average_ranked_acc, 2), f"{snap_a.beatleader_average_ranked_acc:.2f}%") if snap_a.beatleader_average_ranked_acc is not None else None,
-            (round(snap_b.beatleader_average_ranked_acc, 2), f"{snap_b.beatleader_average_ranked_acc:.2f}%") if snap_b.beatleader_average_ranked_acc is not None else None,
+            (trunc(snap_a.beatleader_average_ranked_acc, 2), f"{fmt(snap_a.beatleader_average_ranked_acc, 2)}%") if snap_a.beatleader_average_ranked_acc is not None else None,
+            (trunc(snap_b.beatleader_average_ranked_acc, 2), f"{fmt(snap_b.beatleader_average_ranked_acc, 2)}%") if snap_b.beatleader_average_ranked_acc is not None else None,
         )
         row_main += 1
 
@@ -2154,10 +2157,12 @@ class SnapshotCompareDialog(QDialog):
         _xp_lv_b = snap_b.accsaber_reloaded_xp_level
 
         def _xp_val(xp, level):
+            # レベル 0 は「不明」としてメイン画面と同じく出さない
             if xp is None:
-                return None
-            v = int(round(xp))
-            if level is not None:
+                # XP が取れずプロフィールで補ったときは、レベルだけ出す（差分は出さない）
+                return (None, f"Lv.{level}") if level else None
+            v = trunc_int(xp)
+            if level:
                 return (v, f"{v:,} (Lv.{level})")
             return v
 
@@ -2167,11 +2172,13 @@ class SnapshotCompareDialog(QDialog):
                 _xp_val(snap_a.accsaber_reloaded_xp, _xp_lv_a),
                 _xp_val(snap_b.accsaber_reloaded_xp, _xp_lv_b),
             )
-            if _xp_lv_a is not None and _xp_lv_b is not None:
+            if _xp_lv_a and _xp_lv_b:
                 _lv_diff = _xp_lv_b - _xp_lv_a
                 _diff_item = self.table_acc.item(r, 4)
                 if _diff_item is not None:
-                    _diff_item.setText(_diff_item.text() + f" (Lv{_lv_diff:+d})")
+                    _base = _diff_item.text()
+                    # XP の差が無い（片方の XP が取れていない）ときは、先頭に空白を付けない
+                    _diff_item.setText(f"{_base} (Lv{_lv_diff:+d})" if _base else f"(Lv{_lv_diff:+d})")
             return r + 1
 
         # 全項目表示 (XP×2 + AP×4 + Rank×4 + Play Count×4 + AvgAcc×4 = 18行)
@@ -2179,8 +2186,8 @@ class SnapshotCompareDialog(QDialog):
         row_acc = _rl_set_xp_row(row_acc)
         row_acc = _set_combined_rank_row(
             row_acc, "[AS] Rank",
-            snap_a.accsaber_reloaded_xp_rank, snap_a.scoresaber_country, snap_a.accsaber_reloaded_xp_rank_country,
-            snap_b.accsaber_reloaded_xp_rank, snap_b.scoresaber_country, snap_b.accsaber_reloaded_xp_rank_country,
+            snap_a.accsaber_reloaded_xp_rank, (snap_a.scoresaber_country or snap_a.beatleader_country), snap_a.accsaber_reloaded_xp_rank_country,
+            snap_b.accsaber_reloaded_xp_rank, (snap_b.scoresaber_country or snap_b.beatleader_country), snap_b.accsaber_reloaded_xp_rank_country,
             _tbl=self.table_acc,
         )
 
@@ -2208,8 +2215,8 @@ class SnapshotCompareDialog(QDialog):
             _v_a = getattr(snap_a, _attr)
             _v_b = getattr(snap_b, _attr)
             self._set_row(self.table_acc, row_acc, _lbl,
-                          round(_v_a, 2) if _v_a is not None else None,
-                          round(_v_b, 2) if _v_b is not None else None)
+                          trunc(_v_a, 2) if _v_a is not None else None,
+                          trunc(_v_b, 2) if _v_b is not None else None)
             row_acc += 1
         _set_group_label(_grp_start, 4, "AP")
         _grp_start = row_acc
@@ -2251,8 +2258,8 @@ class SnapshotCompareDialog(QDialog):
             _v_a = getattr(snap_a, _attr)
             _v_b = getattr(snap_b, _attr)
             self._set_row(self.table_acc, row_acc, _lbl,
-                          (round(_v_a, 2), f"{_v_a:.2f}%") if _v_a is not None else None,
-                          (round(_v_b, 2), f"{_v_b:.2f}%") if _v_b is not None else None)
+                          (trunc(_v_a, 2), f"{fmt(_v_a, 2)}%") if _v_a is not None else None,
+                          (trunc(_v_b, 2), f"{fmt(_v_b, 2)}%") if _v_b is not None else None)
             _set_avg_acc_bar(row_acc, _v_a, _v_b, _cat)
             row_acc += 1
         _set_group_label(_grp_start, 4, "Avg Acc")
@@ -2266,8 +2273,8 @@ class SnapshotCompareDialog(QDialog):
             _v_a = getattr(snap_a, _attr)
             _v_b = getattr(snap_b, _attr)
             self._set_row(self.table_acc, row_acc, _lbl,
-                          (round(_v_a, 2), f"{_v_a:.2f}") if _v_a is not None else None,
-                          (round(_v_b, 2), f"{_v_b:.2f}") if _v_b is not None else None)
+                          (trunc(_v_a, 2), f"{fmt(_v_a, 2)}") if _v_a is not None else None,
+                          (trunc(_v_b, 2), f"{fmt(_v_b, 2)}") if _v_b is not None else None)
             _set_skill_bar(row_acc, _v_a, _v_b, _cat)
             row_acc += 1
         _set_group_label(_grp_start, 4, "Skill Level")
@@ -2311,7 +2318,7 @@ class SnapshotCompareDialog(QDialog):
 
                 # col 1/2/3: A AP / B AP / ΔAP
                 def _ap_item(ap):
-                    it = QTableWidgetItem(f"{round(ap, 2):,.2f}" if ap is not None else "")
+                    it = QTableWidgetItem(f"{fmt(ap, 2, comma=True)}" if ap is not None else "")
                     it.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                     return it
                 self.acc_cmp_table.setItem(row, 1, _ap_item(ap_a))
@@ -2319,8 +2326,8 @@ class SnapshotCompareDialog(QDialog):
                 delta_ap_item = QTableWidgetItem("")
                 delta_ap_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                 if ap_a is not None and ap_b is not None:
-                    d = ap_b - ap_a
-                    delta_ap_item.setText(f"{d:+.2f}")
+                    d = trunc(ap_b, 2) - trunc(ap_a, 2)
+                    delta_ap_item.setText(f"{fmt(d, 2, sign=True)}")
                     if d > 0:
                         delta_ap_item.setBackground(diff_positive_bg())
                     elif d < 0:
@@ -2410,7 +2417,7 @@ class SnapshotCompareDialog(QDialog):
                 # col 10/11/12: A Avg Acc / B Avg Acc / ΔAvg Acc（パーセンテージバー）
                 def _acc_item(avg_acc):
                     if avg_acc is not None:
-                        it = QTableWidgetItem(f"{avg_acc:.2f}%")
+                        it = QTableWidgetItem(f"{fmt(avg_acc, 2)}%")
                         it.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
                         it.setData(Qt.ItemDataRole.UserRole, avg_acc)
                         return it
@@ -2420,8 +2427,8 @@ class SnapshotCompareDialog(QDialog):
                 delta_acc_item = QTableWidgetItem("")
                 delta_acc_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                 if avg_acc_a is not None and avg_acc_b is not None:
-                    da = avg_acc_b - avg_acc_a
-                    delta_acc_item.setText(f"{da:+.2f}%")
+                    da = trunc(avg_acc_b, 2) - trunc(avg_acc_a, 2)
+                    delta_acc_item.setText(f"{fmt(da, 2, sign=True)}%")
                     if da > 0:
                         delta_acc_item.setBackground(diff_positive_bg())
                     elif da < 0:
@@ -2436,7 +2443,7 @@ class SnapshotCompareDialog(QDialog):
                 def _skill_item(skill):
                     if skill is None:
                         return QTableWidgetItem("")
-                    it = QTableWidgetItem(f"{skill:.2f}")
+                    it = QTableWidgetItem(f"{fmt(skill, 2)}")
                     it.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
                     it.setData(Qt.ItemDataRole.UserRole, max(0.0, min(1.0, skill / 100.0)))
                     it.setData(Qt.ItemDataRole.UserRole + 1, _skill_color)
@@ -2446,8 +2453,8 @@ class SnapshotCompareDialog(QDialog):
                 delta_skill_item = QTableWidgetItem("")
                 delta_skill_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                 if skill_a is not None and skill_b is not None:
-                    ds = skill_b - skill_a
-                    delta_skill_item.setText(f"{ds:+.2f}")
+                    ds = trunc(skill_b, 2) - trunc(skill_a, 2)
+                    delta_skill_item.setText(f"{fmt(ds, 2, sign=True)}")
                     if ds > 0:
                         delta_skill_item.setBackground(diff_positive_bg())
                     elif ds < 0:
@@ -2459,16 +2466,16 @@ class SnapshotCompareDialog(QDialog):
 
         # AccSaber: グリッドテーブルにデータを設定
         _rl_rows_a = [
-            ("Overall",  snap_a.accsaber_reloaded_overall_ap,   snap_a.accsaber_reloaded_overall_rank,   snap_a.accsaber_reloaded_overall_rank_country,   snap_a.scoresaber_country, snap_a.accsaber_reloaded_overall_ranked_plays,  _rl_totals_a.get("overall"),  snap_a.accsaber_reloaded_overall_avg_acc,   snap_a.accsaber_reloaded_overall_skill_level,  "overall"),
-            ("True",     snap_a.accsaber_reloaded_true_ap,      snap_a.accsaber_reloaded_true_rank,       snap_a.accsaber_reloaded_true_rank_country,      snap_a.scoresaber_country, snap_a.accsaber_reloaded_true_ranked_plays,     _rl_totals_a.get("true"),     snap_a.accsaber_reloaded_true_avg_acc,      snap_a.accsaber_reloaded_true_skill_level,     "true"),
-            ("Standard", snap_a.accsaber_reloaded_standard_ap,  snap_a.accsaber_reloaded_standard_rank,   snap_a.accsaber_reloaded_standard_rank_country,  snap_a.scoresaber_country, snap_a.accsaber_reloaded_standard_ranked_plays, _rl_totals_a.get("standard"), snap_a.accsaber_reloaded_standard_avg_acc,  snap_a.accsaber_reloaded_standard_skill_level, "standard"),
-            ("Tech",     snap_a.accsaber_reloaded_tech_ap,      snap_a.accsaber_reloaded_tech_rank,       snap_a.accsaber_reloaded_tech_rank_country,      snap_a.scoresaber_country, snap_a.accsaber_reloaded_tech_ranked_plays,     _rl_totals_a.get("tech"),     snap_a.accsaber_reloaded_tech_avg_acc,      snap_a.accsaber_reloaded_tech_skill_level,     "tech"),
+            ("Overall",  snap_a.accsaber_reloaded_overall_ap,   snap_a.accsaber_reloaded_overall_rank,   snap_a.accsaber_reloaded_overall_rank_country,   (snap_a.scoresaber_country or snap_a.beatleader_country), snap_a.accsaber_reloaded_overall_ranked_plays,  _rl_totals_a.get("overall"),  snap_a.accsaber_reloaded_overall_avg_acc,   snap_a.accsaber_reloaded_overall_skill_level,  "overall"),
+            ("True",     snap_a.accsaber_reloaded_true_ap,      snap_a.accsaber_reloaded_true_rank,       snap_a.accsaber_reloaded_true_rank_country,      (snap_a.scoresaber_country or snap_a.beatleader_country), snap_a.accsaber_reloaded_true_ranked_plays,     _rl_totals_a.get("true"),     snap_a.accsaber_reloaded_true_avg_acc,      snap_a.accsaber_reloaded_true_skill_level,     "true"),
+            ("Standard", snap_a.accsaber_reloaded_standard_ap,  snap_a.accsaber_reloaded_standard_rank,   snap_a.accsaber_reloaded_standard_rank_country,  (snap_a.scoresaber_country or snap_a.beatleader_country), snap_a.accsaber_reloaded_standard_ranked_plays, _rl_totals_a.get("standard"), snap_a.accsaber_reloaded_standard_avg_acc,  snap_a.accsaber_reloaded_standard_skill_level, "standard"),
+            ("Tech",     snap_a.accsaber_reloaded_tech_ap,      snap_a.accsaber_reloaded_tech_rank,       snap_a.accsaber_reloaded_tech_rank_country,      (snap_a.scoresaber_country or snap_a.beatleader_country), snap_a.accsaber_reloaded_tech_ranked_plays,     _rl_totals_a.get("tech"),     snap_a.accsaber_reloaded_tech_avg_acc,      snap_a.accsaber_reloaded_tech_skill_level,     "tech"),
         ]
         _rl_rows_b = [
-            ("Overall",  snap_b.accsaber_reloaded_overall_ap,   snap_b.accsaber_reloaded_overall_rank,   snap_b.accsaber_reloaded_overall_rank_country,   snap_b.scoresaber_country, snap_b.accsaber_reloaded_overall_ranked_plays,  _rl_totals_b.get("overall"),  snap_b.accsaber_reloaded_overall_avg_acc,   snap_b.accsaber_reloaded_overall_skill_level,  "overall"),
-            ("True",     snap_b.accsaber_reloaded_true_ap,      snap_b.accsaber_reloaded_true_rank,       snap_b.accsaber_reloaded_true_rank_country,      snap_b.scoresaber_country, snap_b.accsaber_reloaded_true_ranked_plays,     _rl_totals_b.get("true"),     snap_b.accsaber_reloaded_true_avg_acc,      snap_b.accsaber_reloaded_true_skill_level,     "true"),
-            ("Standard", snap_b.accsaber_reloaded_standard_ap,  snap_b.accsaber_reloaded_standard_rank,   snap_b.accsaber_reloaded_standard_rank_country,  snap_b.scoresaber_country, snap_b.accsaber_reloaded_standard_ranked_plays, _rl_totals_b.get("standard"), snap_b.accsaber_reloaded_standard_avg_acc,  snap_b.accsaber_reloaded_standard_skill_level, "standard"),
-            ("Tech",     snap_b.accsaber_reloaded_tech_ap,      snap_b.accsaber_reloaded_tech_rank,       snap_b.accsaber_reloaded_tech_rank_country,      snap_b.scoresaber_country, snap_b.accsaber_reloaded_tech_ranked_plays,     _rl_totals_b.get("tech"),     snap_b.accsaber_reloaded_tech_avg_acc,      snap_b.accsaber_reloaded_tech_skill_level,     "tech"),
+            ("Overall",  snap_b.accsaber_reloaded_overall_ap,   snap_b.accsaber_reloaded_overall_rank,   snap_b.accsaber_reloaded_overall_rank_country,   (snap_b.scoresaber_country or snap_b.beatleader_country), snap_b.accsaber_reloaded_overall_ranked_plays,  _rl_totals_b.get("overall"),  snap_b.accsaber_reloaded_overall_avg_acc,   snap_b.accsaber_reloaded_overall_skill_level,  "overall"),
+            ("True",     snap_b.accsaber_reloaded_true_ap,      snap_b.accsaber_reloaded_true_rank,       snap_b.accsaber_reloaded_true_rank_country,      (snap_b.scoresaber_country or snap_b.beatleader_country), snap_b.accsaber_reloaded_true_ranked_plays,     _rl_totals_b.get("true"),     snap_b.accsaber_reloaded_true_avg_acc,      snap_b.accsaber_reloaded_true_skill_level,     "true"),
+            ("Standard", snap_b.accsaber_reloaded_standard_ap,  snap_b.accsaber_reloaded_standard_rank,   snap_b.accsaber_reloaded_standard_rank_country,  (snap_b.scoresaber_country or snap_b.beatleader_country), snap_b.accsaber_reloaded_standard_ranked_plays, _rl_totals_b.get("standard"), snap_b.accsaber_reloaded_standard_avg_acc,  snap_b.accsaber_reloaded_standard_skill_level, "standard"),
+            ("Tech",     snap_b.accsaber_reloaded_tech_ap,      snap_b.accsaber_reloaded_tech_rank,       snap_b.accsaber_reloaded_tech_rank_country,      (snap_b.scoresaber_country or snap_b.beatleader_country), snap_b.accsaber_reloaded_tech_ranked_plays,     _rl_totals_b.get("tech"),     snap_b.accsaber_reloaded_tech_avg_acc,      snap_b.accsaber_reloaded_tech_skill_level,     "tech"),
         ]
         _fill_acc_cmp_table(self._icon_accsaber, _rl_rows_a, _rl_rows_b)
 
@@ -2490,7 +2497,7 @@ class SnapshotCompareDialog(QDialog):
                 text = f"{total_clears} (0.0%)"
             else:
                 rate = total_clears / total_maps * 100.0
-                text = f"{total_clears} ({rate:.1f}%)"
+                text = f"{total_clears} ({fmt(rate, 1)}%)"
             return total_clears, text
 
         ss_clear_total_a = _clear_total_value_and_text(ss_stats_a)
@@ -2509,7 +2516,7 @@ class SnapshotCompareDialog(QDialog):
                         text = f"{clears:,} (0.0%)"
                     else:
                         rate = clears / maps * 100.0
-                        text = f"{clears:,} ({rate:.1f}%)"
+                        text = f"{clears:,} ({fmt(rate, 1)}%)"
                     return clears, text
             return None
 
@@ -2524,7 +2531,7 @@ class SnapshotCompareDialog(QDialog):
             for s in stats:
                 if getattr(s, "star", None) == star:
                     avg = getattr(s, "average_acc", None)
-                    return (avg, f"{avg:.2f}") if avg is not None else (0, "0.00")
+                    return (trunc(avg, 2), f"{fmt(avg, 2)}") if avg is not None else (0, "0.00")
             return (0, "0.00") if stats else None
 
         def _avg_acc_left_star_value_and_text(stats, star: int):
@@ -2535,7 +2542,7 @@ class SnapshotCompareDialog(QDialog):
                     val = getattr(s, "avg_acc_left", None)
                     if val is None:
                         return None
-                    return val, f"{val:.2f}"
+                    return trunc(val, 2), f"{fmt(val, 2)}"
             return None
 
         def _avg_acc_right_star_value_and_text(stats, star: int):
@@ -2546,7 +2553,7 @@ class SnapshotCompareDialog(QDialog):
                     val = getattr(s, "avg_acc_right", None)
                     if val is None:
                         return None
-                    return val, f"{val:.2f}"
+                    return trunc(val, 2), f"{fmt(val, 2)}"
             return None
 
         def _fc_star_value_and_text(stats, star: int):
@@ -2557,12 +2564,13 @@ class SnapshotCompareDialog(QDialog):
                     fc = getattr(s, "fc_count", None)
                     if fc is None:
                         return None  # 未集計
-                    maps = s.map_count
-                    if maps <= 0:
+                    # FC 率の分母はメイン画面の FC Rate と同じ「クリア数」
+                    clears = s.clear_count
+                    if clears <= 0:
                         text = f"{fc:,} (0.0%)"
                     else:
-                        rate = fc / maps * 100.0
-                        text = f"{fc:,} ({rate:.1f}%)"
+                        rate = fc / clears * 100.0
+                        text = f"{fc:,} ({fmt(rate, 1)}%)"
                     return fc, text
             return None
 
@@ -2573,13 +2581,14 @@ class SnapshotCompareDialog(QDialog):
                 return None
             if all(getattr(s, "fc_count", None) is None for s in stats):
                 return None  # 未集計
-            total_maps = sum(s.map_count for s in stats)
+            # FC 率の分母はメイン画面の FC Rate と同じ「クリア数」
+            total_clears = sum(s.clear_count for s in stats)
             total_fc = sum(getattr(s, "fc_count", None) or 0 for s in stats)
-            if total_maps <= 0:
+            if total_clears <= 0:
                 text = f"{total_fc:,} (0.0%)"
             else:
-                rate = total_fc / total_maps * 100.0
-                text = f"{total_fc:,} ({rate:.1f}%)"
+                rate = total_fc / total_clears * 100.0
+                text = f"{total_fc:,} ({fmt(rate, 1)}%)"
             return total_fc, text
 
         def _avg_acc_total_value_and_text(avg_acc: Optional[float]):
@@ -2587,7 +2596,7 @@ class SnapshotCompareDialog(QDialog):
 
             if avg_acc is None:
                 return None
-            return avg_acc, f"{avg_acc:.2f}"
+            return trunc(avg_acc, 2), f"{fmt(avg_acc, 2)}"
 
         def _pp_star_value_and_text(stats, star: int):
             """指定★帯の pp_contribution を数値＋表示文字列のタプルで返す。
@@ -2603,7 +2612,7 @@ class SnapshotCompareDialog(QDialog):
                     pp = getattr(s, "pp_contribution", None)
                     if pp is None:
                         return (0, "0") if new_fmt else None
-                    return pp, f"{pp:,.0f}"
+                    return trunc(pp, 0), f"{fmt(pp, 0, comma=True)}"
             return (0, "0") if new_fmt else None
 
         def _pp_total_value_and_text(stats):
@@ -2615,7 +2624,7 @@ class SnapshotCompareDialog(QDialog):
             if all(v is None for v in vals):
                 return None
             total_pp = sum(v for v in vals if v is not None)
-            return total_pp, f"{total_pp:,.0f}"
+            return trunc(total_pp, 0), f"{fmt(total_pp, 0, comma=True)}"
 
         def _pp_solo_star_value_and_text(stats, star: int):
             """指定★帯の pp_solo を数値＋表示文字列のタプルで返す。
@@ -2631,7 +2640,7 @@ class SnapshotCompareDialog(QDialog):
                     pp = getattr(s, "pp_solo", None)
                     if pp is None:
                         return (0, "0") if new_fmt else None
-                    return pp, f"{pp:,.0f}"
+                    return trunc(pp, 0), f"{fmt(pp, 0, comma=True)}"
             return (0, "0") if new_fmt else None
 
         def _pp_solo_total_value_and_text(stats):
@@ -2643,7 +2652,7 @@ class SnapshotCompareDialog(QDialog):
             if all(v is None for v in vals):
                 return None
             total_pp = sum(v for v in vals if v is not None)
-            return total_pp, f"{total_pp:,.0f}"
+            return trunc(total_pp, 0), f"{fmt(total_pp, 0, comma=True)}"
 
         def _normalize_pair(value_and_text):
             """(value, text) または None を (numeric, text) 形式に正規化する。"""
@@ -2696,7 +2705,7 @@ class SnapshotCompareDialog(QDialog):
             if isinstance(a_clear_val, (int, float)) and isinstance(b_clear_val, (int, float)):
                 diff = b_clear_val - a_clear_val
                 if isinstance(a_clear_val, float) or isinstance(b_clear_val, float):
-                    diff_clear_item.setText(f"{diff:+.2f}")
+                    diff_clear_item.setText(f"{fmt(diff, 2, sign=True)}")
                 else:
                     diff_clear_item.setText(f"{diff:+d}")
 
@@ -2751,20 +2760,21 @@ class SnapshotCompareDialog(QDialog):
                 diff_acc_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
                 if isinstance(a_avg_val, (int, float)) and isinstance(b_avg_val, (int, float)):
                     diff = b_avg_val - a_avg_val
-                    diff_text = f"{diff:+.2f}%"
+                    diff_text = f"{fmt(diff, 2, sign=True)}%"
 
                     # L/R が渡されている場合は括弧内に付加する
                     a_left_val, _ = _normalize_pair(avg_left_a)
                     b_left_val, _ = _normalize_pair(avg_left_b)
                     a_right_val, _ = _normalize_pair(avg_right_a)
                     b_right_val, _ = _normalize_pair(avg_right_b)
-                    if isinstance(a_left_val, (int, float)) and isinstance(b_left_val, (int, float)):
-                        # 両方に L/R データがある場合 → 差分を表示
-                        ar = a_right_val if isinstance(a_right_val, (int, float)) else 0.0
-                        br = b_right_val if isinstance(b_right_val, (int, float)) else 0.0
+                    if (
+                        isinstance(a_left_val, (int, float)) and isinstance(b_left_val, (int, float))
+                        and isinstance(a_right_val, (int, float)) and isinstance(b_right_val, (int, float))
+                    ):
+                        # 両方に L/R データがある場合だけ差分を表示（片方が無いのに 0 として引くと、ありえない差になる）
                         ld = b_left_val - a_left_val
-                        rd = br - ar
-                        diff_text += f"({ld:+.2f}/{rd:+.2f})"
+                        rd = b_right_val - a_right_val
+                        diff_text += f"({fmt(ld, 2, sign=True)}/{fmt(rd, 2, sign=True)})"
 
                     diff_acc_item.setText(diff_text)
                     if diff > 0:
@@ -2798,7 +2808,7 @@ class SnapshotCompareDialog(QDialog):
                 diff_pp_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                 if isinstance(a_pp_val, (int, float)) and isinstance(b_pp_val, (int, float)):
                     pp_diff = b_pp_val - a_pp_val
-                    diff_pp_item.setText(f"{pp_diff:+.0f}")
+                    diff_pp_item.setText(f"{fmt(pp_diff, 0, sign=True)}")
                     if pp_diff > 0:
                         diff_pp_item.setBackground(diff_positive_bg())
                     elif pp_diff < 0:
@@ -2825,7 +2835,7 @@ class SnapshotCompareDialog(QDialog):
                 diff_sp_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                 if isinstance(a_sp_val, (int, float)) and isinstance(b_sp_val, (int, float)):
                     sp_diff = b_sp_val - a_sp_val
-                    diff_sp_item.setText(f"{sp_diff:+.0f}")
+                    diff_sp_item.setText(f"{fmt(sp_diff, 0, sign=True)}")
                     if sp_diff > 0:
                         diff_sp_item.setBackground(diff_positive_bg())
                     elif sp_diff < 0:

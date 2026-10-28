@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from .snapshot import BASE_DIR
+from .fileio import atomic_write_text
 
 
 _CACHE_DIR = BASE_DIR / "cache"
@@ -34,7 +35,7 @@ def save_settings(updates: dict[str, Any]) -> None:
         payload = load_settings()
         payload.update(updates)
         _SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
-        _SETTINGS_PATH.write_text(
+        atomic_write_text(_SETTINGS_PATH, 
             json.dumps(payload, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )

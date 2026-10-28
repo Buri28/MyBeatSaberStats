@@ -12,6 +12,7 @@ import requests
 import time
 
 from .snapshot import BASE_DIR
+from .http_client import get_memoized
 from .http_client import make_session
 
 
@@ -113,7 +114,7 @@ def fetch_player(player_id: str, session: Optional[requests.Session] = None) -> 
     for attempt, timeout_sec in enumerate(timeouts, start=1):
         try:
             # 初回起動時は BeatLeader 側の応答が不安定なことがあるため、短い retry を行う。
-            resp = session.get(url, timeout=timeout_sec)
+            resp = get_memoized(session, url, timeout=timeout_sec)
             if resp.status_code == 404:
                 _log_api_failure("fetch_player", f"404 Not Found url={url} player_id={player_id}")
                 return None

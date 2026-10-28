@@ -78,6 +78,8 @@ from PySide6.QtWidgets import (
     QStyledItemDelegate,
 )
 
+from .numfmt import fmt
+from .modifiers import parse_modifiers
 from .snapshot import BASE_DIR, RESOURCES_DIR
 from .accsaber_reloaded import is_pending_difficulty as _is_rl_pending_difficulty
 from .playlist.batch_config import (
@@ -507,7 +509,7 @@ class _PercentageBarDelegate(QStyledItemDelegate):
         super().initStyleOption(option, index)
         option.displayAlignment = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
         value = self._bar_value(index)
-        if value is not None and value >= self._max_value - 1e-3:
+        if value is not None and value >= self._max_value - 1e-9:
             option.font.setBold(True)
 
     def paint(self, painter, option, index):  # type: ignore[override]
@@ -582,7 +584,7 @@ class _PercentageBarDelegate(QStyledItemDelegate):
             font = QFont(font_data)
         else:
             font = QFont(painter.font())
-        if value >= self._max_value - 1e-3:
+        if value >= self._max_value - 1e-9:
             font.setBold(True)
         painter.setFont(font)
         _NoFocusItemDelegate._paint_cell_text(painter, opt, index, text_color)
@@ -768,9 +770,16 @@ def export_playlist_configs(
     resolved_covers = covers if covers is not None else _pregenerate_covers(configs)
     saved_files: List[str] = []
     errors: List[str] = []
+    service_filled: List[List[MapEntry]] = []
 
     for config in configs:
         _emit(f"Exporting: {config.label}...")
+        if config.source not in ("bs", "ss", "bl", "rl", "acc"):
+            # 以前 Open モードから追加できてしまった設定（source="pl"）。中身が無く、
+            # 出力すると同じ名前の既存ファイルを空の bplist で上書きするので飛ばす。
+            errors.append(f"{config.label}: Open-mode playlists can't be exported from Batch (skipped).")
+            step += 1
+            continue
         try:
             if config.source == "bs":
                 _emit(f"Loading BeatSaver: {config.label}...")
@@ -801,6 +810,14 @@ def export_playlist_configs(
                 step += 1
             else:
                 base_maps = {"ss": ss_maps, "bl": bl_maps, "rl": rl_maps, "acc": rl_maps}.get(config.source, [])
+            # SS / BL / AccSaber の列（ss_player_pp など）で並べる設定は、列の値を先に埋める。
+            # 埋めないと全部 0 になり、出力が曲名順になっていた（画面では埋めてから並べている）。
+            # list そのものを覚える（id() は捨てた list の番号が使い回されることがある）
+            if config.sort_mode.startswith(("ss_", "bl_", "rl_", "acc_")) and not any(
+                base_maps is filled for filled in service_filled
+            ):
+                _refresh_snapshot_entries_service_columns(base_maps, steam_id)
+                service_filled.append(base_maps)
             maps = _apply_config_filter(list(base_maps), config, mapper_played_counts)
             _write_config_files(maps, config, folder_path, saved_files, errors, resolved_covers)
         except Exception as exc:
@@ -1066,8 +1083,8 @@ class MapEntry:
     stars: float
     max_pp: float           # SS: maxPP (多くは 0), BL: 0 (starsを代替使用)
     player_pp: float        # プレイヤーの取得 PP (0 = 未プレイ)
-    cleared: bool           # NF/SS/NA なしクリア済み
-    nf_clear: bool          # NF 付きクリアあり (cleared=False の場合)
+    cleared: bool           # NF/SS/NA なしクリア済み（modifiers.classify_play が "clear"）
+    nf_clear: bool          # プレイ済みだがクリアではない（NF / SS / NA 付き）。cleared=False の場合
     player_acc: float       # プレイヤーの精度 % (0 = 未プレイ)
     player_rank: int        # プレイヤーのランク (0 = 未プレイ)
     leaderboard_id: str     # SS: leaderboard id, BL: map id
@@ -1133,10 +1150,9 @@ class MapEntry:
         if self.cleared:
             return f"{STATUS_CLEARED}{queued_suffix}"
         if self.nf_clear:
-            mods_upper = self.player_mods.upper()
-            if not self.player_mods or "NF" in mods_upper:
+            if not self.player_mods or "NF" in parse_modifiers(self.player_mods):
                 return f"{STATUS_NF}{queued_suffix}"
-            # SC 等の NF 以外のモディファイアで無効化されている場合
+            # SS / NA など、NF 以外の修飾子でクリアにならない場合
             return f"{STATUS_WARN}{self.player_mods}{queued_suffix}"
         return f"{STATUS_UNPLAYED}{queued_suffix}"
 
@@ -1678,6 +1694,14 @@ def _played_at_item(ts: int) -> QTableWidgetItem:
     return item
 
 
+def _bl_maps_played_sort_value(entry: "MapEntry") -> float:
+    """Maps タブの BL Played 列の並べ替えの値（_played_status_item と同じ）。"""
+    ts = _bl_effective_played_at_ts(entry)
+    if ts > 0:
+        return float(ts)
+    return 0.0 if _bl_has_played_score(entry) else -1.0
+
+
 def _played_status_item(ts: int, played: bool) -> QTableWidgetItem:
     """日時がない場合は Played / - を含めて状態表示するセル項目を返す。"""
     if ts > 0:
@@ -1843,15 +1867,42 @@ def _make_playlist_cover(
 
 
 def _make_bplist(title: str, entries: List[MapEntry], image: str = "") -> dict:
-    songs = []
+    """MapEntry の並びから bplist を作る。
+
+    - 同じ曲（hash）は 1 つにまとめ、難易度を並べる（最初に出てきた位置に置く）。
+    - 難易度が分からない行があれば、その曲は難易度を付けずに曲全体として出す。
+      以前は ExpertPlus を補っていたので、E+ の無い譜面だと壊れたエントリになっていた。
+    - hash が無く BeatSaver の key だけ分かる曲は key で出す。どちらも無ければ出さない。
+    """
+    songs: List[dict] = []
+    by_id: Dict[str, dict] = {}
+    whole_song: set = set()
     for e in entries:
-        char = e.mode or "Standard"
-        diff = e.difficulty or "ExpertPlus"
-        songs.append({
-            "hash": e.song_hash,
-            "songName": e.song_name,
-            "difficulties": [{"characteristic": char, "name": diff}],
-        })
+        song_hash = (e.song_hash or "").strip().upper()
+        key = str(getattr(e, "beatsaver_key", "") or "").strip()
+        song_id = f"hash:{song_hash}" if song_hash else (f"key:{key.lower()}" if key else "")
+        if not song_id:
+            continue
+        song = by_id.get(song_id)
+        if song is None:
+            song = {"songName": e.song_name, "difficulties": []}
+            if song_hash:
+                song["hash"] = song_hash
+            else:
+                song["key"] = key
+            by_id[song_id] = song
+            songs.append(song)
+        if not e.difficulty:
+            whole_song.add(song_id)
+            continue
+        diff_item = {"characteristic": e.mode or "Standard", "name": e.difficulty}
+        if diff_item not in song["difficulties"]:
+            song["difficulties"].append(diff_item)
+    for song_id in whole_song:
+        by_id[song_id].pop("difficulties", None)
+    for song in songs:
+        if "difficulties" in song and not song["difficulties"]:
+            song.pop("difficulties")
     return {
         "playlistTitle": title,
         "playlistAuthor": "MyBeatSaberStats",
@@ -2222,6 +2273,9 @@ _BATCH_PRESETS: List[_BatchPreset] = [
 def _sort_entries(entries: List[MapEntry], sort_mode: str, mapper_played_counts: Optional[Dict[str, int]] = None) -> List[MapEntry]:
     """sort_mode に従って MapEntry をソートした新しいリストを返す。"""
     result = list(entries)
+    if sort_mode == "playlist_order":
+        # Open モード：読み込んだプレイリストの曲順を保つ
+        return result
     if mapper_played_counts is None:
         mapper_played_counts = _build_bl_mapper_played_counts(entries)
     if sort_mode == "ss_pp_high":
@@ -2235,7 +2289,8 @@ def _sort_entries(entries: List[MapEntry], sort_mode: str, mapper_played_counts:
     elif sort_mode == "ss_rank_low":
         result.sort(key=lambda e: (e.ss_player_rank or 999999, e.ss_stars, e.song_name.lower()))
     elif sort_mode == "ss_rank_high":
-        result.sort(key=lambda e: (-(e.ss_player_rank or 0), e.ss_stars, e.song_name.lower()))
+        # 画面の表と同じ並び（未プレイは順位 999,999,999 として扱う → 大きい順では先頭）
+        result.sort(key=lambda e: (-(e.ss_player_rank or 999_999_999), e.ss_stars, e.song_name.lower()))
     elif sort_mode == "ss_star_desc":
         result.sort(key=lambda e: (-e.ss_stars, e.song_name.lower()))
     elif sort_mode == "ss_star_asc":
@@ -2243,7 +2298,8 @@ def _sort_entries(entries: List[MapEntry], sort_mode: str, mapper_played_counts:
     elif sort_mode == "ss_played_desc":
         result.sort(key=lambda e: (0 if e.ss_played_at_ts > 0 else 1, -e.ss_played_at_ts if e.ss_played_at_ts > 0 else 0, e.song_name.lower()))
     elif sort_mode == "ss_played_asc":
-        result.sort(key=lambda e: (0 if e.ss_played_at_ts > 0 else 1, e.ss_played_at_ts if e.ss_played_at_ts > 0 else 0, e.song_name.lower()))
+        # 画面の表と同じ並び（未プレイは 0 → 古い順では先頭）
+        result.sort(key=lambda e: (e.ss_played_at_ts, e.song_name.lower()))
     elif sort_mode == "bl_pp_high":
         result.sort(key=lambda e: (-e.bl_player_pp, e.bl_stars, e.song_name.lower()))
     elif sort_mode == "bl_pp_low":
@@ -2255,7 +2311,8 @@ def _sort_entries(entries: List[MapEntry], sort_mode: str, mapper_played_counts:
     elif sort_mode == "bl_rank_low":
         result.sort(key=lambda e: (e.bl_player_rank or 999999, e.bl_stars, e.song_name.lower()))
     elif sort_mode == "bl_rank_high":
-        result.sort(key=lambda e: (-(e.bl_player_rank or 0), e.bl_stars, e.song_name.lower()))
+        # 画面の表と同じ並び（未プレイは順位 999,999,999 として扱う → 大きい順では先頭）
+        result.sort(key=lambda e: (-(e.bl_player_rank or 999_999_999), e.bl_stars, e.song_name.lower()))
     elif sort_mode == "bl_star_desc":
         result.sort(key=lambda e: (-e.bl_stars, e.song_name.lower()))
     elif sort_mode == "bl_star_asc":
@@ -2263,7 +2320,8 @@ def _sort_entries(entries: List[MapEntry], sort_mode: str, mapper_played_counts:
     elif sort_mode == "bl_played_desc":
         result.sort(key=lambda e: (0 if e.bl_played_at_ts > 0 else 1, -e.bl_played_at_ts if e.bl_played_at_ts > 0 else 0, e.song_name.lower()))
     elif sort_mode == "bl_played_asc":
-        result.sort(key=lambda e: (0 if e.bl_played_at_ts > 0 else 1, e.bl_played_at_ts if e.bl_played_at_ts > 0 else 0, e.song_name.lower()))
+        # 画面の表と同じ並び（未プレイは 0 → 古い順では先頭）
+        result.sort(key=lambda e: (e.bl_played_at_ts, e.song_name.lower()))
     elif sort_mode == "acc_ap_high":
         result.sort(key=lambda e: (-e.acc_ap_value, e.acc_complexity_value, e.song_name.lower()))
     elif sort_mode == "acc_ap_low":
@@ -2275,7 +2333,8 @@ def _sort_entries(entries: List[MapEntry], sort_mode: str, mapper_played_counts:
     elif sort_mode == "acc_rank_low":
         result.sort(key=lambda e: (e.acc_player_rank_value or 999999, e.acc_complexity_value, e.song_name.lower()))
     elif sort_mode == "acc_rank_high":
-        result.sort(key=lambda e: (-(e.acc_player_rank_value or 0), e.acc_complexity_value, e.song_name.lower()))
+        # 画面の表と同じ並び（未プレイは順位 999,999,999 として扱う → 大きい順では先頭）
+        result.sort(key=lambda e: (-(e.acc_player_rank_value or 999_999_999), e.acc_complexity_value, e.song_name.lower()))
     elif sort_mode == "acc_complexity_desc":
         result.sort(key=lambda e: (-e.acc_complexity_value, e.song_name.lower()))
     elif sort_mode == "acc_complexity_asc":
@@ -2287,7 +2346,8 @@ def _sort_entries(entries: List[MapEntry], sort_mode: str, mapper_played_counts:
     elif sort_mode == "acc_played_desc":
         result.sort(key=lambda e: (0 if e.acc_played_at_ts > 0 else 1, -e.acc_played_at_ts if e.acc_played_at_ts > 0 else 0, e.song_name.lower()))
     elif sort_mode == "acc_played_asc":
-        result.sort(key=lambda e: (0 if e.acc_played_at_ts > 0 else 1, e.acc_played_at_ts if e.acc_played_at_ts > 0 else 0, e.song_name.lower()))
+        # 画面の表と同じ並び（未プレイは 0 → 古い順では先頭）
+        result.sort(key=lambda e: (e.acc_played_at_ts, e.song_name.lower()))
     elif sort_mode == "rl_ap_high":
         result.sort(key=lambda e: (-e.rl_ap_value, e.rl_complexity_value, e.song_name.lower()))
     elif sort_mode == "rl_ap_low":
@@ -2299,7 +2359,8 @@ def _sort_entries(entries: List[MapEntry], sort_mode: str, mapper_played_counts:
     elif sort_mode == "rl_rank_low":
         result.sort(key=lambda e: (e.rl_player_rank_value or 999999, e.rl_complexity_value, e.song_name.lower()))
     elif sort_mode == "rl_rank_high":
-        result.sort(key=lambda e: (-(e.rl_player_rank_value or 0), e.rl_complexity_value, e.song_name.lower()))
+        # 画面の表と同じ並び（未プレイは順位 999,999,999 として扱う → 大きい順では先頭）
+        result.sort(key=lambda e: (-(e.rl_player_rank_value or 999_999_999), e.rl_complexity_value, e.song_name.lower()))
     elif sort_mode == "rl_complexity_desc":
         result.sort(key=lambda e: (-e.rl_complexity_value, e.song_name.lower()))
     elif sort_mode == "rl_complexity_asc":
@@ -2311,7 +2372,8 @@ def _sort_entries(entries: List[MapEntry], sort_mode: str, mapper_played_counts:
     elif sort_mode == "rl_played_desc":
         result.sort(key=lambda e: (0 if e.rl_played_at_ts > 0 else 1, -e.rl_played_at_ts if e.rl_played_at_ts > 0 else 0, e.song_name.lower()))
     elif sort_mode == "rl_played_asc":
-        result.sort(key=lambda e: (0 if e.rl_played_at_ts > 0 else 1, e.rl_played_at_ts if e.rl_played_at_ts > 0 else 0, e.song_name.lower()))
+        # 画面の表と同じ並び（未プレイは 0 → 古い順では先頭）
+        result.sort(key=lambda e: (e.rl_played_at_ts, e.song_name.lower()))
     elif sort_mode == "pp_high":
         result.sort(key=lambda e: (-e.player_pp, e.stars, e.song_name))
     elif sort_mode == "pp_low":
@@ -2382,13 +2444,8 @@ def _sort_entries(entries: List[MapEntry], sort_mode: str, mapper_played_counts:
             )
         )
     elif sort_mode == "date_asc":
-        result.sort(
-            key=lambda e: (
-                0 if e.source_date_ts > 0 else 1,
-                e.source_date_ts if e.source_date_ts > 0 else 0,
-                e.song_name.lower(),
-            )
-        )
+        # 画面の表と同じ並び（日付なしは -1 → 古い順では先頭）
+        result.sort(key=lambda e: (e.source_date_ts if e.source_date_ts > 0 else -1, e.song_name.lower()))
     elif sort_mode == "duration_desc":
         result.sort(key=lambda e: (-e.duration_seconds, e.song_name.lower()))
     elif sort_mode == "duration_asc":
@@ -2402,9 +2459,10 @@ def _sort_entries(entries: List[MapEntry], sort_mode: str, mapper_played_counts:
     elif sort_mode == "bl_mapper_played_asc":
         result.sort(key=lambda e: (_bl_mapper_played_count_value(e, mapper_played_counts), e.mapper.lower(), e.song_name.lower()))
     elif sort_mode == "bl_maps_played_desc":
-        result.sort(key=lambda e: (0 if e.bl_played_at_ts > 0 else 1, -e.bl_played_at_ts if e.bl_played_at_ts > 0 else 0, e.song_name.lower()))
+        # 画面の表（_played_status_item）と同じ値で並べる
+        result.sort(key=lambda e: (-_bl_maps_played_sort_value(e), e.song_name.lower()))
     elif sort_mode == "bl_maps_played_asc":
-        result.sort(key=lambda e: (0 if e.bl_played_at_ts > 0 else 1, e.bl_played_at_ts if e.bl_played_at_ts > 0 else 0, e.song_name.lower()))
+        result.sort(key=lambda e: (_bl_maps_played_sort_value(e), e.song_name.lower()))
     elif sort_mode == "bl_maps_watched_desc":
         result.sort(key=lambda e: (-e.beatleader_replays_watched, e.song_name.lower()))
     elif sort_mode == "bl_maps_watched_asc":
@@ -2543,7 +2601,8 @@ def _apply_config_filter(
             targets = (e.song_name.lower(), e.song_author.lower(), e.mapper.lower())
             if not all(any(kw in t for t in targets) for kw in keywords):
                 continue
-        if e.stars < cfg.star_min or e.stars >= cfg.star_max:
+        # BeatSaver（Maps）は画面でも★の範囲で絞らない（多くは stars=0 で、絞ると空になる）
+        if cfg.source != "bs" and (e.stars < cfg.star_min or e.stars >= cfg.star_max):
             continue
         if cfg.mapper_played_min > 0 and _bl_mapper_played_count_value(e, mapper_played_counts) < cfg.mapper_played_min:
             continue
@@ -2854,6 +2913,8 @@ def _sort_indicator_from_mode(sort_mode: str) -> Tuple[int, Qt.SortOrder]:
         "author_desc": (_COL_AUTHOR, Qt.SortOrder.DescendingOrder),
         "author_asc": (_COL_AUTHOR, Qt.SortOrder.AscendingOrder),
     }
+    if sort_mode == "playlist_order":
+        return (-1, Qt.SortOrder.AscendingOrder)
     return sort_col_map.get(sort_mode, (_COL_STATUS, Qt.SortOrder.DescendingOrder))
 
 
@@ -3115,6 +3176,10 @@ class _PresetListWidget(QListWidget):
                 item.setCheckState(new)
         else:
             super().mouseReleaseEvent(event)
+
+
+class _PreviewSelectionChanged(Exception):
+    """プレビューの取得を待っている間に、別の曲が選ばれた。"""
 
 
 class PlaylistWindow(QMainWindow):
@@ -4644,7 +4709,9 @@ class PlaylistWindow(QMainWindow):
             self._update_beatsaver_cache_status()
             return
         batch_hashes: List[str] = []
-        while self._beatsaver_meta_pending_hashes and len(batch_hashes) < 1:
+        # BeatSaver の /maps/hash は一度に 50 件まで受け付ける。1 件ずつだと 1 件ごとにリクエストと
+        # キャッシュ（十数 MB）の書き直しが起きていた。表示の進み具合も見えるよう 20 件ずつにする。
+        while self._beatsaver_meta_pending_hashes and len(batch_hashes) < 20:
             song_hash = self._beatsaver_meta_pending_hashes.pop(0)
             self._beatsaver_meta_pending_set.discard(song_hash)
             if song_hash in self._beatsaver_meta_inflight_hashes:
@@ -4694,6 +4761,17 @@ class PlaylistWindow(QMainWindow):
 
     def _on_beatsaver_meta_batch_error(self, _msg: str) -> None:
         """BeatSaver metadata 取得失敗時に状態を巻き戻して次回再試行へ進める。"""
+        # 失敗した分をキューの後ろに戻す（同じ譜面は 1 回まで。何度も失敗する譜面で止まらないように）
+        retried = getattr(self, "_beatsaver_meta_retried", None)
+        if retried is None:
+            retried = set()
+            self._beatsaver_meta_retried = retried
+        for song_hash in list(self._beatsaver_meta_inflight_hashes):
+            if song_hash in retried or song_hash in self._beatsaver_meta_pending_set:
+                continue
+            retried.add(song_hash)
+            self._beatsaver_meta_pending_hashes.append(song_hash)
+            self._beatsaver_meta_pending_set.add(song_hash)
         self._beatsaver_meta_inflight_hashes.clear()
         self._beatsaver_meta_active_hash = ""
         self._update_beatsaver_cache_status("retrying after error")
@@ -5294,7 +5372,9 @@ class PlaylistWindow(QMainWindow):
         # Maps 読み込み完了時（_on_load_finished_impl）と同じく
         # キャッシュ済みの SS / BL スコアをここでも再適用する。
         # 表の再構築はこの直後の _apply_filter() が行うので行単位の更新は不要。
-        _refresh_entries_from_cached_player_scores(self._maps_all_entries, self._steam_id)
+        # スコアキャッシュは数十 MB あるので、読み込みは別スレッドで行い、その間も画面を動かす
+        _entries, _sid = self._maps_all_entries, self._steam_id
+        self._run_blocking_io(lambda: _refresh_entries_from_cached_player_scores(_entries, _sid))
         self._maps_filtered = list(self._maps_all_entries)
         self._maps_loaded_source_key = self._maps_source_key
         self._maps_loaded_steam_id = self._steam_id
@@ -5769,6 +5849,9 @@ class PlaylistWindow(QMainWindow):
             return "mapper_desc" if is_desc else "mapper_asc"
         if col == _COL_AUTHOR:
             return "author_desc" if is_desc else "author_asc"
+        if col < 0 and self._rb_open.isChecked():
+            # Open モードで並べ替えを選んでいないときは、プレイリストの曲順のまま出す
+            return "playlist_order"
         return "ss_star_asc"
 
     def _make_export_tag(self) -> str:
@@ -5791,14 +5874,18 @@ class PlaylistWindow(QMainWindow):
         # 検索テキスト
         search = self._search_edit.text().strip()
         if search:
-            safe = search.replace(" ", "-")[:20]
-            parts.append(f"q_{safe}")
+            # ファイル名に使えない文字を除く（Batch 側と同じ）。"a/b" はエラー、"re:zero" は NTFS の
+            # 代替データストリームに書かれてファイルが見えなくなっていた。
+            safe = re.sub(r'[\\/:*?"<>|]', '', search).strip().replace(" ", "-")[:20]
+            if safe:
+                parts.append(f"q_{safe}")
 
         # ★レンジ
         s_min = self._star_min.value()
         s_max = self._star_max.value()
         if s_min > 0.0 or s_max < 20.0:
-            parts.append(f"star{s_min:.0f}-{s_max:.0f}")
+            # 範囲の境界は値そのまま出す（Batch 側と同じ :g）。切り捨てると 3.5〜8.5 が "star3-8" になる。
+            parts.append(f"star{s_min:g}-{s_max:g}")
 
         # AccSaber / AccSaber RL カテゴリ
         if self._rb_acc_rl.isChecked():
@@ -6472,7 +6559,13 @@ class PlaylistWindow(QMainWindow):
             self._snapshot_loaded_source_key = self._pending_load_source_key
             self._invalidate_bl_preview_link_indices()
         self._sync_active_table_state()
-        self._refresh_maps_entries_from_player_caches()
+        # スコアキャッシュの読み直しを待っている間に Load を押されると、読み込み完了の処理が入れ子で動き、
+        # 新しい一覧を古い一覧で上書きしてしまう。待っている間は Load を押せなくする。
+        self._btn_load.setEnabled(False)
+        try:
+            self._refresh_maps_entries_from_player_caches()
+        finally:
+            self._btn_load.setEnabled(True)
         self._update_load_progress_dialog(1, 3, "Preparing table...")
         if not entries:
             self._count_label.setText("0 maps")
@@ -6682,7 +6775,11 @@ class PlaylistWindow(QMainWindow):
         return self._ss_preview_score_index
 
     def _refresh_maps_entries_from_player_caches(self) -> None:
-        changed_hashes = _refresh_entries_from_cached_player_scores(self._maps_all_entries, self._steam_id)
+        # スコアキャッシュは数十 MB あるので、読み込みは別スレッドで行い、その間も画面を動かす
+        _entries, _sid = self._maps_all_entries, self._steam_id
+        changed_hashes = self._run_blocking_io(
+            lambda: _refresh_entries_from_cached_player_scores(_entries, _sid)
+        ) or set()
         if not changed_hashes:
             return
         self._refresh_rows_for_hashes(changed_hashes)
@@ -7032,6 +7129,40 @@ class PlaylistWindow(QMainWindow):
         self._replay_viewer_mode = "arc" if self._rb_replay_arc.isChecked() else "bl"
         self._save_window_state()
 
+    def _run_blocking_io(self, fn):
+        """通信などの時間のかかる処理を別スレッドで動かし、終わるまで画面を動かしながら待つ。
+
+        画面のスレッドで直接通信すると、応答待ちの間（最長 15〜60 秒）画面が固まっていた。
+        fn の中では Qt の部品に触らないこと（結果を返して、画面の更新は呼び出し側で行う）。
+        """
+        result: dict = {}
+
+        def _run() -> None:
+            try:
+                result["value"] = fn()
+            except BaseException as exc:  # noqa: BLE001
+                result["exc"] = exc
+
+        worker = threading.Thread(target=_run, daemon=True)
+        worker.start()
+        # 待ちの深さ。待っている間に別の待ちが入れ子で始まっても、外側が終わるまで「処理中」のままにする
+        self._io_depth = getattr(self, "_io_depth", 0) + 1
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            while worker.is_alive():
+                QApplication.processEvents()
+                worker.join(0.03)
+        finally:
+            QApplication.restoreOverrideCursor()
+            self._io_depth -= 1
+        if "exc" in result:
+            raise result["exc"]
+        return result.get("value")
+
+    def _io_busy(self) -> bool:
+        """_run_blocking_io で待っている最中か。"""
+        return getattr(self, "_io_depth", 0) > 0
+
     def _transform_replay_url_for_viewer(self, url: str) -> str:
         """選択中のビューアに合わせて BeatLeader リプレイ URL を変換する。
 
@@ -7050,14 +7181,31 @@ class PlaylistWindow(QMainWindow):
         return f"https://replay.beatleader.com/?scoreId={score_id}"
 
     def _open_selected_preview_url(self) -> None:
-        sender = self.sender()
+        if self._io_busy():
+            # 前の取得の途中（待っている間に押された）
+            return
+        self._preview_io_entry = self._selected_entry()
+        try:
+            self._open_selected_preview_url_impl(self.sender())
+        except _PreviewSelectionChanged:
+            # 待っている間に別の曲が選ばれた。前の曲の URL を今の曲に付けないよう、何もしない
+            return
+
+    def _preview_io(self, fn):
+        """プレビュー用の取得。待っている間に選択が変わったら _PreviewSelectionChanged を投げる。"""
+        result = self._run_blocking_io(fn)
+        if self._selected_entry() is not getattr(self, "_preview_io_entry", None):
+            raise _PreviewSelectionChanged()
+        return result
+
+    def _open_selected_preview_url_impl(self, sender) -> None:
         url = str(sender.property("url") if sender is not None else self._btn_preview_open.property("url") or "")
         if not url and sender is self._btn_preview_bl:
             h = str(sender.property("song_hash") or "")
             m = str(sender.property("song_mode") or "Standard")
             d = str(sender.property("song_diff") or "ExpertPlus")
             if h:
-                lb_map = _fetch_bl_leaderboards_by_hash(self._bl_api_session, h)
+                lb_map = self._preview_io(lambda: _fetch_bl_leaderboards_by_hash(self._bl_api_session, h))
                 lb_id = lb_map.get((m, d), "")
                 if lb_id:
                     url = f"https://beatleader.com/leaderboard/global/{lb_id}"
@@ -7075,12 +7223,12 @@ class PlaylistWindow(QMainWindow):
                 m = str(sender.property("song_mode") or "Standard")
                 d = str(sender.property("song_diff") or "ExpertPlus")
                 if h:
-                    lb_map = _fetch_bl_leaderboards_by_hash(self._bl_api_session, h)
+                    lb_map = self._preview_io(lambda: _fetch_bl_leaderboards_by_hash(self._bl_api_session, h))
                     leaderboard_id = lb_map.get((m, d), "")
                     if leaderboard_id:
                         sender.setProperty("leaderboard_id", leaderboard_id)
             if leaderboard_id:
-                url = self._resolve_bl_top_replay_url(leaderboard_id, countries)
+                url = self._preview_io(lambda: self._resolve_bl_top_replay_url(leaderboard_id, countries))
                 sender.setProperty("url", url)
                 entry = self._selected_entry()
                 if entry is not None:
@@ -7095,11 +7243,11 @@ class PlaylistWindow(QMainWindow):
                 m = str(sender.property("song_mode") or "Standard")
                 d = str(sender.property("song_diff") or "ExpertPlus")
                 if h:
-                    ss_lb_id = self._resolve_ss_leaderboard_id_by_hash(h, m, d)
+                    ss_lb_id = self._preview_io(lambda: self._resolve_ss_leaderboard_id_by_hash(h, m, d))
                     if ss_lb_id:
                         sender.setProperty("ss_leaderboard_id", ss_lb_id)
             if ss_lb_id:
-                url = self._resolve_ss_top_replay_url(ss_lb_id)
+                url = self._preview_io(lambda: self._resolve_ss_top_replay_url(ss_lb_id))
                 sender.setProperty("url", url)
             if not url:
                 QMessageBox.information(
@@ -7233,7 +7381,9 @@ class PlaylistWindow(QMainWindow):
                 QMessageBox.warning(self, "OneClickDownload", "Beat Saber フォルダが設定されていません。Settings で設定してください。")
             return False
 
-        download_url = self._resolve_beatsaver_download_url(entry)
+        if self._io_busy():
+            return False
+        download_url = self._run_blocking_io(lambda: self._resolve_beatsaver_download_url(entry))
         if not download_url:
             if show_dialogs:
                 QMessageBox.warning(self, "OneClickDownload", "ダウンロード URL を取得できませんでした。")
@@ -7246,7 +7396,9 @@ class PlaylistWindow(QMainWindow):
             return True
 
         target_dir = custom_levels_dir / self._build_beatsaver_folder_name(entry)
-        try:
+
+        def _download_and_install() -> None:
+            # 別スレッドで動く（Qt の部品には触らない）
             custom_levels_dir.mkdir(parents=True, exist_ok=True)
             response = _get_shared_session().get(download_url, timeout=60, headers={"Accept": "*/*"})
             response.raise_for_status()
@@ -7267,6 +7419,9 @@ class PlaylistWindow(QMainWindow):
                 if target_dir.exists():
                     raise RuntimeError(f"保存先フォルダがすでに存在します: {target_dir.name}")
                 shutil.copytree(map_root, target_dir)
+
+        try:
+            self._run_blocking_io(_download_and_install)
         except Exception as exc:
             if show_dialogs:
                 QMessageBox.critical(self, "OneClickDownload", f"譜面のダウンロードに失敗しました。\n\n{exc}")
@@ -7297,6 +7452,9 @@ class PlaylistWindow(QMainWindow):
         return True
 
     def _download_selected_preview_entry(self) -> None:
+        if self._io_busy():
+            # 前のダウンロードの途中
+            return
         entry = self._selected_entry()
         if entry is None:
             QMessageBox.information(self, "OneClickDownload", "譜面が選択されていません。")
@@ -7304,6 +7462,9 @@ class PlaylistWindow(QMainWindow):
         self._download_beatsaver_entry(entry)
 
     def _download_selected_entries(self, show_dialogs: bool = True) -> None:
+        if self._io_busy():
+            # 前のダウンロードの途中。押しても「失敗」と数えないよう、何もしない
+            return
         entries = [
             entry for entry in self._selected_entries()
             if self._can_download_beatsaver_entry(entry)
@@ -7578,8 +7739,15 @@ class PlaylistWindow(QMainWindow):
         elif self._rb_bs.isChecked():
             src_tag = "bs"
         elif self._rb_open.isChecked():
-            svc = self._svc_combo.currentData()
-            src_tag = {"scoresaber": "ss", "beatleader": "bl", "accsaber_rl": "rl"}.get(svc, "pl")
+            # 開いたプレイリスト（.bplist）のパスを Batch に保存する仕組みが無い。
+            # 追加すると、空の bplist やランク譜面一覧全体を書き出してしまうので、追加させない。
+            QMessageBox.information(
+                self,
+                "Add to Batch",
+                "Playlists opened in Open mode can't be added to Batch.\n"
+                "Use Export to save this playlist directly.",
+            )
+            return
         else:
             src_tag = "rl"
         src_label = _BATCH_SRC_PREFIX.get(src_tag, src_tag.upper())
@@ -8407,13 +8575,13 @@ class PlaylistWindow(QMainWindow):
         ss_rank_item = _NumItem(str(e.ss_player_rank) if e.ss_player_rank > 0 else "-", e.ss_player_rank if e.ss_player_rank > 0 else 999_999_999)
         ss_rank_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         table.setItem(row, _COL_SS_RANK, ss_rank_item)
-        ss_star_item = _NumItem(f"{e.ss_stars:.2f}" if e.ss_stars > 0 else "-", e.ss_stars)
+        ss_star_item = _NumItem(f"{fmt(e.ss_stars, 2)}" if e.ss_stars > 0 else "-", e.ss_stars)
         ss_star_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         table.setItem(row, _COL_SS_STARS, ss_star_item)
-        ss_acc_item = _NumItem(f"{e.ss_player_acc:.2f}%" if e.ss_player_acc > 0 else "-", e.ss_player_acc)
+        ss_acc_item = _NumItem(f"{fmt(e.ss_player_acc, 2)}%" if e.ss_player_acc > 0 else "-", e.ss_player_acc)
         ss_acc_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         table.setItem(row, _COL_SS_ACC, ss_acc_item)
-        ss_pp_item = _NumItem(f"{e.ss_player_pp:.1f}" if e.ss_player_pp > 0 else "-", e.ss_player_pp)
+        ss_pp_item = _NumItem(f"{fmt(e.ss_player_pp, 1)}" if e.ss_player_pp > 0 else "-", e.ss_player_pp)
         ss_pp_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         table.setItem(row, _COL_SS_PP, ss_pp_item)
 
@@ -8421,25 +8589,25 @@ class PlaylistWindow(QMainWindow):
         bl_rank_item = _NumItem(str(e.bl_player_rank) if e.bl_player_rank > 0 else "-", e.bl_player_rank if e.bl_player_rank > 0 else 999_999_999)
         bl_rank_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         table.setItem(row, _COL_BL_RANK, bl_rank_item)
-        bl_star_item = _NumItem(f"{e.bl_stars:.2f}" if e.bl_stars > 0 else "-", e.bl_stars)
+        bl_star_item = _NumItem(f"{fmt(e.bl_stars, 2)}" if e.bl_stars > 0 else "-", e.bl_stars)
         bl_star_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         table.setItem(row, _COL_BL_STARS, bl_star_item)
-        bl_acc_item = _NumItem(f"{e.bl_player_acc:.2f}%" if e.bl_player_acc > 0 else "-", e.bl_player_acc)
+        bl_acc_item = _NumItem(f"{fmt(e.bl_player_acc, 2)}%" if e.bl_player_acc > 0 else "-", e.bl_player_acc)
         bl_acc_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         table.setItem(row, _COL_BL_ACC, bl_acc_item)
-        bl_pp_item = _NumItem(f"{e.bl_player_pp:.1f}" if e.bl_player_pp > 0 else "-", e.bl_player_pp)
+        bl_pp_item = _NumItem(f"{fmt(e.bl_player_pp, 1)}" if e.bl_player_pp > 0 else "-", e.bl_player_pp)
         bl_pp_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         table.setItem(row, _COL_BL_PP, bl_pp_item)
 
         table.setItem(row, _COL_ACC_PLAYED, _played_at_item(e.acc_played_at_ts))
         table.setItem(row, _COL_ACC_CAT, QTableWidgetItem(self._format_acc_category_text(e.acc_category_value)))
-        acc_complexity_item = _NumItem(f"{e.acc_complexity_value:.1f}" if e.acc_complexity_value > 0 else "-", e.acc_complexity_value)
+        acc_complexity_item = _NumItem(f"{fmt(e.acc_complexity_value, 1)}" if e.acc_complexity_value > 0 else "-", e.acc_complexity_value)
         acc_complexity_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         table.setItem(row, _COL_ACC_COMPLEXITY, acc_complexity_item)
-        acc_acc_item = _NumItem(f"{e.acc_player_acc:.2f}%" if e.acc_player_acc > 0 else "-", e.acc_player_acc)
+        acc_acc_item = _NumItem(f"{fmt(e.acc_player_acc, 2)}%" if e.acc_player_acc > 0 else "-", e.acc_player_acc)
         acc_acc_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         table.setItem(row, _COL_ACC_ACC, acc_acc_item)
-        acc_ap_item = _NumItem(f"{e.acc_ap_value:.2f}" if e.acc_ap_value > 0 else "-", e.acc_ap_value)
+        acc_ap_item = _NumItem(f"{fmt(e.acc_ap_value, 2)}" if e.acc_ap_value > 0 else "-", e.acc_ap_value)
         acc_ap_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         table.setItem(row, _COL_ACC_AP, acc_ap_item)
         acc_rank_item = _NumItem(str(e.acc_player_rank_value) if e.acc_player_rank_value > 0 else "-", e.acc_player_rank_value if e.acc_player_rank_value > 0 else 999_999_999)
@@ -8448,13 +8616,13 @@ class PlaylistWindow(QMainWindow):
 
         table.setItem(row, _COL_RL_PLAYED, _played_at_item(e.rl_played_at_ts))
         table.setItem(row, _COL_RL_CAT, QTableWidgetItem(self._format_acc_category_text(e.rl_category_value)))
-        rl_complexity_item = _NumItem(f"{e.rl_complexity_value:.1f}" if e.rl_complexity_value > 0 else "-", e.rl_complexity_value)
+        rl_complexity_item = _NumItem(f"{fmt(e.rl_complexity_value, 1)}" if e.rl_complexity_value > 0 else "-", e.rl_complexity_value)
         rl_complexity_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         table.setItem(row, _COL_RL_COMPLEXITY, rl_complexity_item)
-        rl_acc_item = _NumItem(f"{e.rl_player_acc:.2f}%" if e.rl_player_acc > 0 else "-", e.rl_player_acc)
+        rl_acc_item = _NumItem(f"{fmt(e.rl_player_acc, 2)}%" if e.rl_player_acc > 0 else "-", e.rl_player_acc)
         rl_acc_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         table.setItem(row, _COL_RL_ACC, rl_acc_item)
-        rl_ap_item = _NumItem(f"{e.rl_ap_value:.2f}" if e.rl_ap_value > 0 else "-", e.rl_ap_value)
+        rl_ap_item = _NumItem(f"{fmt(e.rl_ap_value, 2)}" if e.rl_ap_value > 0 else "-", e.rl_ap_value)
         rl_ap_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         table.setItem(row, _COL_RL_AP, rl_ap_item)
         rl_rank_item = _NumItem(str(e.rl_player_rank_value) if e.rl_player_rank_value > 0 else "-", e.rl_player_rank_value if e.rl_player_rank_value > 0 else 999_999_999)
@@ -8463,7 +8631,7 @@ class PlaylistWindow(QMainWindow):
 
         if is_bs_mode:
             bs_rate_item = _NumItem(
-                f"{e.player_pp:.1f}" if e.player_pp > 0 else "-",
+                f"{fmt(e.player_pp, 1)}" if e.player_pp > 0 else "-",
                 e.player_pp,
             )
             bs_rate_item.setData(Qt.ItemDataRole.UserRole, e.player_pp)

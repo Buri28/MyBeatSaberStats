@@ -27,6 +27,7 @@ from ..playlist_view import (
     load_bl_maps,
     load_ss_maps,
 )
+from ..fileio import atomic_write_text
 
 
 _BL_LEADERBOARD_CACHE_PATH = _CACHE_DIR / "beatleader_leaderboards_by_hash.json"
@@ -72,7 +73,7 @@ def _save_bl_leaderboard_disk_cache(cache: Dict[str, Dict[Tuple[str, str], str]]
     }
     try:
         _BL_LEADERBOARD_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        _BL_LEADERBOARD_CACHE_PATH.write_text(
+        atomic_write_text(_BL_LEADERBOARD_CACHE_PATH, 
             json.dumps(payload, ensure_ascii=False), encoding="utf-8"
         )
     except Exception:
@@ -262,7 +263,7 @@ def load_bplist_maps(
 ) -> List[MapEntry]:
     """.bplist / .json を読み込み、既存 ranked 情報と突き合わせて MapEntry 化する。"""
     try:
-        bplist = json.loads(bplist_path.read_text(encoding="utf-8"))
+        bplist = json.loads(bplist_path.read_text(encoding="utf-8-sig"))  # BOM 付きの bplist も読めるように
     except Exception as exc:
         raise ValueError(f"bplist load error: {exc}") from exc
 
@@ -344,13 +345,26 @@ def load_bplist_maps(
         )
 
     entries: List[MapEntry] = []
+
+    def _assign_key(start: int, key: str) -> None:
+        # hash が無く BeatSaver の key だけ書かれた曲は、key を残す（Export で書き戻すため）
+        if not key:
+            return
+        for entry in entries[start:]:
+            if not entry.song_hash and not entry.beatsaver_key:
+                entry.beatsaver_key = key
+
+    pending_start, pending_key = 0, ""
     for song in songs:
+        _assign_key(pending_start, pending_key)
+        pending_start = len(entries)
         song_hash = (song.get("hash") or "").upper()
+        pending_key = "" if song_hash else str(song.get("key") or "").strip()
         song_name = song.get("songName") or ""
         diffs = song.get("difficulties") or []
 
         if not diffs:
-            matched = [entry for entry in ranked or [] if entry.song_hash == song_hash]
+            matched = [entry for entry in ranked or [] if entry.song_hash == song_hash] if song_hash else []
             if matched:
                 entries.extend(matched)
                 continue
@@ -374,6 +388,7 @@ def load_bplist_maps(
                 entries.append(idx[key])
             else:
                 entries.append(_make_open_entry(song_name, song_hash, diff_name, characteristic))
+    _assign_key(pending_start, pending_key)
 
     return _enrich_entries_with_beatsaver_cache(entries)
 
@@ -496,8 +511,14 @@ def _load_beatsaver_maps(
     search_query = query.strip()
     bl_api_hash_cache: Dict[str, Dict[Tuple[str, str], str]] = {}
 
+    # max_maps は「曲の数」。1 曲に難易度が複数あるので、行数で数えると Max 100 でも 20〜30 曲しか取れなかった。
+    seen_songs: set = set()
+
+    def _song_id(entry: MapEntry) -> str:
+        return (entry.song_hash or "").upper() or str(getattr(entry, "beatsaver_key", "") or "")
+
     for page in range(0, 20):
-        if max_maps is not None and len(entries) >= max_maps:
+        if max_maps is not None and len(seen_songs) >= max_maps:
             break
         if on_progress:
             on_progress(page, max(pages, 1), f"Search: page {page + 1}/{max(pages, 1)}...")
@@ -534,8 +555,11 @@ def _load_beatsaver_maps(
 
         page_entries: List[MapEntry] = []
         for doc_index, doc in enumerate(docs, start=1):
-            if max_maps is not None and len(entries) + len(page_entries) >= max_maps:
-                break
+            if max_maps is not None:
+                for _e in page_entries:
+                    seen_songs.add(_song_id(_e))
+                if len(seen_songs) >= max_maps:
+                    break
             if on_progress and (doc_index == 1 or doc_index % 10 == 0 or doc_index == len(docs)):
                 on_progress(
                     page,
@@ -647,6 +671,8 @@ def _load_beatsaver_maps(
                 ))
 
         entries.extend(page_entries)
+        for _e in page_entries:
+            seen_songs.add(_song_id(_e))
         # 1 ページ処理し終えた時点で UI 側へ渡し、段階的に描画できるようにする。
         if on_batch and page_entries:
             on_batch(page_entries)
@@ -655,4 +681,16 @@ def _load_beatsaver_maps(
 
     if on_progress:
         on_progress(1, 1, "Done")
-    return entries if max_maps is None else entries[:max_maps]
+    if max_maps is None:
+        return entries
+    # 曲単位で max_maps 曲まで残す（最後の曲の難易度が途中で切れないように）
+    kept: set = set()
+    result: List[MapEntry] = []
+    for entry in entries:
+        sid = _song_id(entry)
+        if sid not in kept:
+            if len(kept) >= max_maps:
+                continue
+            kept.add(sid)
+        result.append(entry)
+    return result

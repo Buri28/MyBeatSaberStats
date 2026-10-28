@@ -18,6 +18,8 @@ import requests
 from ..snapshot import BASE_DIR, SNAPSHOT_DIR, StarClearStat, Snapshot
 from ..scoresaber import ScoreSaberPlayer
 from .scoresaber import _collect_star_stats_from_scoresaber
+from .scoresaber import collect_scoresaber_star_stats_from_cache as _ss_star_stats_from_cache
+from .scoresaber import refresh_scoresaber_ranked_scores as _ss_refresh_ranked_scores
 from .scoresaber import _get_scoresaber_player_scores
 from .scoresaber import _get_scoresaber_leaderboards_ranked
 from .scoresaber import _get_scoresaber_player_stats
@@ -28,6 +30,8 @@ from .beatleader import (
     _get_beatleader_leaderboards_ranked as _bl_get_beatleader_leaderboards_ranked,
     collect_beatleader_star_stats as _bl_collect_beatleader_star_stats,
     collect_beatleader_star_stats_from_cache as _bl_collect_beatleader_star_stats_from_cache,
+    _load_cached_player_score_failed_pages as _bl_load_cached_player_score_failed_pages,
+    refresh_beatleader_ranked_scores as _bl_refresh_ranked_scores,
 )
 from ..beatleader import BeatLeaderPlayer, fetch_player as fetch_bl_player
 from .map_store import MapStore
@@ -44,12 +48,22 @@ from ..accsaber_reloaded import fetch_and_save_all_maps_cache as _fetch_and_save
 from ..accsaber_reloaded import fetch_and_save_player_scores_cache as _fetch_and_save_rl_player_scores
 from ..accsaber_reloaded import compute_effective_played_counts_from_cache as _compute_rl_effective_played_counts
 from ..http_client import make_session, request_scope
+from ..fileio import atomic_write_text
 
 # キャッシュディレクトリ(app.py と同じ BASE_DIR / "cache" を利用)
 CACHE_DIR = BASE_DIR / "cache"
 _SCORE_RECONCILE_STATE_PATH = CACHE_DIR / "score_reconcile_state.json"
 _SCORE_BACKFILL_DAYS = 60
-_PP_RECONCILE_THRESHOLD = 1.0
+# プロフィールの pp と★統計の PP 合計がこれ以上ずれたら、キャッシュを全件取り直す。
+# 普段の差は丸めだけで BeatLeader 0.02 / ScoreSaber 0.00 程度（2026-10 のスナップショットで確認）。
+# ScoreSaber は古いスコアの pp が変わっても重みが小さく 0.39 しかずれないことがあるので小さめにする。
+_PP_RECONCILE_THRESHOLD = 0.1
+# fetch_until にこれを渡すと、日付で止めずに全ページを読む（キャッシュの値も上書きされる）。
+_FULL_FETCH_UNTIL = datetime(2000, 1, 1)
+# 全件取り直しが途中で失敗したら、この時間は全件取り直しをしない（レート制限や障害のたびに重い取得を繰り返さないため）。
+_PP_RECONCILE_RETRY_HOURS = 24
+# 最後まで取り直してもずれが残ったときは、この日数は全件取り直しをしない。
+_PP_RECONCILE_MISMATCH_DAYS = 7
 
 
 @dataclass
@@ -133,7 +147,7 @@ def _load_score_reconcile_state() -> dict:
 def _save_score_reconcile_state(state: dict) -> None:
     try:
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        _SCORE_RECONCILE_STATE_PATH.write_text(
+        atomic_write_text(_SCORE_RECONCILE_STATE_PATH, 
             json.dumps(state, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
@@ -150,7 +164,7 @@ def _get_service_reconcile_state(service: str, steam_id: str) -> dict:
     return player_state if isinstance(player_state, dict) else {}
 
 
-def _set_service_reconcile_state(service: str, steam_id: str, **updates: str) -> None:
+def _set_service_reconcile_state(service: str, steam_id: str, **updates: Optional[str]) -> None:
     state = _load_score_reconcile_state()
     service_state = state.get(service)
     if not isinstance(service_state, dict):
@@ -161,9 +175,68 @@ def _set_service_reconcile_state(service: str, steam_id: str, **updates: str) ->
         player_state = {}
         service_state[steam_id] = player_state
     for key, value in updates.items():
-        if value:
+        if value is None:
+            player_state.pop(key, None)
+        elif value:
             player_state[key] = value
     _save_score_reconcile_state(state)
+
+
+def _pp_reconcile_skip_reason(service_state: dict, api_pp: float) -> Optional[str]:
+    """全件取り直しをしない理由を返す（取り直してよいなら None）。
+
+    - この API の pp で既に最後まで取り直し、それでもずれが残った → pp が変わるまで（新しいスコアなど）しない。
+    - 前回の取り直しが途中で失敗した → _PP_RECONCILE_RETRY_HOURS の間はしない。
+    """
+    try:
+        tried_pp = float(service_state.get("pp_mismatch_api_pp"))
+    except (TypeError, ValueError):
+        tried_pp = None
+    if tried_pp is not None and abs(tried_pp - api_pp) < 1e-6:
+        return "この pp では全件取得済み"
+    if tried_pp is not None:
+        # 最後まで取り直してもずれが残った（仕組み上合わないプレイヤー）。
+        # ランク譜面をプレイするたびに pp は変わるので、pp の一致だけでは毎回全件取得になる。日数でも間隔を空ける。
+        full_scan_at = _parse_utc_z(service_state.get("full_scan_at"))
+        if full_scan_at is not None and datetime.utcnow() - full_scan_at < timedelta(days=_PP_RECONCILE_MISMATCH_DAYS):
+            return (
+                f"前回全件取得してもずれが残ったため {_PP_RECONCILE_MISMATCH_DAYS} 日待ち"
+                f"（前回 {full_scan_at.strftime('%Y-%m-%d %H:%M')} UTC）"
+            )
+
+    failed_at = _parse_utc_z(service_state.get("pp_reconcile_failed_at"))
+    if failed_at is not None and datetime.utcnow() - failed_at < timedelta(hours=_PP_RECONCILE_RETRY_HOURS):
+        return f"前回の全件取得が失敗したため {_PP_RECONCILE_RETRY_HOURS} 時間待ち（失敗 {failed_at.strftime('%Y-%m-%d %H:%M')} UTC）"
+    return None
+
+
+def _clear_pp_mismatch(service: str, steam_id: str, service_state: dict) -> None:
+    if "pp_mismatch_api_pp" in service_state or "pp_reconcile_failed_at" in service_state:
+        _set_service_reconcile_state(service, steam_id, pp_mismatch_api_pp=None, pp_reconcile_failed_at=None)
+
+
+def _record_pp_reconcile_result(
+    service: str, steam_id: str, api_pp: float, local_pp: Optional[float], complete: bool,
+) -> None:
+    """全件取り直しの結果を記録する。
+
+    最後まで取れたときだけ「この pp で試した」と記録する。途中で失敗したとき（例外を含む）は失敗時刻を記録し、
+    しばらく待ってからもう一度試す。
+    """
+    now = _dt_to_utc_z(datetime.utcnow())
+    if not complete or local_pp is None:
+        print(f"{service} PP reconcile: 最後まで取得できなかったため {_PP_RECONCILE_RETRY_HOURS} 時間後に再試行")
+        _set_service_reconcile_state(service, steam_id, pp_reconcile_failed_at=now)
+        return
+    drift = abs(api_pp - local_pp)
+    print(f"{service} PP reconcile 後: profile={api_pp:.3f} local={local_pp:.3f} drift={drift:.3f}")
+    _set_service_reconcile_state(
+        service,
+        steam_id,
+        full_scan_at=now,
+        pp_reconcile_failed_at=None,
+        pp_mismatch_api_pp=repr(api_pp) if drift >= _PP_RECONCILE_THRESHOLD else None,
+    )
 
 
 def _load_scoresaber_ranked_ids(path: Path) -> set[str]:
@@ -206,57 +279,8 @@ def _load_beatleader_ranked_ids(path: Path) -> set[str]:
     return ids
 
 
-def _oldest_snapshot_taken_at(steam_id: str) -> Optional[datetime]:
-    if not steam_id or not SNAPSHOT_DIR.exists():
-        return None
-
-    oldest: Optional[datetime] = None
-    for path in SNAPSHOT_DIR.glob(f"{steam_id}_*.json"):
-        stem = path.stem
-        _, _, stamp = stem.partition("_")
-        if not stamp:
-            continue
-        try:
-            taken_at = datetime.strptime(stamp, "%Y%m%d-%H%M%S")
-        except ValueError:
-            continue
-        if oldest is None or taken_at < oldest:
-            oldest = taken_at
-    return oldest
-
-
 def _sum_pp_contribution(stats: list[StarClearStat]) -> float:
     return sum(float(item.pp_contribution or 0.0) for item in stats)
-
-
-def _resolve_reconcile_fetch_until(service: str, steam_id: str) -> tuple[Optional[datetime], Optional[str], dict[str, str]]:
-    service_state = _get_service_reconcile_state(service, steam_id)
-
-    full_scan_at = _parse_utc_z(service_state.get("full_scan_at"))
-    if full_scan_at is not None:
-        return (
-            full_scan_at - timedelta(days=_SCORE_BACKFILL_DAYS),
-            f"{service} reconcile from full_scan_at {full_scan_at.strftime('%Y-%m-%d %H:%M:%S')} UTC",
-            {},
-        )
-
-    oldest_snapshot_scan_at = _parse_utc_z(service_state.get("oldest_snapshot_scan_at"))
-    if oldest_snapshot_scan_at is not None:
-        return (
-            oldest_snapshot_scan_at - timedelta(days=_SCORE_BACKFILL_DAYS),
-            f"{service} reconcile from oldest_snapshot_scan_at {oldest_snapshot_scan_at.strftime('%Y-%m-%d %H:%M:%S')} UTC",
-            {},
-        )
-
-    oldest_snapshot = _oldest_snapshot_taken_at(steam_id)
-    if oldest_snapshot is None:
-        return None, None, {}
-
-    return (
-        oldest_snapshot - timedelta(days=_SCORE_BACKFILL_DAYS),
-        f"{service} reconcile from oldest snapshot {oldest_snapshot.strftime('%Y-%m-%d %H:%M:%S')} UTC",
-        {"oldest_snapshot_scan_at": _dt_to_utc_z(oldest_snapshot)},
-    )
 
 
 def _load_player_index() -> Dict[str, Dict[str, object]]:
@@ -332,7 +356,7 @@ def _save_player_index(
             "fetched_at": fetched_at_str,
             "rows": rows,
         }
-        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception:  # noqa: BLE001
         return
 
@@ -343,7 +367,7 @@ def _save_cached_pages(path: Path, pages: list[dict]) -> None:
         "pages": pages,
     }
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def _get_beatleader_leaderboards_ranked(
@@ -488,6 +512,7 @@ def collect_beatleader_star_stats(
     progress: Optional[Callable[[str, float], None]] = None,
     retry_failed_pages_only: bool = False,
     warning_callback: Optional[Callable[[str], None]] = None,
+    use_cached_ranked: bool = False,
 ) -> list[StarClearStat]:
     """BeatLeader ★別統計収集を beatleader.py 側の実装に委譲するラッパー。"""
 
@@ -497,6 +522,7 @@ def collect_beatleader_star_stats(
         progress=progress,
         retry_failed_pages_only=retry_failed_pages_only,
         warning_callback=warning_callback,
+        use_cached_ranked=use_cached_ranked,
     )
 
 
@@ -747,21 +773,34 @@ class _BackgroundFetch:
     - 例外は exc に保持し、呼び出し側が従来どおりベストエフォートで処理する
     """
 
+    # 動いている取得。スナップショットがキャンセル・失敗したら、まとめて止める。
+    _active: "set[_BackgroundFetch]" = set()
+    _active_lock = threading.Lock()
+
     def __init__(self, fn: Callable[["_BackgroundFetch"], None]) -> None:
         self.exc: Optional[Exception] = None
         self.progress_state: tuple[int, Optional[int]] = (0, None)
         self.session = make_session()
+        self.cancelled = False
+        with _BackgroundFetch._active_lock:
+            _BackgroundFetch._active.add(self)
 
         def _run() -> None:
             try:
                 fn(self)
             except Exception as exc:  # noqa: BLE001
                 self.exc = exc
+            finally:
+                with _BackgroundFetch._active_lock:
+                    _BackgroundFetch._active.discard(self)
 
         self._thread = threading.Thread(target=_run, daemon=True)
         self._thread.start()
 
     def on_page(self, page: int, max_pages: Optional[int]) -> None:
+        # キャンセルされたら、次のページに進む前に止める（API を叩き続けない・キャッシュを書かない）
+        if self.cancelled:
+            raise RuntimeError("SNAPSHOT_CANCELLED")
         self.progress_state = (page, max_pages)
 
     def wait(self, pump: Optional[Callable[[int, Optional[int]], None]] = None) -> None:
@@ -770,7 +809,17 @@ class _BackgroundFetch:
             self._thread.join(0.2)
             if pump is not None:
                 page, max_pages = self.progress_state
-                pump(page, max_pages)
+                try:
+                    pump(page, max_pages)
+                except BaseException:
+                    self.cancelled = True
+                    raise
+
+    @classmethod
+    def cancel_all(cls) -> None:
+        with cls._active_lock:
+            for fetch in cls._active:
+                fetch.cancelled = True
 
 
 def create_snapshot_for_steam_id(
@@ -787,14 +836,19 @@ def create_snapshot_for_steam_id(
     「どの API に何回投げたか」を集計するスコープを張るだけ。
     """
     with request_scope(f"スナップショット取得 steam_id={steam_id}"):
-        return _create_snapshot_for_steam_id(
-            steam_id,
-            session=session,
-            snapshot_dir=snapshot_dir,
-            progress=progress,
-            options=options,
-            on_warning=on_warning,
-        )
+        try:
+            return _create_snapshot_for_steam_id(
+                steam_id,
+                session=session,
+                snapshot_dir=snapshot_dir,
+                progress=progress,
+                options=options,
+                on_warning=on_warning,
+            )
+        except BaseException:
+            # キャンセル・失敗したら、裏で動いている取得も止める
+            _BackgroundFetch.cancel_all()
+            raise
 
 
 def _create_snapshot_for_steam_id(
@@ -1021,6 +1075,11 @@ def _create_snapshot_for_steam_id(
     scoresaber_total_play_count: Optional[int] = None
     scoresaber_ranked_play_count: Optional[int] = None
 
+    # PP のずれ検知（reconcile）は、プロフィールの pp を今回 API から取れたときだけ行う。
+    # 取れずに players_index.json の古い pp と比べると、ずれたと誤判定して全件取り直してしまう。
+    ss_pp_fresh = False
+    bl_pp_fresh = False
+
     # ScoreSaber player scores はキャッシュファイル書き込みのみで後続処理と独立なため、
     # バックグラウンドで取得しつつ BeatLeader 側の処理を並行して進める。
     ss_scores_bg: Optional[_BackgroundFetch] = None
@@ -1031,6 +1090,7 @@ def _create_snapshot_for_steam_id(
             try:
                 print("5. ScoreSaber 基本情報更新...")
                 ss_latest = _fetch_scoresaber_player_basic(scoresaber_id, session)
+                ss_pp_fresh = ss_latest is not None
             except Exception as exc:  # noqa: BLE001
                 _rethrow_if_cancelled(exc)
                 ss_latest = None
@@ -1118,6 +1178,7 @@ def _create_snapshot_for_steam_id(
         try:
             print("6. BeatLeader 基本情報更新...")
             bl_latest = fetch_bl_player(beatleader_lookup_id, session=session)
+            bl_pp_fresh = bl_latest is not None
         except Exception as exc:  # noqa: BLE001
             _rethrow_if_cancelled(exc)
             bl_latest = None
@@ -1455,8 +1516,15 @@ def _create_snapshot_for_steam_id(
         try:
             print("9.5 ScoreSaber ★別統計集計...")
             _step(0.70, "Collecting ScoreSaber star stats...")
-            star_stats: list[StarClearStat] = _collect_star_stats_from_scoresaber(scoresaber_id, session) if scoresaber_id else []
-        except Exception:  # noqa: BLE001
+            if not scoresaber_id:
+                star_stats: list[StarClearStat] = []
+            elif options.fetch_ss_ranked_maps and options.fetch_scoresaber:
+                # この回でランク譜面とスコアを取得済みなので、API を呼ばずキャッシュから作る
+                star_stats = _ss_star_stats_from_cache(scoresaber_id)
+            else:
+                star_stats = _collect_star_stats_from_scoresaber(scoresaber_id, session)
+        except Exception as exc:  # noqa: BLE001
+            _rethrow_if_cancelled(exc)
             print("★別統計の集計に失敗しました。")
             star_stats = []
     else:
@@ -1478,9 +1546,12 @@ def _create_snapshot_for_steam_id(
                     progress=_bl_star_stats_progress,
                     retry_failed_pages_only=True,
                     warning_callback=_add_warning,
+                    # この回でランク譜面を取得済みなら、API を呼ばずキャッシュから読む
+                    use_cached_ranked=options.fetch_bl_ranked_maps,
                 ) if beatleader_id else []
             )
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            _rethrow_if_cancelled(exc)
             beatleader_star_stats = []
             _add_warning("BeatLeader star stats: failed to collect during snapshot.")
             print("9.6 BeatLeader ★別統計集計完了。")
@@ -1489,19 +1560,31 @@ def _create_snapshot_for_steam_id(
         _step(0.80, "Skipping BeatLeader star stats...")
         beatleader_star_stats = []
 
-    if options.fetch_scoresaber and options.fetch_ss_star_stats and scoresaber_id and scoresaber_pp is not None:
+    # PP のずれ検知（reconcile）。プロフィールの pp と★統計の PP 合計がずれていたら、
+    # 古いスコアの pp や★が後から変わった（PP の作り直しなど）とみて、ランク譜面とスコアを全件取り直す。
+    # ★統計が空（集計に失敗）のときは、ずれではなく失敗なので取り直さない。
+    if (
+        options.fetch_scoresaber and options.fetch_ss_star_stats and scoresaber_id
+        and scoresaber_pp is not None and ss_pp_fresh and star_stats
+    ):
         ss_local_pp_total = _sum_pp_contribution(star_stats)
         ss_pp_drift = abs(float(scoresaber_pp) - ss_local_pp_total)
         ss_state = _get_service_reconcile_state("scoresaber", steam_id)
-        ss_needs_bootstrap = not ss_state.get("full_scan_at") and not ss_state.get("oldest_snapshot_scan_at")
-        if ss_pp_drift >= _PP_RECONCILE_THRESHOLD or ss_needs_bootstrap:
-            ss_reconcile_until, ss_reason, ss_state_updates = _resolve_reconcile_fetch_until("scoresaber", steam_id)
-            if ss_reconcile_until is not None and ss_reason is not None:
-                print(
-                    "ScoreSaber PP reconcile: "
-                    f"profile={float(scoresaber_pp):.2f} local={ss_local_pp_total:.2f} drift={ss_pp_drift:.2f}"
-                )
-                print(ss_reason)
+        print(
+            "ScoreSaber PP check: "
+            f"profile={float(scoresaber_pp):.3f} local={ss_local_pp_total:.3f} drift={ss_pp_drift:.3f}"
+        )
+        ss_skip_reason = _pp_reconcile_skip_reason(ss_state, float(scoresaber_pp))
+        if ss_pp_drift < _PP_RECONCILE_THRESHOLD:
+            _clear_pp_mismatch("scoresaber", steam_id, ss_state)
+        elif ss_skip_reason is not None:
+            print(f"ScoreSaber PP reconcile: スキップ（{ss_skip_reason}）")
+        else:
+            ss_status: dict = {"complete": True}
+            ss_new_stats: list[StarClearStat] = []
+            try:
+                def _ss_reconcile_maps_progress(page: int, max_pages: Optional[int]) -> None:
+                    _step(0.66, f"Reconciling ScoreSaber ranked maps (page {page}/{max_pages or '?'})...")
 
                 def _ss_reconcile_progress(page: int, max_pages: Optional[int]) -> None:
                     if max_pages and max_pages > 0:
@@ -1512,31 +1595,54 @@ def _create_snapshot_for_steam_id(
                         msg = f"Reconciling ScoreSaber player scores (page {page}/?)..."
                     _step(0.66 + 0.04 * frac, msg)
 
-                _step(0.66, "Reconciling ScoreSaber player scores...")
-                _get_scoresaber_player_scores(
+                # 古いスコアの pp が変わっても差分取得では拾えないので、ランク譜面と、
+                # ランク譜面のスコア（pp の付くもの）を全部取り直す。ランク外のスコアは pp に関係しないので読まない。
+                print("ScoreSaber PP reconcile: ランク譜面とランク譜面のスコアを取り直します")
+                _get_scoresaber_leaderboards_ranked(
+                    session, progress=_ss_reconcile_maps_progress, fetch_until=_FULL_FETCH_UNTIL, status=ss_status,
+                )
+                _ss_refresh_ranked_scores(
                     scoresaber_id,
                     session,
                     progress=_ss_reconcile_progress,
-                    fetch_until=ss_reconcile_until,
+                    status=ss_status,
                 )
                 _step(0.70, "Recollecting ScoreSaber star stats...")
-                star_stats = _collect_star_stats_from_scoresaber(scoresaber_id, session)
-                if ss_state_updates:
-                    _set_service_reconcile_state("scoresaber", steam_id, **ss_state_updates)
+                ss_new_stats = _ss_star_stats_from_cache(scoresaber_id)
+            except Exception as exc:  # noqa: BLE001
+                _rethrow_if_cancelled(exc)
+                ss_status["complete"] = False
+                _add_warning("ScoreSaber PP reconcile: failed to refetch all scores.")
+            if ss_new_stats:
+                star_stats = ss_new_stats
+            _record_pp_reconcile_result(
+                "scoresaber", steam_id, float(scoresaber_pp),
+                _sum_pp_contribution(ss_new_stats) if ss_new_stats else None,
+                complete=bool(ss_status.get("complete")),
+            )
 
-    if options.fetch_beatleader and options.fetch_bl_star_stats and beatleader_id and beatleader_pp is not None:
+    if (
+        options.fetch_beatleader and options.fetch_bl_star_stats and beatleader_id
+        and beatleader_pp is not None and bl_pp_fresh and beatleader_star_stats
+    ):
         bl_local_pp_total = _sum_pp_contribution(beatleader_star_stats)
         bl_pp_drift = abs(float(beatleader_pp) - bl_local_pp_total)
         bl_state = _get_service_reconcile_state("beatleader", steam_id)
-        bl_needs_bootstrap = not bl_state.get("full_scan_at") and not bl_state.get("oldest_snapshot_scan_at")
-        if bl_pp_drift >= _PP_RECONCILE_THRESHOLD or bl_needs_bootstrap:
-            bl_reconcile_until, bl_reason, bl_state_updates = _resolve_reconcile_fetch_until("beatleader", steam_id)
-            if bl_reconcile_until is not None and bl_reason is not None:
-                print(
-                    "BeatLeader PP reconcile: "
-                    f"profile={float(beatleader_pp):.2f} local={bl_local_pp_total:.2f} drift={bl_pp_drift:.2f}"
-                )
-                print(bl_reason)
+        print(
+            "BeatLeader PP check: "
+            f"profile={float(beatleader_pp):.3f} local={bl_local_pp_total:.3f} drift={bl_pp_drift:.3f}"
+        )
+        bl_skip_reason = _pp_reconcile_skip_reason(bl_state, float(beatleader_pp))
+        if bl_pp_drift < _PP_RECONCILE_THRESHOLD:
+            _clear_pp_mismatch("beatleader", steam_id, bl_state)
+        elif bl_skip_reason is not None:
+            print(f"BeatLeader PP reconcile: スキップ（{bl_skip_reason}）")
+        else:
+            bl_status: dict = {"complete": True}
+            bl_new_stats: list[StarClearStat] = []
+            try:
+                def _bl_reconcile_maps_progress(page: int, max_pages: Optional[int]) -> None:
+                    _step(0.76, f"Reconciling BeatLeader ranked maps (page {page}/{max_pages or '?'})...")
 
                 def _bl_reconcile_progress(page: int, max_pages: Optional[int]) -> None:
                     if max_pages and max_pages > 0:
@@ -1550,24 +1656,45 @@ def _create_snapshot_for_steam_id(
                 def _bl_reconcile_star_stats_progress(message: str, fraction: float) -> None:
                     _step(0.80 + 0.10 * max(0.0, min(1.0, fraction)), message)
 
-                _step(0.76, "Reconciling BeatLeader player scores...")
-                _get_beatleader_player_scores(
+                # PP の作り直し（PPv4 など）では古いスコアの pp と★が変わるので、ランク譜面と、
+                # ランク譜面のスコア（pp の付くもの）を全部取り直す。ランク外のスコアは pp に関係しないので読まない。
+                print("BeatLeader PP reconcile: ランク譜面とランク譜面のスコアを取り直します")
+                _bl_get_beatleader_leaderboards_ranked(
+                    session, progress=_bl_reconcile_maps_progress, fetch_until=_FULL_FETCH_UNTIL, status=bl_status,
+                )
+                _bl_refresh_ranked_scores(
                     beatleader_id,
                     session,
                     progress=_bl_reconcile_progress,
-                    fetch_until=bl_reconcile_until,
-                    warning_callback=_add_warning,
+                    status=bl_status,
                 )
                 _step(0.80, "Recollecting BeatLeader star stats...")
-                beatleader_star_stats = collect_beatleader_star_stats(
+                # スコアの失敗ページはここで取り直される（retry_failed_pages_only=True）
+                bl_new_stats = collect_beatleader_star_stats(
                     beatleader_id,
                     session,
                     progress=_bl_reconcile_star_stats_progress,
                     retry_failed_pages_only=True,
                     warning_callback=_add_warning,
-                ) if beatleader_id else []
-                if bl_state_updates:
-                    _set_service_reconcile_state("beatleader", steam_id, **bl_state_updates)
+                    use_cached_ranked=True,
+                )
+                # 取り直しても回収できなかったページが残っていたら、最後まで取れていない
+                if _bl_load_cached_player_score_failed_pages(
+                    CACHE_DIR / f"beatleader_player_scores_{beatleader_id}.json"
+                ):
+                    bl_status["complete"] = False
+            except Exception as exc:  # noqa: BLE001
+                _rethrow_if_cancelled(exc)
+                bl_status["complete"] = False
+                _add_warning("BeatLeader PP reconcile: failed to refetch all scores.")
+            if bl_new_stats:
+                beatleader_star_stats = bl_new_stats
+            _record_pp_reconcile_result(
+                "beatleader", steam_id, float(beatleader_pp),
+                _sum_pp_contribution(bl_new_stats) if bl_new_stats else None,
+                complete=bool(bl_status.get("complete")),
+            )
+
     # スナップショットオブジェクトを構築して保存する
     print("10. スナップショットオブジェクト構築...")
     now = datetime.utcnow().replace(microsecond=0)

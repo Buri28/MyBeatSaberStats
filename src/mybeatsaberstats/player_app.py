@@ -42,6 +42,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtCore import QUrl
 
+from .numfmt import fmt
 from .snapshot import Snapshot, SNAPSHOT_DIR, BASE_DIR, RESOURCES_DIR, StarClearStat, resource_path
 from .theme import table_stylesheet, toggle as _toggle_theme, is_dark, label_cell_color, label_cell_text_color, init_theme as _init_theme, button_label as _theme_button_label, current_theme_mode as _current_theme_mode, set_theme_mode as _set_theme_mode
 from .updater import StartupUpdateChecker, get_current_version
@@ -68,6 +69,7 @@ from .collector.collector import (
     _read_cache_fetched_at,
 )
 from mybeatsaberstats.collector.map_store import MapStore
+from .fileio import atomic_write_text
 from .playlist_view import PlaylistWindow, _make_playlist_cover as _make_cover, \
     load_accsaber_reloaded_maps as _rl_load_maps_with_scores, \
     _apply_config_filter as _rl_apply_filter, _BatchConfig as _RLBatchConfig, \
@@ -230,7 +232,7 @@ def _save_take_snapshot_dialog_state(updates: dict) -> None:
         payload = _load_take_snapshot_dialog_state()
         payload.update(updates)
         _TAKE_SNAPSHOT_DIALOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        _TAKE_SNAPSHOT_DIALOG_PATH.write_text(
+        atomic_write_text(_TAKE_SNAPSHOT_DIALOG_PATH, 
             json.dumps(payload, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
@@ -986,7 +988,7 @@ class PercentageBarDelegate(QStyledItemDelegate):
     def initStyleOption(self, option, index) -> None:  # type: ignore[override]
         super().initStyleOption(option, index)
         value = self._bar_value(index)
-        if value is not None and value >= self._max_value - 1e-3:
+        if value is not None and value >= self._max_value - 1e-9:
             option.font.setBold(True)
             # UserRole+1 が True のときは FC 100% だが Clear Rate が 100% 未満 → 🏅
             use_medal = index.data(Qt.ItemDataRole.UserRole + 1)
@@ -1039,7 +1041,7 @@ class PercentageBarDelegate(QStyledItemDelegate):
         painter.restore()
 
         # 100% だけは太字で少しだけ強調する
-        is_full = value >= self._max_value - 1e-3
+        is_full = value >= self._max_value - 1e-9
 
         # バー色の輝度からテキスト色を決定
         bar_lum = 0.299 * r + 0.587 * g + 0.114 * b
@@ -1215,7 +1217,12 @@ class _ClickableColHover(QObject):
 
 class _AvatarFetchSignals(QObject):
     """非同期アバター取得の完了シグナル。"""
-    fetched = Signal(str, bytes)   # service ("ss" | "bl"), image_bytes
+    fetched = Signal(str, bytes, int)   # service ("ss" | "bl"), image_bytes, 要求の番号
+
+
+class _TitleIconSignals(QObject):
+    """称号アイコンの非同期ダウンロードの完了シグナル。"""
+    downloaded = Signal(str)   # icon_url
 
 
 class _RemoteImageFetchSignals(QObject):
@@ -1436,6 +1443,9 @@ class PlayerAvatarWidget(QLabel):
         self._ss_pixmap: Optional[QPixmap] = None
         self._bl_pixmap: Optional[QPixmap] = None
         self._showing: str = "ss"   # "ss" or "bl"
+        # 要求の番号。プレイヤーを素早く切り替えたとき、前のプレイヤーの遅れた応答を捨てるため。
+        self._request_gen = 0
+        self._current_ids: tuple = (None, None)
         self._on_toggled: Optional[Callable[[str], None]] = None
         self._signals = _AvatarFetchSignals()
         self._signals.fetched.connect(self._on_fetched)
@@ -1445,18 +1455,32 @@ class PlayerAvatarWidget(QLabel):
         """SS/BL 切替時に呼ばれるコールバックを設定する。"""
         self._on_toggled = callback
 
+    # 取得したアバター画像（アプリを開いている間だけ覚える）。スナップショットを切り替えるたびに API を叩かないため。
+    _image_cache: "dict[tuple[str, str], bytes]" = {}
+
     def set_ids(self, ss_id: Optional[str], bl_id: Optional[str], preferred: str = "ss") -> None:
         """SS/BL ID を受け取り、アバターを非同期で取得する。"""
+        ids = (ss_id or None, bl_id or None)
+        if ids == self._current_ids:
+            # 同じプレイヤーのまま（スナップショットやテーマの切り替え）なら取り直さない（取得中も含む）
+            return
+        self._current_ids = ids
+        self._request_gen += 1
+        gen = self._request_gen
         self._ss_pixmap = None
         self._bl_pixmap = None
         self._showing = preferred if preferred in ("ss", "bl") else "ss"
         self._show_placeholder()
-        if ss_id:
-            threading.Thread(target=self._fetch, args=("ss", ss_id), daemon=True).start()
-        if bl_id:
-            threading.Thread(target=self._fetch, args=("bl", bl_id), daemon=True).start()
+        for service, player_id in (("ss", ss_id), ("bl", bl_id)):
+            if not player_id:
+                continue
+            cached = PlayerAvatarWidget._image_cache.get((service, str(player_id)))
+            if cached is not None:
+                self._on_fetched(service, cached, gen)
+                continue
+            threading.Thread(target=self._fetch, args=(service, player_id, gen), daemon=True).start()
 
-    def _fetch(self, service: str, player_id: str) -> None:
+    def _fetch(self, service: str, player_id: str, gen: int) -> None:
         try:
             # User-Agent とホスト単位のレート制御を効かせるため共有セッションを使う
             _requests = _get_shared_session()
@@ -1474,11 +1498,17 @@ class PlayerAvatarWidget(QLabel):
                 return
             img_r = _requests.get(img_url, timeout=8, headers={"Accept": "*/*"})
             img_r.raise_for_status()
-            self._signals.fetched.emit(service, img_r.content)
+            PlayerAvatarWidget._image_cache[(service, str(player_id))] = img_r.content
+            self._signals.fetched.emit(service, img_r.content, gen)
         except Exception:
-            pass
+            # 失敗したら、次に同じプレイヤーで呼ばれたときに取り直せるようにする（オフライン起動など）
+            if gen == self._request_gen:
+                self._current_ids = (None, None)
 
-    def _on_fetched(self, service: str, data: bytes) -> None:
+    def _on_fetched(self, service: str, data: bytes, gen: int) -> None:
+        if gen != self._request_gen:
+            # 前のプレイヤーの応答が遅れて届いた
+            return
         px = QPixmap()
         if not px.loadFromData(data):
             return
@@ -2124,6 +2154,25 @@ class PlayerWindow(QMainWindow):
         path = self._cache_dir() / filename
         if not path.exists():
             return None
+        # スコアキャッシュは数十 MB あり、画面を切り替えるたびに読むと固まる。
+        # ファイルが変わっていなければ前回読んだ値を使う。
+        try:
+            st = path.stat()
+            sig = (str(path), st.st_mtime_ns, st.st_size)
+        except OSError:
+            sig = None
+        memo = getattr(self, "_score_cache_meta_memo", None)
+        if memo is None:
+            memo = {}
+            self._score_cache_meta_memo = memo
+        if sig is not None and sig in memo:
+            return memo[sig]
+        result = self._read_score_cache_meta_uncached(path)
+        if sig is not None:
+            memo[sig] = result
+        return result
+
+    def _read_score_cache_meta_uncached(self, path: Path) -> Optional[tuple]:
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
             fetched_at_str = raw.get("fetched_at")
@@ -2196,7 +2245,7 @@ class PlayerWindow(QMainWindow):
                 except Exception:  # noqa: BLE001
                     payload = {}
             payload["last_steam_id"] = steam_id
-            path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         except Exception:  # noqa: BLE001
             # 設定保存に失敗しても画面の動作には影響させない
             return
@@ -2220,7 +2269,7 @@ class PlayerWindow(QMainWindow):
                 except Exception:  # noqa: BLE001
                     payload = {}
             payload["rl_unplayed_last_dir"] = out_dir
-            path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         except Exception:  # noqa: BLE001
             return
 
@@ -2250,7 +2299,7 @@ class PlayerWindow(QMainWindow):
                 except Exception:  # noqa: BLE001
                     payload = {}
             payload["avatar_showing"] = showing
-            path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         except Exception:  # noqa: BLE001
             return
 
@@ -2325,7 +2374,7 @@ class PlayerWindow(QMainWindow):
             payload["ui_mid_splitter_sizes"] = self._mid_bottom_splitter.sizes()
             payload["ui_window_width"] = self.width()
             payload["ui_window_height"] = self.height()
-            path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         except Exception:  # noqa: BLE001
             return
 
@@ -2447,7 +2496,7 @@ class PlayerWindow(QMainWindow):
                 bplist = _rl_make_bplist(f"AccSaber Unplayed - {cat.capitalize()}", filtered, image)
                 filename = f"accsaber_reloaded_unplayed_{cat}.bplist"
                 out_path = save_dir_path / filename
-                out_path.write_text(_format_bplist(bplist), encoding="utf-8")
+                atomic_write_text(out_path, _format_bplist(bplist), encoding="utf-8")
                 n_maps = len(filtered)
                 saved_files.append(f"{filename}  ({n_maps} maps)")
 
@@ -2567,16 +2616,76 @@ class PlayerWindow(QMainWindow):
         try:
             # print文は日本語
             print(f"1.スナップショットを取得中: {steam_id}")
-            snapshot = create_snapshot_for_steam_id(
-                steam_id,
-                progress=_on_progress,
-                options=options,
-                on_warning=_on_warning,
-            )
+            # 取得は別スレッドで行う。画面のスレッドで直接動かすと、API の待ち時間
+            # （間隔の調整や Retry-After）の間は画面も Cancel ボタンも反応しなかった。
+            # 別スレッドは Qt に触らず、進捗と警告を worker_state に置くだけにする。
+            worker_state: dict = {"message": None, "fraction": 0.0, "done": False, "result": None, "exc": None}
+            worker_warnings: List[str] = []
+            worker_lock = threading.Lock()
+
+            def _worker_progress(message: str, fraction: float) -> None:
+                if cancelled["value"]:
+                    raise RuntimeError("SNAPSHOT_CANCELLED")
+                with worker_lock:
+                    worker_state["message"] = message
+                    worker_state["fraction"] = fraction
+
+            def _worker_warning(message: str) -> None:
+                with worker_lock:
+                    worker_warnings.append(message)
+
+            def _worker_run() -> None:
+                try:
+                    worker_state["result"] = create_snapshot_for_steam_id(
+                        steam_id,
+                        progress=_worker_progress,
+                        options=options,
+                        on_warning=_worker_warning,
+                    )
+                except BaseException as exc:  # noqa: BLE001
+                    worker_state["exc"] = exc
+                finally:
+                    worker_state["done"] = True
+
+            worker = threading.Thread(target=_worker_run, daemon=True)
+            worker.start()
+            last_shown: tuple = (None, None)
+            cancelling_shown = False
+            while True:
+                QApplication.processEvents()
+                worker.join(0.05)
+                if cancelled["value"] and not cancelling_shown and not worker_state["done"]:
+                    # 取得は次のページの区切りで止まる（API の待ちの途中だと数十秒かかることがある）。
+                    # 止まるまでの間、押したことが分かるようにする。
+                    cancelling_shown = True
+                    status_label.setText("Cancelling... (waiting for the current request to finish)")
+                    cancel_button = dlg.findChild(QPushButton)
+                    if cancel_button is not None:
+                        cancel_button.setEnabled(False)
+                with worker_lock:
+                    pending = list(worker_warnings)
+                    worker_warnings.clear()
+                    shown = (worker_state["message"], worker_state["fraction"])
+                for warning in pending:
+                    _on_warning(warning)
+                if shown != last_shown and shown[0] is not None:
+                    last_shown = shown
+                    current_progress_message["value"] = shown[0]
+                    _render_progress_label(shown[0])
+                    dlg.setValue(int(shown[1] * 100))
+                if worker_state["done"]:
+                    break
+            if worker_state["exc"] is not None:
+                raise worker_state["exc"]
+            snapshot = worker_state["result"]
             map_store_instance = MapStore()
             map_store_instance.snapshots[steam_id] = snapshot
 
-            if export_playlists:
+            if cancelled["value"] and export_playlists:
+                # スナップショットは保存できた後に Cancel が押された。保存済みのスナップショットは
+                # そのまま扱い、プレイリストの書き出しだけをやめる（以前は何も言わずに終わっていた）。
+                playlist_export_cancelled = True
+            elif export_playlists:
                 if enabled_playlist_configs:
                     dlg.setRange(0, 0)
                     _on_playlist_export_progress(0, 0, "Exporting playlists...")
@@ -2914,6 +3023,33 @@ class PlayerWindow(QMainWindow):
         self.snapshot_combo.setCurrentIndex(0)
         self.snapshot_combo.blockSignals(False)
 
+    def _start_title_icon_download(self, icon_url: str) -> None:
+        """称号アイコンを裏でダウンロードする。同じ URL は 1 回しか試さない（失敗しても繰り返さない）。"""
+        tried = getattr(self, "_title_icon_tried", None)
+        if tried is None:
+            tried = set()
+            self._title_icon_tried = tried
+            self._title_icon_signals = _TitleIconSignals()
+            self._title_icon_signals.downloaded.connect(self._on_title_icon_downloaded)
+        if icon_url in tried:
+            return
+        tried.add(icon_url)
+        signals = self._title_icon_signals
+
+        def _run() -> None:
+            try:
+                if _rl_download_title_icon(icon_url) is not None:
+                    signals.downloaded.emit(icon_url)
+            except Exception:  # noqa: BLE001
+                pass
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _on_title_icon_downloaded(self, icon_url: str) -> None:
+        snap = getattr(self, "_last_badge_args", None)
+        if snap and snap[1] == icon_url:
+            self._update_acc_rl_badge(snap[0], snap[1])
+
     def _update_acc_rl_badge(self, title_name: "str | None", icon_url: "str | None") -> None:
         """AccSaber ラベルの右隣にキャンペーン称号バッジと称号名を表示する。"""
         def _hide() -> None:
@@ -2922,18 +3058,16 @@ class PlayerWindow(QMainWindow):
             self._acc_rl_badge_text.clear()
             self._acc_rl_badge_text.setVisible(False)
 
+        self._last_badge_args = (title_name, icon_url)
         if not title_name or not icon_url:
             _hide()
             return
-        # キャッシュ済み画像を優先。無ければダウンロードを試みる。
+        # キャッシュ済み画像を優先。無ければ裏でダウンロードし、終わったら表示し直す。
+        # 画面のスレッドで取りに行くと、障害時に切り替えのたびに最長 30 秒固まっていた。
         path = _rl_title_icon_path(icon_url)
         if path is None:
-            try:
-                path = _rl_download_title_icon(icon_url)
-            except Exception:  # noqa: BLE001
-                path = None
-        if path is None:
             _hide()
+            self._start_title_icon_download(icon_url)
             return
         pixmap = QPixmap(str(path))
         if pixmap.isNull():
@@ -3042,16 +3176,16 @@ class PlayerWindow(QMainWindow):
 
         # ScoreSaber / BeatLeader で対になる指標が一目で分かるよう、
         # 同じ行番号に同じ Metric 名を並べる 1 表構成にする。
-        ss_pp_text = f"{snap.scoresaber_pp:,.2f}" if snap.scoresaber_pp is not None else None
-        bl_pp_text = f"{snap.beatleader_pp:,.2f}" if snap.beatleader_pp is not None else None
+        ss_pp_text = f"{fmt(snap.scoresaber_pp, 2, comma=True)}" if snap.scoresaber_pp is not None else None
+        bl_pp_text = f"{fmt(snap.beatleader_pp, 2, comma=True)}" if snap.beatleader_pp is not None else None
 
         ss_acc_text = (
-            f"{snap.scoresaber_average_ranked_acc:.2f}%"
+            f"{fmt(snap.scoresaber_average_ranked_acc, 2)}%"
             if snap.scoresaber_average_ranked_acc is not None
             else None
         )
         bl_acc_text = (
-            f"{snap.beatleader_average_ranked_acc:.2f}%"
+            f"{fmt(snap.beatleader_average_ranked_acc, 2)}%"
             if snap.beatleader_average_ranked_acc is not None
             else None
         )
@@ -3221,7 +3355,7 @@ class PlayerWindow(QMainWindow):
         def _format_ap(value: Optional[float]) -> Optional[str]:
             if value is None:
                 return None
-            return f"{value:,.2f}"
+            return f"{fmt(value, 2, comma=True)}"
 
         # Play Count バー用の割合 (0.0〜1.0)。分母/分子どちらかが None なら None。
         def _play_ratio(plays: Optional[int], total: Optional[int]) -> Optional[float]:
@@ -3268,7 +3402,8 @@ class PlayerWindow(QMainWindow):
         _xp = snap.accsaber_reloaded_xp
         _xp_level = snap.accsaber_reloaded_xp_level
         _xp_str = None
-        if _xp is not None:
+        # XP が取れずレベルだけ分かるとき（プロフィールで補ったとき）も、Lv と称号は出す
+        if _xp is not None or _xp_level:
             # 色は AccSaber サイトの CSS 変数に合わせる
             #   Lv 数値 = --text-primary / 称号・XP = --text-secondary
             _ACC_TEXT_PRIMARY = _acc_site_text_primary()
@@ -3284,13 +3419,13 @@ class PlayerWindow(QMainWindow):
                 if _lv_title else ""
             )
             _xp_html = (
-                f'<span style="font-size:11px; color:{_ACC_TEXT_SECONDARY};">({_xp:,.0f} XP)</span>'
-                if _xp_level else ""
+                f'<span style="font-size:11px; color:{_ACC_TEXT_SECONDARY};">({fmt(_xp, 0, comma=True)} XP)</span>'
+                if _xp is not None else ""
             )
             _xp_str = _lv_html + _lv_title_html + _xp_html
         _xp_rank_str = _format_acc_rank(snap.accsaber_reloaded_xp_rank, snap.accsaber_reloaded_xp_rank_country, acc_country_code)
         _xp_parts: list[str] = []
-        if _xp_str is not None:
+        if _xp_str:
             _xp_parts.append(f"{_xp_str}")
         if _xp_rank_str is not None:
             _xp_rank_html = f'<span style="font-size:12px;">{_xp_rank_str}</span>'  
@@ -3356,14 +3491,14 @@ class PlayerWindow(QMainWindow):
                 self.acc_rl_table.setItem(row, col_i, _item)
             # col 4: Avg Acc（バーあり）
             _avg_rl = _rl_avg_acc_vals.get(row)
-            _avg_rl_txt = f"{_avg_rl:.2f}%" if _avg_rl is not None else ""
+            _avg_rl_txt = f"{fmt(_avg_rl, 2)}%" if _avg_rl is not None else ""
             _avg_rl_item = QTableWidgetItem(_avg_rl_txt)
             if _avg_rl is not None:
                 _avg_rl_item.setData(Qt.ItemDataRole.UserRole, _avg_rl)
             self.acc_rl_table.setItem(row, 4, _avg_rl_item)
             # col 5: Skill Level（Play Count と同じカテゴリ色バー、MAX 100）
             _skill_rl = _rl_skill_vals.get(row)
-            _skill_rl_txt = f"{_skill_rl:.2f}" if _skill_rl is not None else ""
+            _skill_rl_txt = f"{fmt(_skill_rl, 2)}" if _skill_rl is not None else ""
             _skill_rl_item = QTableWidgetItem(_skill_rl_txt)
             _skill_rl_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
             if _skill_rl is not None:
@@ -3400,7 +3535,7 @@ class PlayerWindow(QMainWindow):
             if item2 is not None:
                 item2.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
-            percent_text = f"{s.clear_rate * 100:.1f}" if s.map_count > 0 else ""
+            percent_text = f"{fmt(s.clear_rate * 100, 1)}" if s.map_count > 0 else ""
             self.star_table.setItem(row, 3, QTableWidgetItem(percent_text))
 
             fc_item = QTableWidgetItem(f"{getattr(s, 'fc_count', None) or 0:,}")
@@ -3410,7 +3545,7 @@ class PlayerWindow(QMainWindow):
             fc_count_val = getattr(s, "fc_count", None) or 0
             if s.clear_count > 0:
                 fc_rate = fc_count_val / s.clear_count * 100
-                fc_rate_text = f"{fc_rate:.1f}"
+                fc_rate_text = f"{fmt(fc_rate, 1)}"
                 is_fc_full = fc_rate >= 100.0 - 1e-6
                 is_clear_full = s.map_count > 0 and s.clear_count >= s.map_count
                 fc_rate_medal = is_fc_full and not is_clear_full
@@ -3421,7 +3556,7 @@ class PlayerWindow(QMainWindow):
             fc_rate_item.setData(Qt.ItemDataRole.UserRole + 1, fc_rate_medal)
             self.star_table.setItem(row, 5, fc_rate_item)
 
-            avg_acc_text = f"{s.average_acc:.2f}" if getattr(s, "average_acc", None) is not None else ("0.00" if s.map_count > 0 else "")
+            avg_acc_text = f"{fmt(s.average_acc, 2)}" if getattr(s, "average_acc", None) is not None else ("0.00" if s.map_count > 0 else "")
             self.star_table.setItem(row, 6, QTableWidgetItem(avg_acc_text))
 
             self.star_table.setItem(row, 7, QTableWidgetItem(f"{s.nf_count:,}"))
@@ -3439,13 +3574,13 @@ class PlayerWindow(QMainWindow):
                 item9.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
             pp_val = getattr(s, "pp_contribution", None)
-            pp_text = f"{pp_val:,.0f}" if pp_val is not None else "0"
+            pp_text = f"{fmt(pp_val, 0, comma=True)}" if pp_val is not None else "0"
             pp_item = QTableWidgetItem(pp_text)
             pp_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
             self.star_table.setItem(row, 10, pp_item)
 
             pp_solo_val = getattr(s, "pp_solo", None)
-            pp_solo_text = f"{pp_solo_val:,.0f}" if pp_solo_val is not None else "0"
+            pp_solo_text = f"{fmt(pp_solo_val, 0, comma=True)}" if pp_solo_val is not None else "0"
             pp_solo_item = QTableWidgetItem(pp_solo_text)
             pp_solo_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             self.star_table.setItem(row, 11, pp_solo_item)
@@ -3468,7 +3603,7 @@ class PlayerWindow(QMainWindow):
             self.star_table.setItem(total_row, 2, QTableWidgetItem(f"{total_clears:,}"))
             if total_maps > 0:
                 total_clear_rate = total_clears / total_maps
-                percent_text = f"{total_clear_rate * 100:.1f}"
+                percent_text = f"{fmt(total_clear_rate * 100, 1)}"
             else:
                 percent_text = ""
             self.star_table.setItem(total_row, 3, QTableWidgetItem(percent_text))
@@ -3477,7 +3612,7 @@ class PlayerWindow(QMainWindow):
             self.star_table.setItem(total_row, 4, fc_total_item)
 
             total_fc_rate_val = total_fc / total_clears * 100 if total_clears > 0 else 0.0
-            fc_rate_total_item = QTableWidgetItem(f"{total_fc_rate_val:.1f}" if total_clears > 0 else "0.0")
+            fc_rate_total_item = QTableWidgetItem(f"{fmt(total_fc_rate_val, 1)}" if total_clears > 0 else "0.0")
             is_fc_full = total_fc_rate_val >= 100.0 - 1e-6
             is_clear_full = total_maps > 0 and total_clears >= total_maps
             fc_rate_total_item.setData(Qt.ItemDataRole.UserRole + 1, is_fc_full and not is_clear_full)
@@ -3485,7 +3620,7 @@ class PlayerWindow(QMainWindow):
 
             # Total 行の平均精度は Snapshot 上段で取得している overall の平均精度を表示する
             if snap.scoresaber_average_ranked_acc is not None:
-                total_avg_text = f"{snap.scoresaber_average_ranked_acc:.2f}"
+                total_avg_text = f"{fmt(snap.scoresaber_average_ranked_acc, 2)}"
             else:
                 total_avg_text = ""
             self.star_table.setItem(total_row, 6, QTableWidgetItem(total_avg_text))
@@ -3501,12 +3636,12 @@ class PlayerWindow(QMainWindow):
             self.star_table.setItem(total_row, 9, na_total_item)
 
             total_pp: float = sum(s.pp_contribution or 0.0 for s in stats)
-            pp_total_item = QTableWidgetItem(f"{total_pp:,.0f}")
+            pp_total_item = QTableWidgetItem(f"{fmt(total_pp, 0, comma=True)}")
             pp_total_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
             self.star_table.setItem(total_row, 10, pp_total_item)
 
             total_solo_pp: float = sum(s.pp_solo or 0.0 for s in stats)
-            pp_solo_total_item = QTableWidgetItem(f"{total_solo_pp:,.0f}")
+            pp_solo_total_item = QTableWidgetItem(f"{fmt(total_solo_pp, 0, comma=True)}")
             pp_solo_total_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             self.star_table.setItem(total_row, 11, pp_solo_total_item)
 
@@ -3539,7 +3674,7 @@ class PlayerWindow(QMainWindow):
             if item2 is not None:
                 item2.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
-            percent_text = f"{s.clear_rate * 100:.1f}" if s.map_count > 0 else ""
+            percent_text = f"{fmt(s.clear_rate * 100, 1)}" if s.map_count > 0 else ""
             self.bl_star_table.setItem(row, 3, QTableWidgetItem(percent_text))
 
             bl_fc_item = QTableWidgetItem(f"{getattr(s, 'fc_count', None) or 0:,}")
@@ -3549,7 +3684,7 @@ class PlayerWindow(QMainWindow):
             bl_fc_count_val = getattr(s, "fc_count", None) or 0
             if s.clear_count > 0:
                 bl_fc_rate = bl_fc_count_val / s.clear_count * 100
-                bl_fc_rate_text = f"{bl_fc_rate:.1f}"
+                bl_fc_rate_text = f"{fmt(bl_fc_rate, 1)}"
                 bl_is_fc_full = bl_fc_rate >= 100.0 - 1e-6
                 bl_is_clear_full = s.map_count > 0 and s.clear_count >= s.map_count
                 bl_fc_rate_medal = bl_is_fc_full and not bl_is_clear_full
@@ -3561,7 +3696,7 @@ class PlayerWindow(QMainWindow):
             self.bl_star_table.setItem(row, 5, bl_fc_rate_item)
 
             avg_acc_val = getattr(s, "average_acc", None)
-            avg_acc_text = f"{avg_acc_val:.2f}" if avg_acc_val is not None else ("0.00" if s.map_count > 0 else "")
+            avg_acc_text = f"{fmt(avg_acc_val, 2)}" if avg_acc_val is not None else ("0.00" if s.map_count > 0 else "")
             acc_item = QTableWidgetItem(avg_acc_text)
             if avg_acc_val is not None:
                 acc_item.setData(Qt.ItemDataRole.UserRole, float(avg_acc_val))
@@ -3582,13 +3717,13 @@ class PlayerWindow(QMainWindow):
                 item9_bl.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
             bl_pp_val = getattr(s, "pp_contribution", None)
-            bl_pp_text = f"{bl_pp_val:,.0f}" if bl_pp_val is not None else "0"
+            bl_pp_text = f"{fmt(bl_pp_val, 0, comma=True)}" if bl_pp_val is not None else "0"
             bl_pp_item = QTableWidgetItem(bl_pp_text)
             bl_pp_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
             self.bl_star_table.setItem(row, 10, bl_pp_item)
 
             bl_pp_solo_val = getattr(s, "pp_solo", None)
-            bl_pp_solo_text = f"{bl_pp_solo_val:,.0f}" if bl_pp_solo_val is not None else "0"
+            bl_pp_solo_text = f"{fmt(bl_pp_solo_val, 0, comma=True)}" if bl_pp_solo_val is not None else "0"
             bl_pp_solo_item = QTableWidgetItem(bl_pp_solo_text)
             bl_pp_solo_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             self.bl_star_table.setItem(row, 11, bl_pp_solo_item)
@@ -3613,21 +3748,21 @@ class PlayerWindow(QMainWindow):
             self.bl_star_table.setItem(bl_total_row, 1, QTableWidgetItem(f"{bl_total_maps:,}"))
             self.bl_star_table.setItem(bl_total_row, 2, QTableWidgetItem(f"{bl_total_clears:,}"))
             bl_total_clear_rate = bl_total_clears / bl_total_maps
-            percent_text = f"{bl_total_clear_rate * 100:.1f}"
+            percent_text = f"{fmt(bl_total_clear_rate * 100, 1)}"
             self.bl_star_table.setItem(bl_total_row, 3, QTableWidgetItem(percent_text))
             bl_fc_total_item = QTableWidgetItem(f"{bl_total_fc:,}")
             bl_fc_total_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             self.bl_star_table.setItem(bl_total_row, 4, bl_fc_total_item)
 
             bl_total_fc_rate_val = bl_total_fc / bl_total_clears * 100 if bl_total_clears > 0 else 0.0
-            bl_fc_rate_total_item = QTableWidgetItem(f"{bl_total_fc_rate_val:.1f}" if bl_total_clears > 0 else "0.0")
+            bl_fc_rate_total_item = QTableWidgetItem(f"{fmt(bl_total_fc_rate_val, 1)}" if bl_total_clears > 0 else "0.0")
             bl_is_fc_full = bl_total_fc_rate_val >= 100.0 - 1e-6
             bl_is_clear_full = bl_total_maps > 0 and bl_total_clears >= bl_total_maps
             bl_fc_rate_total_item.setData(Qt.ItemDataRole.UserRole + 1, bl_is_fc_full and not bl_is_clear_full)
             self.bl_star_table.setItem(bl_total_row, 5, bl_fc_rate_total_item)
 
             if snap.beatleader_average_ranked_acc is not None:
-                bl_total_avg_text = f"{snap.beatleader_average_ranked_acc:.2f}"
+                bl_total_avg_text = f"{fmt(snap.beatleader_average_ranked_acc, 2)}"
             else:
                 bl_total_avg_text = ""
             bl_total_acc_item = QTableWidgetItem(bl_total_avg_text)
@@ -3646,12 +3781,12 @@ class PlayerWindow(QMainWindow):
             self.bl_star_table.setItem(bl_total_row, 9, bl_na_total_item)
 
             bl_total_pp: float = sum(s.pp_contribution or 0.0 for s in bl_stats)
-            bl_pp_total_item = QTableWidgetItem(f"{bl_total_pp:,.0f}")
+            bl_pp_total_item = QTableWidgetItem(f"{fmt(bl_total_pp, 0, comma=True)}")
             bl_pp_total_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
             self.bl_star_table.setItem(bl_total_row, 10, bl_pp_total_item)
 
             bl_total_solo_pp: float = sum(s.pp_solo or 0.0 for s in bl_stats)
-            bl_pp_solo_total_item = QTableWidgetItem(f"{bl_total_solo_pp:,.0f}")
+            bl_pp_solo_total_item = QTableWidgetItem(f"{fmt(bl_total_solo_pp, 0, comma=True)}")
             bl_pp_solo_total_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             self.bl_star_table.setItem(bl_total_row, 11, bl_pp_solo_total_item)
 
@@ -3696,8 +3831,8 @@ class PlayerWindow(QMainWindow):
                 al = getattr(s, "avg_acc_left", None)
                 ar = getattr(s, "avg_acc_right", None)
                 if al is not None or ar is not None:
-                    al_str = f"{al:.1f}" if al is not None else "?"
-                    ar_str = f"{ar:.1f}" if ar is not None else "?"
+                    al_str = f"{fmt(al, 1)}" if al is not None else "?"
+                    ar_str = f"{fmt(ar, 1)}" if ar is not None else "?"
                     item.setText(f"{al_str} / {ar_str}")
                     item.setForeground(QBrush())
                 else:
@@ -3706,7 +3841,7 @@ class PlayerWindow(QMainWindow):
             else:
                 # 通常表示に戻す: foreground ロールをクリアしてデリゲートに色付けを委ねる
                 item.setForeground(QBrush())
-                avg_text = f"{avg_acc_val:.2f}" if avg_acc_val is not None else ("0.00" if s.map_count > 0 else "")
+                avg_text = f"{fmt(avg_acc_val, 2)}" if avg_acc_val is not None else ("0.00" if s.map_count > 0 else "")
                 item.setText(avg_text)
 
         # Total 行
@@ -3723,15 +3858,15 @@ class PlayerWindow(QMainWindow):
                     for s in stats
                     if getattr(s, "avg_acc_right", None) is not None and s.clear_count > 0
                 ]
-                al_str = f"{sum(v * c for v, c in left_pairs) / sum(c for _, c in left_pairs):.1f}" if left_pairs else "?"
-                ar_str = f"{sum(v * c for v, c in right_pairs) / sum(c for _, c in right_pairs):.1f}" if right_pairs else "?"
+                al_str = f"{fmt(sum(v * c for v, c in left_pairs) / sum(c for _, c in left_pairs), 1)}" if left_pairs else "?"
+                ar_str = f"{fmt(sum(v * c for v, c in right_pairs) / sum(c for _, c in right_pairs), 1)}" if right_pairs else "?"
                 total_item.setText(f"{al_str} / {ar_str}")
                 total_item.setForeground(QBrush())
             else:
                 total_item.setForeground(QBrush())
                 avg_val = total_item.data(Qt.ItemDataRole.UserRole)
                 if isinstance(avg_val, float):
-                    total_item.setText(f"{avg_val:.2f}")
+                    total_item.setText(f"{fmt(avg_val, 2)}")
 
     def open_compare(self) -> None:
         """スナップショット比較ダイアログを開く。"""

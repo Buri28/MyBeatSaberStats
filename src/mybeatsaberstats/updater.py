@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import hashlib
 import json
 import os
 import shutil
@@ -70,7 +71,8 @@ _UPDATE_TARGETS_FILE = "update_targets.json"
 _UPDATER_EXE_NAME = "Update.exe"
 _LEGACY_UPDATER_EXE_NAME = "MyBeatSaberUpdater.exe"
 _PRESERVED_RELEASE_ROOT_FILES = frozenset({_UPDATER_EXE_NAME, _LEGACY_UPDATER_EXE_NAME})
-_PRESERVED_RELEASE_ROOT_DIRS = frozenset({"cache", "snapshots"})
+# ユーザーのデータ（キャッシュ・設定・スナップショット・ログ）。更新で消さない。
+_PRESERVED_RELEASE_ROOT_DIRS = frozenset({"cache", "snapshots", "logs"})
 _DEFAULT_MANAGED_INTERNAL_ROOTS = ("lib", "PySide6", "resources")
 _UNSAFE_INPLACE_INTERNAL_ROOTS = frozenset({"lib", "PySide6"})
 
@@ -328,6 +330,10 @@ def _current_release_asset_prefix() -> str:
     return "MyBeatSaberStats"
 
 
+# release zip の URL → GitHub が公開している sha256。ダウンロードした中身をこれと照らし合わせる。
+_RELEASE_ASSET_SHA256: dict[str, str] = {}
+
+
 def _find_release_zip_asset_url(release: dict, asset_prefix: str | None = None) -> str | None:
     """現在のアプリに対応する release zip のダウンロード URL を返す。"""
     prefix = asset_prefix or _current_release_asset_prefix()
@@ -339,8 +345,27 @@ def _find_release_zip_asset_url(release: dict, asset_prefix: str | None = None) 
         if name == f"{prefix}.zip" or name.startswith(prefix_with_dash):
             url = asset.get("browser_download_url") or asset.get("url")
             if url:
+                digest = str(asset.get("digest") or "")
+                if digest.lower().startswith("sha256:"):
+                    _RELEASE_ASSET_SHA256[str(url)] = digest.split(":", 1)[1].strip().lower()
                 return str(url)
     return None
+
+
+def _verify_release_bytes(source: str, content: bytes) -> None:
+    """GitHub が公開している sha256 と一致するか確かめる。一致しなければ例外にする（展開・実行しない）。
+
+    sha256 が分からない（古いリリースや手元の zip）ときは確かめずに通す。
+    """
+    expected = _RELEASE_ASSET_SHA256.get(str(source))
+    if not expected:
+        return
+    actual = hashlib.sha256(content).hexdigest().lower()
+    if actual != expected:
+        raise RuntimeError(
+            "ダウンロードした更新パッケージが壊れているか、別のものに置き換わっています。"
+            f"（sha256 不一致: expected={expected} actual={actual}）"
+        )
 
 
 def _list_source_files_at_tag(tag: str) -> list[str]:
@@ -480,9 +505,11 @@ def _stage_external_update(
         )
     else:
         script_path = stage_dir / "apply_update.ps1"
+        # Windows PowerShell 5.1 は BOM の無い UTF-8 を別の文字コードで読み、日本語の行の次の行を
+        # 飲み込んで実行しないことがある。BOM 付き（utf-8-sig）で書く。
         script_path.write_text(
             _build_external_update_script(),
-            encoding="utf-8",
+            encoding="utf-8-sig",
         )
         _launch_external_update_helper(
             script_path=script_path,
@@ -589,7 +616,8 @@ try {
         throw '展開したリリースフォルダが見つかりません。'
     }
 
-    & robocopy $sourceRoot.FullName $InstallDir /MIR /R:2 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null
+    # /MIR deletes anything not in the release, so exclude user data (cache / snapshots / logs).
+    & robocopy $sourceRoot.FullName $InstallDir /MIR /R:2 /W:1 /NFL /NDL /NJH /NJS /NP /XD (Join-Path $InstallDir 'cache') (Join-Path $InstallDir 'snapshots') (Join-Path $InstallDir 'logs') | Out-Null
     if ($LASTEXITCODE -ge 8) {
         throw "robocopy failed with exit code $LASTEXITCODE"
     }
@@ -644,6 +672,7 @@ def _read_update_source_bytes(source: str, timeout: int) -> bytes:
     if parsed.scheme in ("http", "https"):
         resp = requests.get(source, timeout=timeout)
         resp.raise_for_status()
+        _verify_release_bytes(source, resp.content)
         return resp.content
     if parsed.scheme == "file":
         return Path(parsed.path).read_bytes()
@@ -913,6 +942,7 @@ def _sync_internal_files_from_release_zip(
         zip_path = Path(temp_dir) / "release.zip"
         resp = requests.get(release_zip_url, timeout=120)
         resp.raise_for_status()
+        _verify_release_bytes(release_zip_url, resp.content)
         zip_path.write_bytes(resp.content)
 
         expected_files: dict[Path, zipfile.ZipInfo] = {}
@@ -975,8 +1005,12 @@ def _release_member_to_internal_path(member_name: str) -> Path | None:
         tail = normalized.split(marker, 1)[1].strip("/")
         if not tail:
             return None
+        # ".." や絶対パス・ドライブ指定を含む項目は捨てる（_internal の外に書き込ませない）
+        tail_parts = [part for part in tail.split("/") if part]
+        if any(part in ("..", ".") or ":" in part for part in tail_parts):
+            return None
         head = marker.removeprefix("/_internal/").strip("/")
-        return Path(head) / Path(tail)
+        return Path(head) / Path(*tail_parts)
     return None
 
 
