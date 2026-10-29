@@ -284,7 +284,6 @@ function Copy-CommonFiles {
     # ユーザーに紐づかないキャッシュファイルを release/<ExeName>/cache/ にコピーする
     # （譜面数など。プレイヤースコアや設定ファイルは除外）
     $CacheSharedFiles = @(
-        "accsaber_playlist_counts.json",
         "beatleader_ranked_maps.json",
         "players_index.json",
         "scoresaber_ranked_maps.json"
