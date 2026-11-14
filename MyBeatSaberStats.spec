@@ -26,6 +26,29 @@ a = Analysis(
     noarchive=False,
     optimize=0,
 )
+
+# 同梱しない Qt のファイル。
+# - Qt Virtual Keyboard: Qt の無償版では GPLv3 のみ。同梱するとアプリ全体を GPLv3 にする必要がある。
+#   PyInstaller が platforminputcontexts のプラグインとして自動で拾う。
+# - QML / Quick（Virtual Keyboard が使う）、PDF（画像形式プラグイン qpdf が使う）、
+#   opengl32sw（Mesa のソフトウェア OpenGL）: アプリは QtCore / QtGui / QtSvg / QtWidgets だけを使う。
+# 外したものは make_third_party_notices.py の通知にも載らない。
+_EXCLUDED_QT_PREFIXES = (
+    "qt6virtualkeyboard", "qtvirtualkeyboardplugin",
+    "qt6qml", "qt6quick",
+    "qt6pdf", "qpdf.",
+    "opengl32sw.",
+)
+
+
+def _keep_entry(entry):
+    name = entry[0].replace("\\", "/").rsplit("/", 1)[-1].lower()
+    return not name.startswith(_EXCLUDED_QT_PREFIXES)
+
+
+a.binaries = [entry for entry in a.binaries if _keep_entry(entry)]
+a.datas = [entry for entry in a.datas if _keep_entry(entry)]
+
 pyz = PYZ(a.pure)
 
 exe = EXE(
@@ -36,7 +59,7 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=False,
     upx_exclude=[],
     console=False,
     disable_windowed_traceback=False,
@@ -52,7 +75,8 @@ coll = COLLECT(
     a.binaries,
     a.datas,
     strip=False,
-    upx=True,
+    # UPX で圧縮すると Qt の DLL が書き換わり、通知の「改変していない」と合わなくなるので使わない。
+    upx=False,
     upx_exclude=[],
     name='MyBeatSaberStats',
 )

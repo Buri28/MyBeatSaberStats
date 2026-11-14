@@ -342,6 +342,10 @@ def _find_release_zip_asset_url(release: dict, asset_prefix: str | None = None) 
         name = str(asset.get("name") or "")
         if not name.lower().endswith(".zip"):
             continue
+        # v0.2.0 には差分だけのパッチ（MyBeatSaberStats-0.2.0patch-….zip）も添付されている。
+        # それを正として同期すると exe などが消えるので選ばない。
+        if "patch" in name[len(prefix):].lower():
+            continue
         if name == f"{prefix}.zip" or name.startswith(prefix_with_dash):
             url = asset.get("browser_download_url") or asset.get("url")
             if url:

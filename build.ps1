@@ -281,6 +281,38 @@ function Copy-CommonFiles {
         Write-Host "  Update.exe → $appDir"
     }
 
+    # サードパーティの著作権表示とライセンス文。PyInstaller が同梱したファイルから作る。
+    # exe の隣（利用者が見る場所）と _internal\resources\ の2か所に置く。
+    # 更新は zip 全体をミラーするので exe の隣のものも届く。
+    # v0.5.0 の更新は _internal の lib / PySide6 / resources だけを同期するため、resources にも置く。
+    # v0.3.1〜v0.4.1 の更新は GitHub のリポジトリから src と resources だけを取るため、
+    # リポジトリの resources\ にも書き、リリースのときに一緒にコミットする。
+    # v0.1.0〜v0.3.0 の更新は src の .py だけを取るので、最初の更新では届かない。
+    # その更新で新しい updater.py に入れ替わり、次の更新（zip 全体のミラー）で届く。
+    $noticeArgs = @(
+        (Join-Path $ScriptDir "make_third_party_notices.py"),
+        (Join-Path $ScriptDir "build\$ExeName"),
+        (Join-Path $appDir "THIRD-PARTY-NOTICES.txt"),
+        (Join-Path $internalDir "resources\THIRD-PARTY-NOTICES.txt"),
+        (Join-Path $ScriptDir "resources\THIRD-PARTY-NOTICES.txt")
+    )
+    & $Python -I @noticeArgs
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "THIRD-PARTY-NOTICES.txt を作れませんでした (exit code $LASTEXITCODE)"
+        exit $LASTEXITCODE
+    }
+
+    # MyBeatSaberStats 自身のライセンス。通知と同じ理由で同じ3か所に置く。
+    $licenseFile = Join-Path $ScriptDir "LICENSE"
+    foreach ($dest in @(
+        (Join-Path $appDir "LICENSE"),
+        (Join-Path $internalDir "resources\LICENSE"),
+        (Join-Path $ScriptDir "resources\LICENSE")
+    )) {
+        Copy-Item $licenseFile $dest -Force
+        Write-Host "  LICENSE → $dest"
+    }
+
     # ユーザーに紐づかないキャッシュファイルを release/<ExeName>/cache/ にコピーする
     # （譜面数など。プレイヤースコアや設定ファイルは除外）
     $CacheSharedFiles = @(
@@ -321,7 +353,7 @@ Write-Host ""
 Write-Host "配布する際は release\ フォルダ内の各フォルダを ZIP 等で圧縮してください。" -ForegroundColor Yellow
 Write-Host ""
 Write-Host "GitHub Release 手順:" -ForegroundColor Cyan
-Write-Host "  1. git add version.json && git commit -m \"Release v$currentVersion\""
+Write-Host "  1. git add version.json resources/THIRD-PARTY-NOTICES.txt resources/LICENSE && git commit -m \"Release v$currentVersion\""
 Write-Host "  2. git tag v$currentVersion && git push origin main v$currentVersion"
 Write-Host "  3. GitHub で v$currentVersion の Release を作成してリリースノートを記入"
 Write-Host ""

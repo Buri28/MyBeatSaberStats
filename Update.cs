@@ -689,6 +689,11 @@ static class GitHubReleaseClient
             string name = asset.name ?? string.Empty;
             if (!name.EndsWith(".zip", StringComparison.OrdinalIgnoreCase))
                 continue;
+            // v0.2.0 には差分だけのパッチ（MyBeatSaberStats-0.2.0patch-….zip）も添付されている。
+            // それを正として同期すると exe などが消えるので選ばない。
+            if (name.Length > assetPrefix.Length
+                && name.Substring(assetPrefix.Length).IndexOf("patch", StringComparison.OrdinalIgnoreCase) >= 0)
+                continue;
             if (string.Equals(name, assetPrefix + ".zip", StringComparison.OrdinalIgnoreCase)
                 || name.StartsWith(prefixWithDash, StringComparison.OrdinalIgnoreCase))
                 return asset.browser_download_url ?? asset.url;
