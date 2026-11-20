@@ -117,6 +117,9 @@ class Snapshot:
     beatleader_experience: int | None = None
     beatleader_prestige: int | None = None
     beatleader_prestige_icon_url: str | None = None
+    beatleader_pass_pp: float | None = None
+    beatleader_tech_pp: float | None = None
+    beatleader_acc_pp: float | None = None
 
     # BeatLeader の追加統計（将来の拡張用）
     beatleader_average_ranked_acc: float | None = None
@@ -188,6 +191,9 @@ class Snapshot:
         SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
         name = f"{steam_id}_{taken_at:%Y%m%d-%H%M%S}.json"
         return SNAPSHOT_DIR / name
+
+    accsaber_fetch_status: str | None = None
+    accsaber_fetch_errors: list[str] = field(default_factory=list)
 
     def save(self, path: Path | None = None) -> Path:
         """スナップショットを JSON として保存する。"""

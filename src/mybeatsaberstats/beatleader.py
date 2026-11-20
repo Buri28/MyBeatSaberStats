@@ -55,6 +55,10 @@ class BeatLeaderPlayer:
     experience: int | None = None
     prestige: int | None = None
     prestige_icon_url: str | None = None
+    # Player-wide weighted PP, not score PP or map ratings.
+    pass_pp: float | None = None
+    tech_pp: float | None = None
+    acc_pp: float | None = None
 
 
 def _safe_int(value: int | float | str | None) -> int | None:
@@ -63,6 +67,16 @@ def _safe_int(value: int | float | str | None) -> int | None:
             return None
         return int(value)
     except (TypeError, ValueError):
+        return None
+
+
+def _optional_pp(value) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+        return number if math.isfinite(number) else None
+    except (TypeError, ValueError, OverflowError):
         return None
 
 
@@ -108,6 +122,8 @@ def fetch_player(player_id: str, session: Optional[requests.Session] = None) -> 
     if session is None:
         session = make_session()
 
+    # xyz の /player/{id} にも passPp・techPp・accPp がある（2026-11-20 に確認）。統計・スコア取得と同じ URL にして
+    # get_memoized で 1 回にまとめ、http_client のレート制御（api.beatleader.xyz）も効かせる。
     url = f"{BASE_URL}/player/{player_id}"
     timeouts = (3, 5, 8)
     resp = None
@@ -168,6 +184,9 @@ def fetch_player(player_id: str, session: Optional[requests.Session] = None) -> 
         experience=experience,
         prestige=prestige,
         prestige_icon_url=_resolve_prestige_icon_url(session, prestige),
+        pass_pp=_optional_pp(data.get("passPp")),
+        tech_pp=_optional_pp(data.get("techPp")),
+        acc_pp=_optional_pp(data.get("accPp")),
     )
 
 

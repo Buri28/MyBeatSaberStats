@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 from typing import Optional, Callable
@@ -13,7 +13,11 @@ from ..snapshot import BASE_DIR, StarClearStat
 from typing import Optional, Dict, TypedDict, Callable
 
 from ..api_error_log import log_api_failure
-from ..fileio import atomic_write_text, mark_now, recently_marked
+from ..fileio import atomic_write_text
+from ..ranked_sync import (
+    flag_star_drift_if_any, load_newly_ranked_checked, full_traversal_due, mismatch_traversal_allowed,
+    record_full_traversal, save_newly_ranked_checked,
+)
 from ..modifiers import classify_play
 from ..http_client import get_memoized
 
@@ -21,9 +25,8 @@ CACHE_DIR = BASE_DIR / "cache"
 
 SCORESABER_LEADERBOARDS_URL = "https://scoresaber.com/api/leaderboards"
 SCORESABER_PLAYER_SCORES_URL = "https://scoresaber.com/api/player/{player_id}/scores"
-# ランク譜面の全件取り直しをした時刻（「キャッシュ > API の総数」での全件取得を 24 時間に 1 回までにする）
+# ランク譜面の全件取り直しの記録（いつ・最後まで取れたか・総数が合わないまま終わったか）。判定は ranked_sync.py。
 _RANKED_FULL_TRAVERSAL_STATE = CACHE_DIR / "ranked_full_traversal.json"
-_RANKED_FULL_TRAVERSAL_INTERVAL_HOURS = 24
 SCORESABER_PLAYER_FULL_URL = "https://scoresaber.com/api/player/{player_id}/full"
 
 #: 無限ページングを防ぐための保険。
@@ -435,6 +438,11 @@ def _get_scoresaber_leaderboards_ranked(
     if fetch_until is not None:
         fetch_until_str = fetch_until.strftime("%Y-%m-%dT%H:%M:%S") + "Z"
         print(f"ScoreSaber Ranked Maps fetch_until 指定: {fetch_until_str}")
+        if fetch_until_str > "2001" and full_traversal_due(_RANKED_FULL_TRAVERSAL_STATE, "scoresaber"):
+            # 窓の外で変わった★は日付の窓では拾えない。初回と★のずれを見つけたときだけ全件取り直す。
+            print("SS Ranked Maps: 全件取得の記録が無いか★のずれを検知したため、全件取り直しをします")
+            fetch_until = datetime(2000, 1, 1)
+            fetch_until_str = fetch_until.strftime("%Y-%m-%dT%H:%M:%S") + "Z"
 
     # コンソール出力は日本語、画面表示は英語
     print("ScoreSaberのRanked譜面をキャッシュ付きで取得中...")
@@ -468,6 +476,10 @@ def _get_scoresaber_leaderboards_ranked(
         run_complete = True
         seen_ids: set[str] = set()
         api_total: Optional[int] = None
+        # 一覧の終わり（100 件未満のページ）まで自然に読み終えたか。404・空ページ・ページ上限で抜けたときは False
+        # （ただし、読んだ件数が API の総数に届いた後の 404・空ページは、ちょうど割り切れた一覧の終わりとみなす）。
+        natural_end = False
+        raw_items = 0  # 一覧で読んだ件数（重複を含む）
         # 2000 年まで遡る＝全件取得。このときは見つかった譜面だけでキャッシュを作り直し、ランクから外れた譜面を消す。
         full_traversal = fetch_until_str <= "2001"
         previous_fetched_at: Optional[str] = None
@@ -490,6 +502,7 @@ def _get_scoresaber_leaderboards_ranked(
                 resp_dt = session.get(SCORESABER_LEADERBOARDS_URL, params=params_dt, timeout=10)
                 print(f"SS Ranked Maps (DateRanked desc) page {page_no}: {resp_dt.url}")
                 if resp_dt.status_code == 404:
+                    natural_end = api_total is not None and 0 < raw_items >= api_total
                     break
                 if _is_rate_limited(resp_dt, "_get_scoresaber_ranked_maps", f"ranked maps page={page_no}"):
                     run_complete = False
@@ -503,9 +516,15 @@ def _get_scoresaber_leaderboards_ranked(
                         api_total = None
                 lbs_dt = data_dt.get("leaderboards") or []
                 if not lbs_dt:
+                    # 1 件も読めていない（総数 0 の異常な応答など）ときは、一覧の終わりとみなさない
+                    natural_end = api_total is not None and 0 < raw_items >= api_total
                     break
+                raw_items += len(lbs_dt)
                 for lb in lbs_dt:
-                    cd = lb.get("rankedDate") or lb.get("createdDate") or lb.get("created_date") or ""
+                    # rankedDate 降順では、rankedDate が null の古い譜面（約300件）が先頭に並ぶ。
+                    # createdDate（2018年など）で境界判定すると、1ページ目で打ち切って新しいランク譜面を取り逃がすため、
+                    # rankedDate がある譜面だけで境界を判定する（null の譜面は取り込んで次へ進む）。
+                    cd = lb.get("rankedDate") or ""
                     if isinstance(cd, str) and cd:
                         # rankedDate を fetch_until_str と比較 (ISO 文字列の辞書順比較)
                         if cd < fetch_until_str:
@@ -521,6 +540,7 @@ def _get_scoresaber_leaderboards_ranked(
                         append_leaderboards[lb_id] = lb
                     leaderboards[lb_id] = lb
                 if reached_fetch_until:
+                    natural_end = True
                     break
                 meta_dt = data_dt.get("metadata") or {}
                 try:
@@ -528,6 +548,7 @@ def _get_scoresaber_leaderboards_ranked(
                 except (TypeError, ValueError):
                     per_page_dt = 100
                 if len(lbs_dt) < per_page_dt:
+                    natural_end = True
                     break
                 if page_no >= _MAX_PAGES_GUARD:
                     print(f"SS Ranked Maps: ページ数上限 {_MAX_PAGES_GUARD} に達したため打ち切ります")
@@ -542,32 +563,74 @@ def _get_scoresaber_leaderboards_ranked(
             status["complete"] = False
 
         removed = 0
+        if not full_traversal and run_complete and not reached_fetch_until and api_total is not None \
+                and len(seen_ids) >= api_total:
+            # 境界に達する前に一覧が終わり、API の総数まで全部読めた＝実質、全件取得
+            full_traversal = True
         if full_traversal:
-            mark_now(_RANKED_FULL_TRAVERSAL_STATE, "scoresaber")
-            if run_complete and seen_ids and api_total is not None and len(seen_ids) >= api_total:
+            # 失敗・レート制限でなく、一覧の終わり（100 件未満のページ）まで自然に読めた
+            listing_ended = bool(run_complete and natural_end)
+            complete_full = bool(listing_ended and seen_ids and api_total is not None and len(seen_ids) >= api_total)
+            if complete_full:
                 # API の総数まで全部取れたので、見つからなかった譜面（ランクから外れたもの）を消す
                 stale = [lb_id for lb_id in leaderboards if lb_id not in seen_ids]
                 for lb_id in stale:
                     del leaderboards[lb_id]
                 removed = len(stale)
-            elif run_complete:
-                # 途中で止まった（404・空ページなど）。消すと残りの譜面まで消えるので消さない
+            elif not listing_ended and run_complete:
+                # 途中で止まった（404・空ページ・ページ上限など）。消すと残りの譜面まで消えるので消さない。失敗として扱う
                 print(f"SS Ranked Maps: 全件取得が途中で止まりました（{len(seen_ids)}/{api_total} 件）。古い譜面は消しません")
                 run_complete = False
                 if status is not None:
                     status["complete"] = False
-        elif (
-            run_complete and api_total is not None and len(leaderboards) > api_total
-            and not recently_marked(_RANKED_FULL_TRAVERSAL_STATE, "scoresaber", _RANKED_FULL_TRAVERSAL_INTERVAL_HOURS)
-        ):
-            # キャッシュの方が多い＝ランクから外れた譜面が残っている。全件取り直して消す。
-            # （全件取得からは呼ばないので再帰が続かない。API の総数が食い違っていても 24 時間に 1 回まで）
-            print(
-                f"SS Ranked Maps: キャッシュ {len(leaderboards)} 件 > API {api_total} 件のため、全件取り直します"
+            elif listing_ended:
+                # 一覧は最後まで読めたが、列挙数が総数に届かない（null 日付の並びが不安定）。失敗ではないので
+                # status["complete"] は落とさない。消さず、取得日時も進めない（次回も同じ範囲まで遡る）。
+                print(f"SS Ranked Maps: 一覧は最後まで読めましたが、列挙数が総数に届きません（{len(seen_ids)}/{api_total} 件）")
+                run_complete = False
+            if listing_ended and status is not None:
+                # PP の取り直しで返らなかったスコアを外すとき、今回の一覧に実際に出てきた（＝今ランクの）譜面だけに絞る。
+                # 列挙数が総数に届かない（null 日付の並びが不安定）だけなら、失敗ではないことも伝える。
+                status["ss_ranked_seen_ids"] = set(seen_ids)
+                if not complete_full:
+                    status["ss_ranked_listing_short"] = True
+            # 完了＝一覧が最後まで読めて、キャッシュの件数が API の総数と合った。
+            # 注意：rankedDate が null の譜面（約300件）は並び順が不安定で、巡回のたびに数十件が重複・欠落する
+            # （実 API で 6243 件中 6161 件しか列挙されないことを確認）。列挙数（seen）が総数に届かなくても、
+            # キャッシュの件数が総数と合っていれば欠けは無いとみなす（消す処理は seen が総数に届いたときだけ行う）。
+            ok = bool(listing_ended and api_total is not None and len(leaderboards) == api_total)
+            # 記録：一覧を最後まで読めたか（失敗でなく一覧が終わった）、読めたのに総数が合わなかったか。
+            # 合わないまま繰り返さないため、総数が合わないときは API の総数も残す。
+            record_full_traversal(
+                _RANKED_FULL_TRAVERSAL_STATE, "scoresaber", ok,
+                api_total if listing_ended and not ok else None,
             )
-            return _get_scoresaber_leaderboards_ranked(
-                session, progress=progress, fetch_until=datetime(2000, 1, 1), status=status,
-            )
+        else:
+            if run_complete and reached_fetch_until:
+                # 窓の中（rankedDate が境界以降）の譜面は全部読んだ。API に無い＝ランクから外れた/入れ替わった。
+                # 総数が同じままの入れ替わりは総数の突き合わせでは見えないので、ここで消す。
+                # （誤って消しても、直後の総数チェックで食い違えば全件取り直して戻る）
+                stale = [
+                    lb_id for lb_id, cached_lb in leaderboards.items()
+                    if lb_id not in seen_ids
+                    and isinstance(cached_lb.get("rankedDate"), str) and cached_lb["rankedDate"] >= fetch_until_str
+                ]
+                for lb_id in stale:
+                    del leaderboards[lb_id]
+                removed = len(stale)
+                if stale:
+                    print(f"SS Ranked Maps: 窓の中でランクから外れた譜面 {len(stale)} 件をキャッシュから消しました")
+            if (
+                run_complete and api_total is not None and len(leaderboards) != api_total
+                and mismatch_traversal_allowed(_RANKED_FULL_TRAVERSAL_STATE, "scoresaber", api_total)
+            ):
+                # キャッシュと API の総数が合わない＝窓より古い所の取りこぼし/ランク外れが残っている。全件取り直す。
+                print(
+                    f"SS Ranked Maps: キャッシュ {len(leaderboards)} 件 ≠ API {api_total} 件のため、全件取り直します"
+                )
+                return _get_scoresaber_leaderboards_ranked(
+                    session, progress=progress, fetch_until=datetime(2000, 1, 1), status=status,
+                )
 
         if append_leaderboards or removed:
             try:
@@ -1252,25 +1315,89 @@ def _get_scoresaber_player_scores(
 #     return all_scores
 
 
+# 一度に外す件数がこれを超えたら、API の異常（読み飛ばしなど）を疑って外さない。
+# サーバー側でスコアが消えるのは普通は数件なので、小さい固定値にする。
+_PRUNE_MAX = 20
+
+
+def _ss_score_pp(item: dict) -> float:
+    try:
+        return float((item.get("score") or {}).get("pp") or 0)
+    except (TypeError, ValueError, AttributeError):
+        return 0.0
+
+
+def _prune_missing_ranked_scores(scores: dict, fetched: dict, seen_ranked_ids: Optional[set] = None) -> int:
+    """ランク譜面のスコアの取り直し（最後まで読めたもの）で返らなかったスコアを scores から外す。
+
+    外すのは、キャッシュ上で leaderboard.ranked が真かつ score.pp > 0 で、ランク譜面キャッシュでもランクの譜面なのに、
+    今回返ってこなかったものだけ（サーバー側で消えたもの）。ランク外・pp 0 のスコアは Clears・プレイ数・
+    プレイリストの ✔ に使うので外さない。ランクから外れたばかりでキャッシュの ranked がまだ真のスコア
+    （sort=top では pp 0 になって返らない）を外さないよう、ランク譜面キャッシュと突き合わせる。
+    seen_ranked_ids（直前のランク譜面の全件取得で実際に一覧に出た譜面）があれば、さらにそれに絞る
+    （ランク譜面キャッシュには、ランクから外れた譜面が残っていることがあるため）。
+    ランク譜面キャッシュが無い・外す件数が多すぎるときは何も外さない。戻り値は外した件数。
+    """
+    if not fetched:
+        return 0
+    ranked = _normalize_leaderboard_cache(_load_cached_rank_maps(CACHE_DIR / "scoresaber_ranked_maps.json") or {})
+    ranked_ids = {k for k, lb in ranked.items() if lb.get("ranked", True)}
+    if seen_ranked_ids is not None:
+        ranked_ids &= {str(x) for x in seen_ranked_ids}
+    if not ranked_ids:
+        print("ScoreSaber: ランク譜面キャッシュが無いため、返らなかったスコアは外しません")
+        return 0
+    cached_ranked = [
+        k for k, item in scores.items()
+        if isinstance(item, dict) and (item.get("leaderboard") or {}).get("ranked") and _ss_score_pp(item) > 0
+    ]
+    missing = [k for k in cached_ranked if k not in fetched and k in ranked_ids]
+    if not missing:
+        return 0
+    if len(missing) > _PRUNE_MAX:
+        print(f"ScoreSaber: 取り直しで返らなかったランク譜面のスコアが {len(missing)} 件と多すぎるため、外しません")
+        return 0
+    for k in missing:
+        del scores[k]
+    print(f"ScoreSaber: 取り直しで返らなかったランク譜面のスコア {len(missing)} 件をキャッシュから外しました")
+    return len(missing)
+
+
 def refresh_scoresaber_ranked_scores(
     scoresaber_id: str,
     session: requests.Session,
     progress: Optional[Callable[[int, Optional[int]], None]] = None,
     status: Optional[dict] = None,
+    prune_missing: bool = True,
+    ranked_play_count: Optional[int] = None,
 ) -> int:
     """ランク譜面のスコアだけを pp の高い順（sort=top）に取り直し、スコアキャッシュに上書きする。
 
     pp が変わるのはランク譜面のスコアだけなので、全スコア（200 ページ以上）ではなく
     pp の付いたスコア（約 60 ページ）だけ読む。pp が 0 のスコアが出てきたら止める。
     途中で失敗したら status["complete"] = False を入れ、それまでに取れた分だけ反映する。
+    最後まで読めたときだけ、今回返ってこなかったランク譜面の pp > 0 のスコア（サーバー側で消えたもの）を
+    キャッシュから外す（prune_missing=False なら外さない。条件は _prune_missing_ranked_scores）。
+    ranked_play_count は同じ Snapshot で取った /full の rankedPlayCount。読んだ pp > 0 のスコアの件数と合うときだけ外す
+    （取得中にページがずれて正常なスコアを読み飛ばしたときは件数が足りない）。None（取れていない）なら外さない。
     戻り値は取り直したスコアの件数。
     """
+    # 呼ぶ前に別の取得（ランク譜面の取り直しなど）が失敗していたら、ランク譜面キャッシュが古いかもしれないので外さない。
+    # ただし、ランク譜面の一覧を最後まで読めて列挙数が総数に届かなかっただけ（null 日付の並びが不安定）なら失敗ではない。
+    prior_incomplete = (
+        status is not None and status.get("complete") is False and not status.get("ss_ranked_listing_short")
+    )
+    seen_ranked_ids = status.get("ss_ranked_seen_ids") if status is not None else None
     cache_path = CACHE_DIR / f"scoresaber_player_scores_{scoresaber_id}.json"
     url = SCORESABER_PLAYER_SCORES_URL.format(player_id=scoresaber_id)
     fetched: dict[str, dict] = {}
     page = 1
     max_pages: Optional[int] = None
     complete = True
+    # 一覧の終わりまで読めたか（pp 0 のスコアに当たった／100 件未満のページで終わった）。
+    # 404・空ページ・ページ上限で抜けたときは、残りを読み飛ばしたかもしれないので外さない。
+    natural_end = False
+    pp_items_read = 0  # 読んだ pp > 0 のスコアの件数（重複を含む）。fetched と合わなければ並びが動いた
     while True:
         if progress is not None:
             progress(page, max_pages)
@@ -1311,18 +1438,40 @@ def refresh_scoresaber_ranked_scores(
                 reached_unranked = True
                 break
             lb_id = leaderboard.get("id")
+            pp_items_read += 1
             if lb_id is not None:
                 fetched[str(lb_id)] = item
-        if reached_unranked or len(items) < 100 or page >= _MAX_PAGES_GUARD:
+        if reached_unranked or len(items) < 100:
+            natural_end = True
+            break
+        if page >= _MAX_PAGES_GUARD:
+            # ページ上限で打ち切った。続きがあるかもしれないので、返らなかったスコアは外さない
             break
         page += 1
 
     if not complete and status is not None:
         status["complete"] = False
+    if status is not None:
+        # 一覧の終わりまで読めたか（404・空ページ・ページ上限で抜けたときは False）。新ランク譜面の検知済みの印に使う
+        status["ranked_scores_read_to_end"] = bool(complete and natural_end)
     if not fetched:
         return 0
     scores = _load_cached_player_scores(cache_path) or {}
     scores.update(fetched)
+    if prune_missing:
+        if not complete or not natural_end or prior_incomplete:
+            print("ScoreSaber: 取り直しを最後まで終えられなかったため、返らなかったスコアは外しません")
+        elif pp_items_read != len(fetched):
+            # 読んでいる途中で pp の並びが動いた（再プレイ・再計算）。動いた分を読み飛ばしたかもしれない
+            print("ScoreSaber: 取り直しの途中で並びが動いた（重複あり）ため、返らなかったスコアは外しません")
+        elif ranked_play_count is None or ranked_play_count != len(fetched):
+            # 読み飛ばし（ページのずれ）があると件数が合わない。プロフィールの件数が無いときも確かめられないので外さない
+            print(
+                f"ScoreSaber: 読んだ pp 付きスコア {len(fetched)} 件がプロフィールの rankedPlayCount "
+                f"（{ranked_play_count}）と合わないため、返らなかったスコアは外しません"
+            )
+        else:
+            _prune_missing_ranked_scores(scores, fetched, seen_ranked_ids)
     # 差分取得の途中失敗の印（resume_stop_ts）は残す
     resume_stop_ts: Optional[str] = None
     try:
@@ -1333,6 +1482,98 @@ def refresh_scoresaber_ranked_scores(
         resume_stop_ts = None
     _save_cached_player_scores(cache_path, scores, resume_stop_ts=resume_stop_ts)
     return len(fetched)
+
+
+def refresh_scores_of_newly_ranked_maps(
+    scoresaber_id: str,
+    session: requests.Session,
+    progress: Optional[Callable[[int, Optional[int]], None]] = None,
+    status: Optional[dict] = None,
+) -> int:
+    """新しくランクになった譜面に自分の古いプレイがあるとき、そのスコアの pp を取り直す。
+
+    スコアの差分取得は timeSet（プレイした日時）で打ち切るので、ランクになる前の古いプレイは拾えない。
+    pp が 0 のまま PP のずれ（reconcile）が働くまで残ってしまう。
+    検知は API を使わずキャッシュ同士で行う：スコアキャッシュ上で ranked でない譜面が、ランク譜面キャッシュではランクになっている。
+    見つかったときだけ、ランク譜面のスコア（sort=top）を取り直す。
+    取り直しても更新されなかった譜面（ランクから外れた譜面がキャッシュに残っている・pp が 0 のスコアなど）は、
+    スコアの譜面情報は書き換えず、「検知済み」の印（newly_ranked_checked.json）だけ残して毎回の再検知を防ぐ。
+    印はランク譜面キャッシュ側のランクになった日時ごとなので、ランクになり直したら再び検知する。
+    戻り値は検知した譜面の数。
+    """
+    cache_path = CACHE_DIR / f"scoresaber_player_scores_{scoresaber_id}.json"
+    checked_path = CACHE_DIR / "newly_ranked_checked.json"
+    ranked = _normalize_leaderboard_cache(_load_cached_rank_maps(CACHE_DIR / "scoresaber_ranked_maps.json") or {})
+    scores = _load_cached_player_scores(cache_path) or {}
+    checked = load_newly_ranked_checked(checked_path, "scoresaber", scoresaber_id)
+
+    def _mark(k: str) -> str:
+        return str(ranked[k].get("rankedDate") or "")
+
+    def _stale() -> list[str]:
+        # ランク譜面キャッシュの側も「ランク」のものだけ（掃除が遅れてランク外れが残っていても書き換えない）
+        return [
+            k for k, item in scores.items()
+            if k in ranked and ranked[k].get("ranked", True) and isinstance(item, dict)
+            and not (item.get("leaderboard") or {}).get("ranked")
+            and checked.get(k) != _mark(k)
+        ]
+
+    def _star_entries():
+        for k, item in scores.items():
+            if k not in ranked or not isinstance(item, dict):
+                continue
+            ts = (item.get("score") or {}).get("timeSet")
+            try:
+                played = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+                if played.tzinfo is None:
+                    played = played.replace(tzinfo=timezone.utc)
+            except ValueError:
+                played = None
+            yield (item.get("leaderboard") or {}).get("stars"), ranked[k].get("stars"), played
+
+    # 窓の外で★が変わった譜面を、最近のプレイのスコアから検知する（次回の全件取り直しを前倒し）
+    if flag_star_drift_if_any(_RANKED_FULL_TRAVERSAL_STATE, "scoresaber", _star_entries()):
+        print("ScoreSaber: ランク譜面キャッシュの★が最新のスコアと食い違うため、次回全件取り直します")
+
+    stale = _stale()
+    if not stale:
+        return 0
+    print(f"ScoreSaber: 新しくランクになった譜面に自分のスコアがある（{len(stale)} 件）。ランク譜面のスコアを取り直します")
+    local_status: dict = {}
+    # ここでは外さない：目的は新しくランクになった譜面の pp の取得で、直前のランク譜面の取得は差分だけなので
+    # キャッシュにランクから外れた譜面が残っていることがある（外すのは PP のずれの取り直しのときだけ）
+    refresh_scoresaber_ranked_scores(
+        scoresaber_id, session, progress=progress, status=local_status, prune_missing=False,
+    )
+    if local_status.get("complete") is False:
+        # 途中で失敗。差し替えず、次回また検知して取り直す
+        if status is not None:
+            status["complete"] = False
+        return len(stale)
+    if not local_status.get("ranked_scores_read_to_end"):
+        # 404・空ページ・ページ上限で途中までしか読めていない。読んでいない譜面に印を付けない（次回また検知する）
+        return len(stale)
+    scores = _load_cached_player_scores(cache_path) or {}
+    still = _stale()
+    if still:
+        # スコアは書き換えず、検知済みの印だけ残す（ランク譜面キャッシュに無くなった譜面の印は捨てる）
+        marks = {k: v for k, v in checked.items() if k in ranked}
+        marks.update({k: _mark(k) for k in still})
+        save_newly_ranked_checked(checked_path, "scoresaber", scoresaber_id, marks)
+    return len(stale)
+
+
+def _resave_player_scores(cache_path: Path, scores: dict) -> None:
+    """スコアキャッシュを保存し直す（差分取得の途中失敗の印 resume_stop_ts は残す）。"""
+    resume_stop_ts: Optional[str] = None
+    try:
+        _raw = json.loads(cache_path.read_text(encoding="utf-8")) if cache_path.exists() else None
+        if isinstance(_raw, dict) and isinstance(_raw.get("resume_stop_ts"), str):
+            resume_stop_ts = _raw["resume_stop_ts"]
+    except Exception:  # noqa: BLE001
+        resume_stop_ts = None
+    _save_cached_player_scores(cache_path, scores, resume_stop_ts=resume_stop_ts)
 
 
 def _get_scoresaber_player_stats(scoresaber_id: str, session: requests.Session) -> dict:
