@@ -1,0 +1,808 @@
+[
+  {
+    "name": "page",
+    "in": "query",
+    "description": "Page number for pagination, default is 1",
+    "schema": {
+      "type": "integer",
+      "format": "int32",
+      "default": 1
+    }
+  },
+  {
+    "name": "count",
+    "in": "query",
+    "description": "Number of leaderboards per page, default is 10",
+    "schema": {
+      "type": "integer",
+      "format": "int32",
+      "default": 10
+    }
+  },
+  {
+    "name": "sortBy",
+    "in": "query",
+    "description": "Field to sort leaderboards by, default is None",
+    "schema": {
+      "enum": [
+        "none",
+        "timestamp",
+        "name",
+        "stars",
+        "passRating",
+        "accRating",
+        "techRating",
+        "scoreTime",
+        "playCount",
+        "voting",
+        "voteCount",
+        "voteRatio",
+        "duration",
+        "attempts",
+        "nJS",
+        "nPS",
+        "bPM",
+        "multiRating",
+        "eBPM",
+        "linearPercentage"
+      ],
+      "type": "string",
+      "allOf": [
+        {
+          "$ref": "#/components/schemas/MapSortBy"
+        }
+      ],
+      "oneOf": [
+        {
+          "enum": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            10,
+            11,
+            12,
+            13,
+            14,
+            15,
+            16,
+            17,
+            18,
+            19
+          ],
+          "type": "integer"
+        },
+        {
+          "enum": [
+            "none",
+            "timestamp",
+            "name",
+            "stars",
+            "passRating",
+            "accRating",
+            "techRating",
+            "scoreTime",
+            "playCount",
+            "voting",
+            "voteCount",
+            "voteRatio",
+            "duration",
+            "attempts",
+            "nJS",
+            "nPS",
+            "bPM",
+            "multiRating",
+            "eBPM",
+            "linearPercentage"
+          ],
+          "type": "string"
+        }
+      ],
+      "default": 0
+    }
+  },
+  {
+    "name": "order",
+    "in": "query",
+    "description": "Order of sorting, default is Desc",
+    "schema": {
+      "enum": [
+        "desc",
+        "asc"
+      ],
+      "type": "string",
+      "allOf": [
+        {
+          "$ref": "#/components/schemas/Order"
+        }
+      ],
+      "oneOf": [
+        {
+          "enum": [
+            0,
+            1
+          ],
+          "type": "integer"
+        },
+        {
+          "enum": [
+            "desc",
+            "asc"
+          ],
+          "type": "string"
+        }
+      ],
+      "description": "Represents the order in which values will be sorted.",
+      "default": 0
+    }
+  },
+  {
+    "name": "search",
+    "in": "query",
+    "description": "Search term to filter leaderboards by song, author or mapper name",
+    "schema": {
+      "type": "string"
+    }
+  },
+  {
+    "name": "type",
+    "in": "query",
+    "description": "Type of leaderboards to filter, default is All",
+    "schema": {
+      "enum": [
+        "all",
+        "ranked",
+        "ranking",
+        "nominated",
+        "qualified",
+        "staff",
+        "reweighting",
+        "reweighted",
+        "unranked",
+        "ost"
+      ],
+      "type": "string",
+      "allOf": [
+        {
+          "$ref": "#/components/schemas/Type"
+        }
+      ],
+      "oneOf": [
+        {
+          "enum": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9
+          ],
+          "type": "integer"
+        },
+        {
+          "enum": [
+            "all",
+            "ranked",
+            "ranking",
+            "nominated",
+            "qualified",
+            "staff",
+            "reweighting",
+            "reweighted",
+            "unranked",
+            "ost"
+          ],
+          "type": "string"
+        }
+      ],
+      "default": 0
+    }
+  },
+  {
+    "name": "mode",
+    "in": "query",
+    "description": "Mode to filter leaderboards by (Standard, OneSaber, etc...)",
+    "schema": {
+      "type": "string"
+    }
+  },
+  {
+    "name": "difficulty",
+    "in": "query",
+    "description": "Difficulty to filter leaderboards by (Easy, Normal, Hard, Expert, ExpertPlus)",
+    "schema": {
+      "type": "string"
+    }
+  },
+  {
+    "name": "mapType",
+    "in": "query",
+    "description": "Map type to filter leaderboards by",
+    "schema": {
+      "enum": [
+        "none",
+        "acc",
+        "tech",
+        "midspeed",
+        "speed",
+        "fitbeat",
+        "linear",
+        "bombReset"
+      ],
+      "type": "string",
+      "allOf": [
+        {
+          "$ref": "#/components/schemas/MapTypes"
+        }
+      ],
+      "oneOf": [
+        {
+          "enum": [
+            0,
+            1,
+            2,
+            4,
+            8,
+            16,
+            32,
+            64
+          ],
+          "type": "integer"
+        },
+        {
+          "enum": [
+            "none",
+            "acc",
+            "tech",
+            "midspeed",
+            "speed",
+            "fitbeat",
+            "linear",
+            "bombReset"
+          ],
+          "type": "string"
+        }
+      ],
+      "description": "Bitmask enum. Values can be combined using bitwise OR operator.",
+      "default": 0,
+      "example": 127
+    }
+  },
+  {
+    "name": "allTypes",
+    "in": "query",
+    "description": "Operation to filter all types, default is Any",
+    "schema": {
+      "enum": [
+        "any",
+        "all",
+        "not"
+      ],
+      "type": "string",
+      "allOf": [
+        {
+          "$ref": "#/components/schemas/Operation"
+        }
+      ],
+      "oneOf": [
+        {
+          "enum": [
+            0,
+            1,
+            2
+          ],
+          "type": "integer"
+        },
+        {
+          "enum": [
+            "any",
+            "all",
+            "not"
+          ],
+          "type": "string"
+        }
+      ],
+      "default": 0
+    }
+  },
+  {
+    "name": "mapRequirements",
+    "in": "query",
+    "description": "Requirements to filter leaderboards by, default is Ignore",
+    "schema": {
+      "enum": [
+        "none",
+        "chroma",
+        "noodles",
+        "mappingExtensions",
+        "cinema",
+        "v3",
+        "optionalProperties",
+        "vNJS",
+        "vivify",
+        "v3Pepega",
+        "groupLighting",
+        "audioLink",
+        "ignore"
+      ],
+      "type": "string",
+      "allOf": [
+        {
+          "$ref": "#/components/schemas/Requirements"
+        }
+      ],
+      "oneOf": [
+        {
+          "enum": [
+            0,
+            2,
+            4,
+            8,
+            16,
+            32,
+            64,
+            128,
+            256,
+            512,
+            1024,
+            2048,
+            -1
+          ],
+          "type": "integer"
+        },
+        {
+          "enum": [
+            "none",
+            "chroma",
+            "noodles",
+            "mappingExtensions",
+            "cinema",
+            "v3",
+            "optionalProperties",
+            "vNJS",
+            "vivify",
+            "v3Pepega",
+            "groupLighting",
+            "audioLink",
+            "ignore"
+          ],
+          "type": "string"
+        }
+      ],
+      "description": "Bitmask enum. Values can be combined using bitwise OR operator.",
+      "default": -1,
+      "example": -1
+    }
+  },
+  {
+    "name": "allRequirements",
+    "in": "query",
+    "description": "Operation to filter all requirements, default is Any",
+    "schema": {
+      "enum": [
+        "any",
+        "all",
+        "not"
+      ],
+      "type": "string",
+      "allOf": [
+        {
+          "$ref": "#/components/schemas/Operation"
+        }
+      ],
+      "oneOf": [
+        {
+          "enum": [
+            0,
+            1,
+            2
+          ],
+          "type": "integer"
+        },
+        {
+          "enum": [
+            "any",
+            "all",
+            "not"
+          ],
+          "type": "string"
+        }
+      ],
+      "default": 0
+    }
+  },
+  {
+    "name": "songStatus",
+    "in": "query",
+    "description": "Song status to filter leaderboards by, default is None",
+    "schema": {
+      "enum": [
+        "none",
+        "curated",
+        "mapOfTheWeek",
+        "noodleMonday",
+        "featuredOnCC",
+        "beastSaberAwarded",
+        "buildingBlocksAwarded"
+      ],
+      "type": "string",
+      "allOf": [
+        {
+          "$ref": "#/components/schemas/SongStatus"
+        }
+      ],
+      "oneOf": [
+        {
+          "enum": [
+            0,
+            2,
+            4,
+            8,
+            16,
+            32,
+            64
+          ],
+          "type": "integer"
+        },
+        {
+          "enum": [
+            "none",
+            "curated",
+            "mapOfTheWeek",
+            "noodleMonday",
+            "featuredOnCC",
+            "beastSaberAwarded",
+            "buildingBlocksAwarded"
+          ],
+          "type": "string"
+        }
+      ],
+      "description": "Bitmask enum. Values can be combined using bitwise OR operator.",
+      "default": 0,
+      "example": 126
+    }
+  },
+  {
+    "name": "leaderboardContext",
+    "in": "query",
+    "description": "Context of the leaderboard, default is General",
+    "schema": {
+      "enum": [
+        "none",
+        "general",
+        "noMods",
+        "noPause",
+        "golf",
+        "sCPM",
+        "speedrun",
+        "speedrunBackup",
+        "funny",
+        "backUp",
+        "leftLeader",
+        "dNC",
+        "sS",
+        "fS",
+        "sF",
+        "bFS",
+        "bSF"
+      ],
+      "type": "string",
+      "allOf": [
+        {
+          "$ref": "#/components/schemas/LeaderboardContexts"
+        }
+      ],
+      "oneOf": [
+        {
+          "enum": [
+            0,
+            2,
+            4,
+            8,
+            16,
+            32,
+            64,
+            128,
+            256,
+            512,
+            1024,
+            2048,
+            4096,
+            8192,
+            16384,
+            32768,
+            65536
+          ],
+          "type": "integer"
+        },
+        {
+          "enum": [
+            "none",
+            "general",
+            "noMods",
+            "noPause",
+            "golf",
+            "sCPM",
+            "speedrun",
+            "speedrunBackup",
+            "funny",
+            "backUp",
+            "leftLeader",
+            "dNC",
+            "sS",
+            "fS",
+            "sF",
+            "bFS",
+            "bSF"
+          ],
+          "type": "string"
+        }
+      ],
+      "description": "Bitmask enum. Values can be combined using bitwise OR operator.",
+      "default": 2,
+      "example": 131070
+    }
+  },
+  {
+    "name": "mapCreator",
+    "in": "query",
+    "description": "Map creator, human by default",
+    "schema": {
+      "enum": [
+        "human",
+        "genericBot",
+        "beatSage",
+        "topMapper"
+      ],
+      "type": "string",
+      "allOf": [
+        {
+          "$ref": "#/components/schemas/SongCreator"
+        }
+      ],
+      "oneOf": [
+        {
+          "enum": [
+            0,
+            1,
+            2,
+            3
+          ],
+          "type": "integer"
+        },
+        {
+          "enum": [
+            "human",
+            "genericBot",
+            "beatSage",
+            "topMapper"
+          ],
+          "type": "string"
+        }
+      ],
+      "default": 0
+    }
+  },
+  {
+    "name": "mytype",
+    "in": "query",
+    "description": "My type to filter leaderboards by, default is None",
+    "schema": {
+      "enum": [
+        "none",
+        "played",
+        "unplayed",
+        "myNominated",
+        "othersNominated",
+        "myMaps"
+      ],
+      "type": "string",
+      "allOf": [
+        {
+          "$ref": "#/components/schemas/MyType"
+        }
+      ],
+      "oneOf": [
+        {
+          "enum": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5
+          ],
+          "type": "integer"
+        },
+        {
+          "enum": [
+            "none",
+            "played",
+            "unplayed",
+            "myNominated",
+            "othersNominated",
+            "myMaps"
+          ],
+          "type": "string"
+        }
+      ],
+      "default": 0
+    }
+  },
+  {
+    "name": "stars_from",
+    "in": "query",
+    "description": "Minimum stars to filter leaderboards by",
+    "schema": {
+      "type": "number",
+      "format": "float"
+    }
+  },
+  {
+    "name": "stars_to",
+    "in": "query",
+    "description": "Maximum stars to filter leaderboards by",
+    "schema": {
+      "type": "number",
+      "format": "float"
+    }
+  },
+  {
+    "name": "accrating_from",
+    "in": "query",
+    "description": "Minimum accuracy rating to filter leaderboards by",
+    "schema": {
+      "type": "number",
+      "format": "float"
+    }
+  },
+  {
+    "name": "accrating_to",
+    "in": "query",
+    "description": "Maximum accuracy rating to filter leaderboards by",
+    "schema": {
+      "type": "number",
+      "format": "float"
+    }
+  },
+  {
+    "name": "passrating_from",
+    "in": "query",
+    "description": "Minimum pass rating to filter leaderboards by",
+    "schema": {
+      "type": "number",
+      "format": "float"
+    }
+  },
+  {
+    "name": "passrating_to",
+    "in": "query",
+    "description": "Maximum pass rating to filter leaderboards by",
+    "schema": {
+      "type": "number",
+      "format": "float"
+    }
+  },
+  {
+    "name": "techrating_from",
+    "in": "query",
+    "description": "Minimum tech rating to filter leaderboards by",
+    "schema": {
+      "type": "number",
+      "format": "float"
+    }
+  },
+  {
+    "name": "techrating_to",
+    "in": "query",
+    "description": "Maximum tech rating to filter leaderboards by",
+    "schema": {
+      "type": "number",
+      "format": "float"
+    }
+  },
+  {
+    "name": "date_from",
+    "in": "query",
+    "description": "Start date to filter leaderboards by (timestamp)",
+    "schema": {
+      "type": "integer",
+      "format": "int32"
+    }
+  },
+  {
+    "name": "date_to",
+    "in": "query",
+    "description": "End date to filter leaderboards by (timestamp)",
+    "schema": {
+      "type": "integer",
+      "format": "int32"
+    }
+  },
+  {
+    "name": "date_range",
+    "in": "query",
+    "description": "Type of the date filter, default by map upload date",
+    "schema": {
+      "enum": [
+        "upload",
+        "ranked",
+        "score"
+      ],
+      "type": "string",
+      "allOf": [
+        {
+          "$ref": "#/components/schemas/DateRangeType"
+        }
+      ],
+      "oneOf": [
+        {
+          "enum": [
+            0,
+            1,
+            2
+          ],
+          "type": "integer"
+        },
+        {
+          "enum": [
+            "upload",
+            "ranked",
+            "score"
+          ],
+          "type": "string"
+        }
+      ],
+      "default": 0
+    }
+  },
+  {
+    "name": "types",
+    "in": "query",
+    "description": "Types of leaderboards to filter, default is null(All). Same as type but multiple",
+    "schema": {
+      "type": "string"
+    }
+  },
+  {
+    "name": "playlistIds",
+    "in": "query",
+    "description": "Playlits Ids to filter, default is null",
+    "schema": {
+      "type": "string"
+    }
+  },
+  {
+    "name": "mappers",
+    "in": "query",
+    "description": "Filter maps from a specific mappers. BeatSaver profile ID list, comma separated, default is null",
+    "schema": {
+      "type": "string"
+    }
+  },
+  {
+    "name": "overrideCurrentId",
+    "in": "query",
+    "schema": {
+      "type": "string"
+    }
+  },
+  {
+    "name": "uploadTreshold",
+    "in": "query",
+    "schema": {
+      "type": "integer",
+      "format": "int32"
+    }
+  }
+]

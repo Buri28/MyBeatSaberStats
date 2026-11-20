@@ -20,6 +20,7 @@ from ..scoresaber import ScoreSaberPlayer
 from .scoresaber import _collect_star_stats_from_scoresaber
 from .scoresaber import collect_scoresaber_star_stats_from_cache as _ss_star_stats_from_cache
 from .scoresaber import refresh_scoresaber_ranked_scores as _ss_refresh_ranked_scores
+from .scoresaber import refresh_scores_of_newly_ranked_maps as _ss_refresh_newly_ranked_scores
 from .scoresaber import _get_scoresaber_player_scores
 from .scoresaber import _get_scoresaber_leaderboards_ranked
 from .scoresaber import _get_scoresaber_player_stats
@@ -32,9 +33,11 @@ from .beatleader import (
     collect_beatleader_star_stats_from_cache as _bl_collect_beatleader_star_stats_from_cache,
     _load_cached_player_score_failed_pages as _bl_load_cached_player_score_failed_pages,
     refresh_beatleader_ranked_scores as _bl_refresh_ranked_scores,
+    refresh_scores_of_newly_ranked_maps as _bl_refresh_newly_ranked_scores,
 )
 from ..beatleader import BeatLeaderPlayer, fetch_player as fetch_bl_player
 from .map_store import MapStore
+from ..ss_reweights import apply_scoresaber_reweights
 
 from ..accsaber_reloaded import fetch_player_all_categories as _fetch_accsaber_reloaded
 from ..accsaber_reloaded import fetch_player_xp as _fetch_accsaber_reloaded_xp
@@ -47,7 +50,8 @@ from ..accsaber_reloaded import get_reloaded_map_counts_from_cache as _get_rl_ma
 from ..accsaber_reloaded import fetch_and_save_all_maps_cache as _fetch_and_save_rl_maps
 from ..accsaber_reloaded import fetch_and_save_player_scores_cache as _fetch_and_save_rl_player_scores
 from ..accsaber_reloaded import compute_effective_played_counts_from_cache as _compute_rl_effective_played_counts
-from ..http_client import make_session, request_scope
+from ..accsaber_reloaded import user_not_registered as _rl_user_not_registered
+from ..http_client import forget_memoized, get_memoized, make_session, request_scope
 from ..fileio import atomic_write_text
 
 # キャッシュディレクトリ(app.py と同じ BASE_DIR / "cache" を利用)
@@ -182,7 +186,7 @@ def _set_service_reconcile_state(service: str, steam_id: str, **updates: Optiona
     _save_score_reconcile_state(state)
 
 
-def _pp_reconcile_skip_reason(service_state: dict, api_pp: float) -> Optional[str]:
+def _pp_reconcile_skip_reason(service_state: dict, api_pp: float, drift: Optional[float] = None) -> Optional[str]:
     """全件取り直しをしない理由を返す（取り直してよいなら None）。
 
     - この API の pp で既に最後まで取り直し、それでもずれが残った → pp が変わるまで（新しいスコアなど）しない。
@@ -198,7 +202,16 @@ def _pp_reconcile_skip_reason(service_state: dict, api_pp: float) -> Optional[st
         # 最後まで取り直してもずれが残った（仕組み上合わないプレイヤー）。
         # ランク譜面をプレイするたびに pp は変わるので、pp の一致だけでは毎回全件取得になる。日数でも間隔を空ける。
         full_scan_at = _parse_utc_z(service_state.get("full_scan_at"))
-        if full_scan_at is not None and datetime.utcnow() - full_scan_at < timedelta(days=_PP_RECONCILE_MISMATCH_DAYS):
+        # 前回残ったずれより、さらに閾値以上ずれが広がったときは、新しく何か変わったので 7 日待たずに取り直す。
+        try:
+            tried_drift = float(service_state.get("pp_mismatch_drift"))
+        except (TypeError, ValueError):
+            tried_drift = None
+        grown = drift is not None and tried_drift is not None and drift - tried_drift >= _PP_RECONCILE_THRESHOLD
+        if (
+            not grown and full_scan_at is not None
+            and datetime.utcnow() - full_scan_at < timedelta(days=_PP_RECONCILE_MISMATCH_DAYS)
+        ):
             return (
                 f"前回全件取得してもずれが残ったため {_PP_RECONCILE_MISMATCH_DAYS} 日待ち"
                 f"（前回 {full_scan_at.strftime('%Y-%m-%d %H:%M')} UTC）"
@@ -212,7 +225,9 @@ def _pp_reconcile_skip_reason(service_state: dict, api_pp: float) -> Optional[st
 
 def _clear_pp_mismatch(service: str, steam_id: str, service_state: dict) -> None:
     if "pp_mismatch_api_pp" in service_state or "pp_reconcile_failed_at" in service_state:
-        _set_service_reconcile_state(service, steam_id, pp_mismatch_api_pp=None, pp_reconcile_failed_at=None)
+        _set_service_reconcile_state(
+            service, steam_id, pp_mismatch_api_pp=None, pp_mismatch_drift=None, pp_reconcile_failed_at=None,
+        )
 
 
 def _record_pp_reconcile_result(
@@ -236,6 +251,7 @@ def _record_pp_reconcile_result(
         full_scan_at=now,
         pp_reconcile_failed_at=None,
         pp_mismatch_api_pp=repr(api_pp) if drift >= _PP_RECONCILE_THRESHOLD else None,
+        pp_mismatch_drift=repr(drift) if drift >= _PP_RECONCILE_THRESHOLD else None,
     )
 
 
@@ -576,7 +592,8 @@ def _get_beatleader_player_stats(player_id: str, session: requests.Session) -> d
 
     url = f"{BL_BASE_URL}/player/{player_id}"
     try:
-        resp = session.get(url, timeout=10)
+        # 基本情報（fetch_player）と同じ URL。同じ Snapshot の中では 1 回の取得を使い回す
+        resp = get_memoized(session, url, timeout=10)
         print(f"Fetching BeatLeader player stats... URL: {resp.url}")
         if resp.status_code == 404:
             return {}
@@ -849,6 +866,11 @@ def create_snapshot_for_steam_id(
             # キャンセル・失敗したら、裏で動いている取得も止める
             _BackgroundFetch.cancel_all()
             raise
+        finally:
+            # get_memoized は期限なしで応答を覚える。呼び出し元のセッションを次の Snapshot でも
+            # 使い回された場合に古いプレイヤー情報を返さないよう、ここで消す。
+            # （session=None のときは中で作った使い捨てのセッションなので、一緒に消える）
+            forget_memoized(session)
 
 
 def _create_snapshot_for_steam_id(
@@ -965,6 +987,12 @@ def _create_snapshot_for_steam_id(
                     print("ScoreSaber Ranked Maps: 初回取得のため全件取得")
             fetch_label = ss_ranked_until.strftime('%Y-%m-%d %H:%M') if ss_ranked_until else "full"
             _step(0.02, f"Updating ScoreSaber Ranked Maps (last fetch: {fetch_label})...")
+            try:
+                # 差分取得の窓より古い譜面の★のリウェイトを、wiki の月例リウェイトのページで拾う（1 日 1 回まで。失敗しても続ける）
+                apply_scoresaber_reweights(session, CACHE_DIR)
+            except Exception as exc:  # noqa: BLE001
+                _rethrow_if_cancelled(exc)
+                print(f"SS reweight: 処理に失敗しました（{exc}）")
             ss_ranked_leaderboards = _get_scoresaber_leaderboards_ranked(session, progress=_ss_leaderboard_progress, fetch_until=ss_ranked_until)
             map_store = MapStore()
             map_store.ss_ranked_maps = ss_ranked_leaderboards
@@ -1137,6 +1165,12 @@ def _create_snapshot_for_steam_id(
 
                 def _ss_scores_task(task: _BackgroundFetch, _sid=scoresaber_id, _until=_ss_effective_until) -> None:
                     _get_scoresaber_player_scores(_sid, task.session, progress=task.on_page, fetch_until=_until)
+                    # 新しくランクになった譜面に自分の古いプレイがあれば、その pp も取り直す（差分取得では拾えない）
+                    try:
+                        _ss_refresh_newly_ranked_scores(_sid, task.session, progress=task.on_page)
+                    except Exception as exc2:  # noqa: BLE001
+                        _rethrow_if_cancelled(exc2)
+                        print(f"ScoreSaber 新ランク譜面のスコア取り直しに失敗（続行）: {exc2}")
 
                 ss_scores_bg = _BackgroundFetch(_ss_scores_task)
             except Exception as exc:  # noqa: BLE001
@@ -1253,6 +1287,12 @@ def _create_snapshot_for_steam_id(
                     fetch_until=_bl_effective_until,
                     warning_callback=_add_warning,
                 )
+                # 新しくランクになった譜面に自分の古いプレイがあれば、その pp も取り直す（差分取得では拾えない）
+                try:
+                    _bl_refresh_newly_ranked_scores(beatleader_id, session, progress=_bl_scores_progress)
+                except Exception as exc2:  # noqa: BLE001
+                    _rethrow_if_cancelled(exc2)
+                    print(f"BeatLeader 新ランク譜面のスコア取り直しに失敗（続行）: {exc2}")
                 if options.bl_fetch_all:
                     _set_service_reconcile_state("beatleader", steam_id, full_scan_at=_dt_to_utc_z(datetime.utcnow()))
             except Exception as exc:  # noqa: BLE001
@@ -1372,16 +1412,42 @@ def _create_snapshot_for_steam_id(
     # AccSaber Reloaded の userId は Steam ID（BeatLeader ID と同じ）なので beatleader_id を優先する。
     # ScoreSaber が非 Steam 形式の ID（例: 3117609721598571）の場合に scoresaber_id を渡すと
     # リーダーボードを全ページ走査してもマッチしないため、長時間固まる原因となる。
+    accsaber_fetch_status = "skipped" if not options.fetch_accsaber_reloaded else "missing_id"
+    accsaber_fetch_errors: list[str] = []
+
+    def _rl_warning(message: str) -> None:
+        # 同じ警告は 1 回だけ（カテゴリの例外は fetch 側の on_warning で出しているので重ねない）
+        if message in accsaber_fetch_errors:
+            return
+        accsaber_fetch_errors.append(message)
+        _add_warning(message)
+
     _rl_player_id = beatleader_id or scoresaber_id
     if options.fetch_accsaber_reloaded and _rl_player_id:
         print("9.4R AccSaber Reloaded プレイヤーステータス取得...")
         _step(0.62, "Fetching AccSaber Reloaded ranks...")
+        accsaber_fetch_status = "ok"
         _rl_country = (scoresaber_country or "").upper() or None
+        # API の失敗（例外）だったカテゴリ。None でもここに無ければ、そのカテゴリに登録していないだけ（警告しない）
+        _rl_failed_cats: set[str] = set()
+        _rl_call_failed = False
         try:
-            _rl_result = _fetch_accsaber_reloaded(_rl_player_id, country=_rl_country, session=session)
+            _rl_result = _fetch_accsaber_reloaded(_rl_player_id, country=_rl_country, session=session,
+                                               on_warning=_rl_warning, failed=_rl_failed_cats)
         except Exception as exc:  # noqa: BLE001
             _rethrow_if_cancelled(exc)
+            _rl_warning(f"AccSaber: {exc}")
             _rl_result = {}
+            _rl_call_failed = True
+
+        _rl_unregistered_cats = [
+            cat for cat in ("overall", "true", "standard", "tech")
+            if _rl_result.get(cat) is None and cat not in _rl_failed_cats and not _rl_call_failed
+        ]
+        if _rl_unregistered_cats:
+            print(f"AccSaber: 未登録のカテゴリ {', '.join(_rl_unregistered_cats)}（警告は出しません）")
+        # /users/{id} が 404＝AccSaber に登録していない。XP・マイルストーン等が無いのは失敗ではない
+        _rl_not_registered = _rl_user_not_registered(_rl_player_id, session)
 
         def _pick(cat: str, attr: str, conv):
             p = _rl_result.get(cat)
@@ -1421,6 +1487,7 @@ def _create_snapshot_for_steam_id(
             _rl_xp_result = _fetch_accsaber_reloaded_xp(_rl_player_id, country=_rl_country, session=session)
         except Exception as exc:  # noqa: BLE001
             _rethrow_if_cancelled(exc)
+            _rl_warning(f"AccSaber: {exc}")
             _rl_xp_result = None
         if _rl_xp_result is not None:
             accsaber_reloaded_xp            = _rl_xp_result.xp
@@ -1428,37 +1495,52 @@ def _create_snapshot_for_steam_id(
             accsaber_reloaded_xp_rank       = _rl_xp_result.rank_global
             accsaber_reloaded_xp_rank_country = _rl_xp_result.rank_country
 
+        if _rl_xp_result is None and not _rl_not_registered:
+            _rl_warning("AccSaber XP: 未取得。")
+
         # XP レベル称号（例: Legend）
         try:
             accsaber_reloaded_level_title = _fetch_accsaber_reloaded_level_title(_rl_player_id, session=session)
         except Exception as exc:  # noqa: BLE001
             _rethrow_if_cancelled(exc)
+            _rl_warning(f"AccSaber: {exc}")
 
         # マイルストーン達成状況
         try:
             _rl_milestones = _fetch_accsaber_reloaded_milestones(_rl_player_id, session=session)
         except Exception as exc:  # noqa: BLE001
             _rethrow_if_cancelled(exc)
+            _rl_warning(f"AccSaber: {exc}")
             _rl_milestones = None
         if _rl_milestones is not None:
             accsaber_reloaded_milestones_completed, accsaber_reloaded_milestones_total = _rl_milestones
+
+        if _rl_milestones is None and not _rl_not_registered:
+            _rl_warning("AccSaber Milestones: 未取得。")
 
         # スキルレベル
         try:
             _rl_skill = _fetch_accsaber_reloaded_skill(_rl_player_id, session=session)
         except Exception as exc:  # noqa: BLE001
             _rethrow_if_cancelled(exc)
+            _rl_warning(f"AccSaber: {exc}")
             _rl_skill = {}
         accsaber_reloaded_overall_skill_level  = _rl_skill.get("overall")
         accsaber_reloaded_true_skill_level     = _rl_skill.get("true")
         accsaber_reloaded_standard_skill_level = _rl_skill.get("standard")
         accsaber_reloaded_tech_skill_level     = _rl_skill.get("tech")
 
+        for cat in ("overall", "true", "standard", "tech"):
+            # 登録していないカテゴリのスキルレベルは無くて当然なので警告しない
+            if _rl_skill.get(cat) is None and cat not in _rl_unregistered_cats and not _rl_not_registered:
+                _rl_warning(f"AccSaber Skill Level {cat}: 未取得。")
+
         # キャンペーン称号バッジ（最上位）
         try:
             _rl_title = _fetch_accsaber_reloaded_title(_rl_player_id, session=session)
         except Exception as exc:  # noqa: BLE001
             _rethrow_if_cancelled(exc)
+            _rl_warning(f"AccSaber: {exc}")
             _rl_title = None
         if _rl_title is not None:
             accsaber_reloaded_title_name = _rl_title.name
@@ -1468,8 +1550,9 @@ def _create_snapshot_for_steam_id(
                 _download_accsaber_reloaded_title_icon(_rl_title.icon_url, session=session)
             except Exception as exc:  # noqa: BLE001
                 _rethrow_if_cancelled(exc)
+                _rl_warning(f"AccSaber: {exc}")
 
-        print("9.4R AccSaber Reloaded プレイヤーステータス取得完了。")
+        print("9.4R AccSaber プレイヤーステータス取得処理終了。")
 
         # AccSaber Reloaded 全マップデータをキャッシュに保存する
         try:
@@ -1477,6 +1560,7 @@ def _create_snapshot_for_steam_id(
             _fetch_and_save_rl_maps(session=session)
         except Exception as exc:  # noqa: BLE001
             _rethrow_if_cancelled(exc)
+            _rl_warning(f"AccSaber: {exc}")
 
         # 総譜面数はここで読み直す。
         # 新譜面は _fetch_and_save_rl_maps が batch 差分として取り込み、
@@ -1488,6 +1572,7 @@ def _create_snapshot_for_steam_id(
             _apply_rl_map_counts(_get_rl_map_counts_cached())
         except Exception as exc:  # noqa: BLE001
             _rethrow_if_cancelled(exc)
+            _rl_warning(f"AccSaber: {exc}")
 
         # AccSaber Reloaded プレイヤースコアをキャッシュに保存する
         try:
@@ -1495,6 +1580,7 @@ def _create_snapshot_for_steam_id(
             _fetch_and_save_rl_player_scores(_rl_player_id, session=session)
         except Exception as exc:  # noqa: BLE001
             _rethrow_if_cancelled(exc)
+            _rl_warning(f"AccSaber: {exc}")
 
         try:
             _rl_effective_play_counts = _compute_rl_effective_played_counts(_rl_player_id)
@@ -1505,7 +1591,15 @@ def _create_snapshot_for_steam_id(
                 accsaber_reloaded_tech_ranked_plays = _rl_effective_play_counts.get("tech")
         except Exception as exc:  # noqa: BLE001
             _rethrow_if_cancelled(exc)
+            _rl_warning(f"AccSaber: {exc}")
+        if accsaber_fetch_errors:
+            accsaber_fetch_status = "partial" if any(_rl_result.values()) else "failed"
+        elif len(_rl_unregistered_cats) == 4:
+            # どのカテゴリにも登録していない（API は成功）。失敗ではない
+            accsaber_fetch_status = "not_registered"
     else:
+        if options.fetch_accsaber_reloaded:
+            _rl_warning("AccSaber: プレイヤーIDがないため取得できません。")
         if not options.fetch_accsaber_reloaded:
             print("9.4R AccSaber Reloaded 取得スキップ（オプションが無効）")
         else:
@@ -1574,7 +1668,7 @@ def _create_snapshot_for_steam_id(
             "ScoreSaber PP check: "
             f"profile={float(scoresaber_pp):.3f} local={ss_local_pp_total:.3f} drift={ss_pp_drift:.3f}"
         )
-        ss_skip_reason = _pp_reconcile_skip_reason(ss_state, float(scoresaber_pp))
+        ss_skip_reason = _pp_reconcile_skip_reason(ss_state, float(scoresaber_pp), ss_pp_drift)
         if ss_pp_drift < _PP_RECONCILE_THRESHOLD:
             _clear_pp_mismatch("scoresaber", steam_id, ss_state)
         elif ss_skip_reason is not None:
@@ -1606,6 +1700,8 @@ def _create_snapshot_for_steam_id(
                     session,
                     progress=_ss_reconcile_progress,
                     status=ss_status,
+                    # 返らなかったスコアを外す前に、件数を照らし合わせる（この Snapshot で取った /full の値。API は増やさない）
+                    ranked_play_count=scoresaber_ranked_play_count,
                 )
                 _step(0.70, "Recollecting ScoreSaber star stats...")
                 ss_new_stats = _ss_star_stats_from_cache(scoresaber_id)
@@ -1632,7 +1728,7 @@ def _create_snapshot_for_steam_id(
             "BeatLeader PP check: "
             f"profile={float(beatleader_pp):.3f} local={bl_local_pp_total:.3f} drift={bl_pp_drift:.3f}"
         )
-        bl_skip_reason = _pp_reconcile_skip_reason(bl_state, float(beatleader_pp))
+        bl_skip_reason = _pp_reconcile_skip_reason(bl_state, float(beatleader_pp), bl_pp_drift)
         if bl_pp_drift < _PP_RECONCILE_THRESHOLD:
             _clear_pp_mismatch("beatleader", steam_id, bl_state)
         elif bl_skip_reason is not None:
@@ -1715,6 +1811,9 @@ def _create_snapshot_for_steam_id(
         beatleader_name=beatleader_name,
         beatleader_country=beatleader_country,
         beatleader_pp=beatleader_pp,
+        beatleader_pass_pp=beatleader.pass_pp if beatleader is not None else None,
+        beatleader_tech_pp=beatleader.tech_pp if beatleader is not None else None,
+        beatleader_acc_pp=beatleader.acc_pp if beatleader is not None else None,
         beatleader_rank_global=beatleader_rank_global,
         beatleader_rank_country=beatleader_rank_country,
         beatleader_level=beatleader_level,
@@ -1724,6 +1823,8 @@ def _create_snapshot_for_steam_id(
         beatleader_average_ranked_acc=beatleader_average_ranked_acc,
         beatleader_total_play_count=beatleader_total_play_count,
         beatleader_ranked_play_count=beatleader_ranked_play_count,
+        accsaber_fetch_status=accsaber_fetch_status,
+        accsaber_fetch_errors=accsaber_fetch_errors,
         # AccSaber (Reloaded) ランク
         accsaber_reloaded_overall_rank=accsaber_reloaded_overall_rank,
         accsaber_reloaded_overall_rank_country=accsaber_reloaded_overall_rank_country,

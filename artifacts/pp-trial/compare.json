@@ -1,0 +1,40 @@
+{
+  "ui_acc_position": "Left",
+  "ui_toggle_metric": true,
+  "ui_toggle_ss": true,
+  "ui_toggle_bl": true,
+  "ui_toggle_bl_below": true,
+  "ui_toggle_header": false,
+  "ui_row_height": 40,
+  "ui_v_splitter_top": 53,
+  "ui_splitter_sizes": [
+    390,
+    968
+  ],
+  "ui_right_vsplitter_sizes": [
+    615,
+    190
+  ],
+  "ui_star_hsplitter_ss": 264,
+  "ui_metric_vsplitter_sizes": [
+    200,
+    383
+  ],
+  "ui_window_width": 1367,
+  "ui_window_height": 650,
+  "ui_col_clear": true,
+  "ui_col_fc": true,
+  "ui_col_acc": true,
+  "ui_col_pp": true,
+  "ui_col_starpp": true,
+  "player_a": "76561198324870685",
+  "snapshot_a_taken_at": "2026-11-18T12:00:00Z",
+  "player_b": "76561198324870685",
+  "snapshot_b_taken_at": "2026-11-18T12:00:00Z",
+  "per_player": {
+    "76561198324870685": {
+      "snapshot_a_taken_at": "2026-11-18T12:00:00Z",
+      "snapshot_b_taken_at": "2026-11-18T12:00:00Z"
+    }
+  }
+}

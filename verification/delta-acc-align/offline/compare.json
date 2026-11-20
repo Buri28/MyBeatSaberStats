@@ -1,0 +1,82 @@
+{
+  "player_a": "76561198324870685",
+  "snapshot_a_taken_at": "2026-11-18T12:18:40Z",
+  "player_b": "76561198324870685",
+  "snapshot_b_taken_at": "2026-11-19T11:47:33Z",
+  "per_player": {
+    "76561198324870685": {
+      "snapshot_a_taken_at": "2026-11-18T12:18:40Z",
+      "snapshot_b_taken_at": "2026-11-19T11:47:33Z"
+    },
+    "76561198325198406": {
+      "snapshot_a_taken_at": "2026-03-20T10:18:44Z",
+      "snapshot_b_taken_at": "2026-03-20T10:18:44Z"
+    },
+    "76561199229246222": {
+      "snapshot_a_taken_at": "2026-05-02T09:10:15Z",
+      "snapshot_b_taken_at": "2026-05-02T09:10:15Z"
+    },
+    "76561198005985428": {
+      "snapshot_a_taken_at": "2026-03-20T10:22:23Z",
+      "snapshot_b_taken_at": "2026-03-27T16:53:41Z"
+    },
+    "3117609721598571": {
+      "snapshot_a_taken_at": "2026-01-17T09:05:56Z",
+      "snapshot_b_taken_at": "2026-03-29T07:05:24Z"
+    },
+    "76561198042884990": {
+      "snapshot_a_taken_at": "2026-03-22T02:01:26Z",
+      "snapshot_b_taken_at": "2026-03-28T07:12:19Z"
+    },
+    "76561198333579638": {
+      "snapshot_a_taken_at": "2026-03-22T14:21:53Z",
+      "snapshot_b_taken_at": "2026-03-22T14:56:50Z"
+    },
+    "76561198092977917": {
+      "snapshot_b_taken_at": "2026-03-30T10:42:43Z",
+      "snapshot_a_taken_at": "2026-03-27T20:40:45Z"
+    },
+    "76561199078892353": {
+      "snapshot_a_taken_at": "2026-03-22T01:39:30Z"
+    },
+    "76561199055025492": {
+      "snapshot_a_taken_at": "2026-05-02T09:12:40Z",
+      "snapshot_b_taken_at": "2026-05-02T09:12:40Z"
+    }
+  },
+  "ui_toggle_metric": true,
+  "ui_toggle_ss": true,
+  "ui_toggle_bl": true,
+  "ui_col_clear": true,
+  "ui_col_fc": true,
+  "ui_col_acc": true,
+  "ui_col_pp": true,
+  "ui_col_starpp": true,
+  "ui_acc_mode": "RL",
+  "ui_toggle_header": true,
+  "ui_toggle_top_controls": false,
+  "ui_v_splitter_top": 53,
+  "ui_split_tables": true,
+  "ui_toggle_bl_below": true,
+  "ui_row_height": 21,
+  "ui_splitter_sizes": [
+    440,
+    1091
+  ],
+  "ui_right_vsplitter_sizes": [
+    615,
+    190
+  ],
+  "ui_star_hsplitter_ss": 395,
+  "ui_window_width": 1540,
+  "ui_window_height": 887,
+  "ui_acc_rl_all": true,
+  "ui_acc_all": true,
+  "ui_metric_vsplitter_sizes": [
+    322,
+    498
+  ],
+  "ui_acc_position": "Left",
+  "ui_manual_row_height": false,
+  "ui_right_row_height": 21
+}

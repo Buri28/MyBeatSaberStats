@@ -6,7 +6,7 @@ from typing import List, Optional
 from datetime import datetime, timezone
 import json
 import re
-from PySide6.QtCore import Qt, QTimer, QSize
+from PySide6.QtCore import Qt, QTimer, QSize, QEvent
 from PySide6.QtGui import QColor, QIcon, QPalette
 from .numfmt import fmt, trunc, trunc_int
 from .theme import (
@@ -339,7 +339,8 @@ class SnapshotCompareDialog(QDialog):
         # Metric 列の幅の非表示から復帰用(ここで左端の Metric 列の幅を固定値で保持しておく)
         self._metric_preferred_width: int = 425
         # 全テーブル共通の行高（▲▼ボタンで変更）
-        self._row_height: int = 21
+        self._row_height: int = 21        # 左側（Metric / AccSaber 表）の基準行高
+        self._right_row_height: int = 21  # 右側（SS / BL ★統計・AccSaber 比較表）の基準行高
         self._ui_state_restored: bool = False
         # スプリッター位置の保存用（_rebalance_splitter と共用）
         self._saved_splitter_sizes: list[int] = [440, 1091]      # _splitter (Metric / right)
@@ -605,6 +606,7 @@ class SnapshotCompareDialog(QDialog):
         self._acc_metric_title_label = QLabel("", self._acc_metric_container)
         self._acc_metric_title_label.setStyleSheet("font-size: 11px; padding: 1px 2px;")
         self._acc_metric_title_label.setOpenExternalLinks(True)
+        self._acc_metric_title_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         _acc_metric_vbox.addWidget(self._acc_metric_title_label)
 
         self.table_acc = QTableWidget(0, 5, self._acc_metric_container)
@@ -681,11 +683,12 @@ class SnapshotCompareDialog(QDialog):
         ss_star_header.setStretchLastSection(False)
         for _c in range(17):
             ss_star_header.setSectionResizeMode(_c, QHeaderView.ResizeMode.Interactive)
-        ss_star_header.setSectionResizeMode(3,  QHeaderView.ResizeMode.ResizeToContents)
-        ss_star_header.setSectionResizeMode(6,  QHeaderView.ResizeMode.ResizeToContents)
-        ss_star_header.setSectionResizeMode(9,  QHeaderView.ResizeMode.ResizeToContents)
-        ss_star_header.setSectionResizeMode(13, QHeaderView.ResizeMode.ResizeToContents)
-        ss_star_header.setSectionResizeMode(16, QHeaderView.ResizeMode.ResizeToContents)
+        # Δ列は SS/BL の内容幅の大きい方に合わせる（_sync_star_table_columns）。上下に並べたとき縦線がそろうようにする
+        ss_star_header.setSectionResizeMode(3,  QHeaderView.ResizeMode.Fixed)
+        ss_star_header.setSectionResizeMode(6,  QHeaderView.ResizeMode.Fixed)
+        ss_star_header.setSectionResizeMode(9,  QHeaderView.ResizeMode.Fixed)
+        ss_star_header.setSectionResizeMode(13, QHeaderView.ResizeMode.Fixed)
+        ss_star_header.setSectionResizeMode(16, QHeaderView.ResizeMode.Fixed)
         ss_star_header.resizeSection(0, 35)
         ss_star_header.resizeSection(1, 90)
         ss_star_header.resizeSection(2, 90)
@@ -713,6 +716,7 @@ class SnapshotCompareDialog(QDialog):
         _bl_cmp_vbox.addWidget(self._bl_star_title_label)
         self._star_hsplitter.addWidget(self._bl_cmp_container)
 
+        self._bl_acc_show_lr = False
         self.bl_star_table = QTableWidget(0, 17, self._bl_cmp_container)
         self.bl_star_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.bl_star_table.setStyleSheet(table_stylesheet())
@@ -729,7 +733,7 @@ class SnapshotCompareDialog(QDialog):
             "ΔFC",
             "A AvgAcc",
             "B AvgAcc",
-            "ΔAcc(L / R)",
+            "ΔAcc🔄",
             "★",
             "A PP",
             "B PP",
@@ -739,14 +743,17 @@ class SnapshotCompareDialog(QDialog):
             "ΔSPP",
         ])
         bl_star_header = self.bl_star_table.horizontalHeader()
+        bl_star_header.setSectionsClickable(True)
+        bl_star_header.sectionClicked.connect(self._toggle_bl_acc_details)
         bl_star_header.setStretchLastSection(False)
         for _c in range(17):
             bl_star_header.setSectionResizeMode(_c, QHeaderView.ResizeMode.Interactive)
-        bl_star_header.setSectionResizeMode(3,  QHeaderView.ResizeMode.ResizeToContents)
-        bl_star_header.setSectionResizeMode(6,  QHeaderView.ResizeMode.ResizeToContents)
-        bl_star_header.setSectionResizeMode(9,  QHeaderView.ResizeMode.ResizeToContents)
-        bl_star_header.setSectionResizeMode(13, QHeaderView.ResizeMode.ResizeToContents)
-        bl_star_header.setSectionResizeMode(16, QHeaderView.ResizeMode.ResizeToContents)
+        # Δ列は SS/BL の内容幅の大きい方に合わせる（_sync_star_table_columns）。上下に並べたとき縦線がそろうようにする
+        bl_star_header.setSectionResizeMode(3,  QHeaderView.ResizeMode.Fixed)
+        bl_star_header.setSectionResizeMode(6,  QHeaderView.ResizeMode.Fixed)
+        bl_star_header.setSectionResizeMode(9,  QHeaderView.ResizeMode.Fixed)
+        bl_star_header.setSectionResizeMode(13, QHeaderView.ResizeMode.Fixed)
+        bl_star_header.setSectionResizeMode(16, QHeaderView.ResizeMode.Fixed)
         bl_star_header.resizeSection(0, 35)
         bl_star_header.resizeSection(1, 90)
         bl_star_header.resizeSection(2, 90)
@@ -761,6 +768,11 @@ class SnapshotCompareDialog(QDialog):
         bl_star_header.resizeSection(15, 50)
         _bl_cmp_vbox.addWidget(self.bl_star_table)
         self.bl_star_table.verticalHeader().setVisible(False)
+        self._syncing_star_cols = False
+        ss_star_header.sectionResized.connect(
+            lambda c, _o, w: self._on_star_section_resized(self.bl_star_table, c, w))
+        bl_star_header.sectionResized.connect(
+            lambda c, _o, w: self._on_star_section_resized(self.ss_star_table, c, w))
 
         # 右下: AccSaber 比較グリッド（A/B を列で並べる 1 テーブル形式）
         self._acc_cmp_container = QWidget()
@@ -909,12 +921,71 @@ class SnapshotCompareDialog(QDialog):
         self._star_hsplitter.splitterMoved.connect(lambda *_: self._save_last_selection())
         self._metric_vsplitter.splitterMoved.connect(lambda *_: self._save_last_selection())
 
+        self._fit_timer = QTimer(self)
+        self._fit_timer.setSingleShot(True)
+        self._fit_timer.timeout.connect(self._fit_comparison_tables)
+        for widget in (self._metric_vsplitter, self.table.viewport(), self.table_acc.viewport(),
+                       self.table.parentWidget(), self._acc_metric_container):
+            widget.installEventFilter(self)
         self._apply_row_height()
         self._update_view2()
         if not self._ui_state_restored:
             QTimer.singleShot(0, self._apply_default_layout_initial_geometry)
 
     # -------------------- internal helpers --------------------
+
+    def _toggle_bl_acc_details(self, column: int) -> None:
+        if column != 9:
+            return
+        self._bl_acc_show_lr = not self._bl_acc_show_lr
+        header = self.bl_star_table.horizontalHeaderItem(9)
+        header.setText("ΔAcc(L / R)🔄" if self._bl_acc_show_lr else "ΔAcc🔄")
+        header.setToolTip("クリックして通常表示に戻す" if self._bl_acc_show_lr else
+                          "クリックして左右精度の差分(L/R)を表示")
+        for row in range(self.bl_star_table.rowCount()):
+            item = self.bl_star_table.item(row, 9)
+            pair = item.data(Qt.ItemDataRole.UserRole) if item else None
+            if pair is not None:
+                item.setText(pair[1 if self._bl_acc_show_lr else 0])
+        self._sync_star_table_columns()
+
+    _STAR_DELTA_COLS = (3, 6, 9, 13, 16)
+
+    def _sync_star_table_columns(self) -> None:
+        """★表の Δ列を内容幅（見出し含む）に合わせる。SS と BL を上下に並べているときは
+        両表の大きい方にそろえる。BL の ΔAcc は見出しに 🔄 が付くため、SS の ΔAcc も同じ幅にして
+        列の縦線をそろえる。左右に並べているときや片方を隠しているときは表ごとの幅にする。"""
+        tables = (self.ss_star_table, self.bl_star_table)
+        stacked = self._star_tables_stacked()
+        self._syncing_star_cols = True
+        try:
+            for col in self._STAR_DELTA_COLS:
+                widths = [max(t.sizeHintForColumn(col), t.horizontalHeader().sectionSizeHint(col))
+                          for t in tables]
+                if stacked:
+                    widths = [max(widths)] * len(tables)
+                for t, width in zip(tables, widths):
+                    if width > 0:
+                        t.horizontalHeader().resizeSection(col, width)
+        finally:
+            self._syncing_star_cols = False
+
+    def _star_tables_stacked(self) -> bool:
+        """SS と BL の★表を両方表示し、上下に並べているか。"""
+        return (self._bl_below and self.btn_toggle_ss.isChecked()
+                and self.btn_toggle_bl.isChecked())
+
+    def _on_star_section_resized(self, other: QTableWidget, col: int, width: int) -> None:
+        """上下に並べているとき、片方の★表で列幅をドラッグで変えたら、もう片方も同じ幅にする。"""
+        if (self._syncing_star_cols or col in self._STAR_DELTA_COLS or width <= 0
+                or not self._star_tables_stacked()):
+            return
+        if other.horizontalHeader().sectionSize(col) != width:
+            self._syncing_star_cols = True
+            try:
+                other.horizontalHeader().resizeSection(col, width)
+            finally:
+                self._syncing_star_cols = False
 
     def _load_snapshots(self) -> None:
         """snapshots ディレクトリから JSON を読み込んでコンボに並べる。"""
@@ -1156,6 +1227,14 @@ class SnapshotCompareDialog(QDialog):
         # 行高を復元して全テーブルに適用
         if "ui_row_height" in data:
             self._row_height = max(8, min(40, int(data["ui_row_height"])))
+        # 手動で 21 にした場合も手動のまま戻す（21 は自動フィットの上限と同じ値だが、保存した印を優先する）。
+        # 印の無い古い設定は、既定の 21 以外なら手動とみなす。
+        self._manual_row_height = bool(data.get("ui_manual_row_height", self._row_height != 21))
+        if "ui_right_row_height" in data:
+            self._right_row_height = max(8, min(40, int(data["ui_right_row_height"])))
+        elif "ui_row_height" in data:
+            # 旧形式（左右共通の1値）: 右も同じ値から始める
+            self._right_row_height = self._row_height
         self._apply_row_height()
         # ウィンドウサイズを復元（スプリッターサイズに先立って適用する）
         if "ui_window_width" in data and "ui_window_height" in data:
@@ -1208,6 +1287,8 @@ class SnapshotCompareDialog(QDialog):
             data["ui_toggle_bl_below"] = self._bl_below
             data["ui_toggle_header"]       = self.btn_toggle_header.isChecked()
             data["ui_row_height"]          = self._row_height
+            data["ui_manual_row_height"]   = getattr(self, "_manual_row_height", False)
+            data["ui_right_row_height"]    = self._right_row_height
             data["ui_v_splitter_top"]      = self._v_splitter.sizes()[0]
             # メインスプリッター・右縦スプリッター・SS/BL横スプリッターの位置を保存
             _sp = self._splitter.sizes()
@@ -1346,28 +1427,100 @@ class SnapshotCompareDialog(QDialog):
             self._update_view2()
             self._save_last_selection()
 
+    _DEFAULT_ROW_HEIGHT = 21  # 既定値に戻したら手動扱いをやめ、自動フィットへ戻す
+
     def _apply_row_height(self) -> None:
-        """全テーブルの行高を self._row_height に統一して適用する。"""
-        h = self._row_height
+        """基準行高を適用し、左側の指標表だけ表示領域に合わせる。"""
         for tbl in (self.table, self.table_acc, self.ss_star_table, self.bl_star_table, self.acc_cmp_table):
+            h = self._row_height if tbl in (self.table, self.table_acc) else self._right_row_height
             tbl.verticalHeader().setMinimumSectionSize(0)
             tbl.verticalHeader().setDefaultSectionSize(h)
             tbl.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
+        self._fit_comparison_tables()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._schedule_comparison_fit()
+
+    def eventFilter(self, obj, event) -> bool:
+        if event.type() in (QEvent.Type.Resize, QEvent.Type.Show, QEvent.Type.Hide,
+                            QEvent.Type.LayoutRequest):
+            self._schedule_comparison_fit()
+        return super().eventFilter(obj, event)
+
+    def _schedule_comparison_fit(self) -> None:
+        # Coalesce geometry changes and measure after Qt has updated the layouts.
+        timer = getattr(self, "_fit_timer", None)
+        if timer is not None and not timer.isActive():
+            timer.start(0)
+
+    def _fit_comparison_tables(self) -> None:
+        # Fit the existing metrics and PP rows together at normal window sizes.
+        # At small sizes retain readable text and let each table scroll.
+        if not self.table.rowCount() or not self._metric_cmp_container.isVisible():
+            return
+        tables = [self.table]
+        if self._acc_metric_container.isVisible():
+            tables.append(self.table_acc)
+        space = (self._metric_vsplitter.contentsRect().height() -
+                 self._metric_vsplitter.handleWidth() * (len(tables) - 1))
+
+        def overhead(t, with_hscroll=True):
+            # Use layout requirements, never the previous parent/table geometry:
+            # that difference can still contain surplus height from a larger window.
+            layout = t.parentWidget().layout()
+            margins = layout.contentsMargins()
+            items = [layout.itemAt(i) for i in range(layout.count())
+                     if not layout.itemAt(i).isEmpty()]
+            chrome = margins.top() + margins.bottom() + max(0, len(items) - 1) * layout.spacing()
+            chrome += sum(item.sizeHint().height() for item in items if item.widget() is not t)
+            return (chrome + t.horizontalHeader().height() + t.frameWidth() * 2 +
+                    (t.horizontalScrollBar().height()
+                     if with_hscroll and t.horizontalScrollBar().isVisible() else 0))
+
+        overheads = [overhead(t) for t in tables]
+        rows = sum(t.rowCount() for t in tables)
+        readable = max(18, self.fontMetrics().height() + 2)
+        # ▲▼で「元の高さ」に戻る判定に使う自動フィット高。手動中は行が大きくなって
+        # 横スクロールバーが出るため、スクロールバー分を除いて毎回測り直す（ぶれない）。
+        stable = sum(overhead(t, False) for t in tables)
+        self._auto_row_height = max(
+            readable, min(self._DEFAULT_ROW_HEIGHT, (space - stable) // max(1, rows)))
+        h = (self._row_height if getattr(self, "_manual_row_height", False) else
+             max(readable, min(self._row_height, (space - sum(overheads)) // max(1, rows))))
+        for t in (self.table, self.table_acc):
+            t.verticalHeader().setDefaultSectionSize(h)
+        heights = [t.rowCount() * h + extra for t, extra in zip(tables, overheads)]
+        self._metric_vsplitter.setSizes(heights)
+
+    def _step_row_height(self, delta: int) -> None:
+        """左右それぞれの実際の行高を基準に ±1 する（左右は互いに連動しない）。
+        左は自動フィットの高さに戻ったら手動扱いをやめる。右は単独の値（既定 21）。"""
+        rcur = self.ss_star_table.verticalHeader().defaultSectionSize()
+        self._right_row_height = max(8, min(40, rcur + delta))
+        cur = self.table.verticalHeader().defaultSectionSize()
+        new = max(8, min(40, cur + delta))
+        auto_h = getattr(self, "_auto_row_height", None)
+        if auto_h is not None and new == auto_h:
+            self._manual_row_height = False
+            self._row_height = self._DEFAULT_ROW_HEIGHT
+        else:
+            self._manual_row_height = True
+            self._row_height = new
+        self._apply_row_height()
+        self._save_last_selection()
 
     def _on_row_height_up(self) -> None:
         """行の高さを 1 大きくする。"""
-        self._row_height = min(self._row_height + 1, 40)
-        self._apply_row_height()
-        self._save_last_selection()
+        self._step_row_height(1)
 
     def _on_row_height_dn(self) -> None:
         """行の高さを 1 小さくする。"""
-        self._row_height = max(self._row_height - 1, 8)
-        self._apply_row_height()
-        self._save_last_selection()
+        self._step_row_height(-1)
 
     def _on_default_layout(self) -> None:
         """ボタン状態をリセットしてからレイアウトをデフォルト値に戻す。"""
+        self._manual_row_height = False
         # --- ボタン状態リセット（シグナルを一時ブロックして副作用を防ぐ） ---
         for btn in (self.btn_toggle_metric, self.btn_toggle_ss, self.btn_toggle_bl):
             btn.blockSignals(True)
@@ -1397,6 +1550,7 @@ class SnapshotCompareDialog(QDialog):
 
         # --- サイズ・行高リセット ---
         self._row_height = 21
+        self._right_row_height = 21
         self._saved_splitter_sizes = [440, 1091]
         self._saved_right_vsplitter_sizes = [615, 190]
         self._saved_star_hsplitter_ss = 395
@@ -1431,6 +1585,7 @@ class SnapshotCompareDialog(QDialog):
         self._star_hsplitter.setOrientation(
             Qt.Orientation.Vertical if self._bl_below else Qt.Orientation.Horizontal
         )
+        self._sync_star_table_columns()
         self._save_last_selection()
 
     def _on_toggle_metric(self, checked: bool) -> None:
@@ -1453,12 +1608,14 @@ class SnapshotCompareDialog(QDialog):
         """ScoreSaber ★別テーブルの表示/非表示を切り替える。"""
         self._ss_cmp_container.setVisible(checked)
         self._rebalance_splitter()
+        self._sync_star_table_columns()
         self._save_last_selection()
 
     def _on_toggle_bl(self, checked: bool) -> None:
         """BeatLeader ★別テーブルの表示/非表示を切り替える。"""
         self._bl_cmp_container.setVisible(checked)
         self._rebalance_splitter()
+        self._sync_star_table_columns()
         self._save_last_selection()
 
     def _on_toggle_header(self, checked: bool) -> None:
@@ -1520,6 +1677,7 @@ class SnapshotCompareDialog(QDialog):
                 table.setColumnHidden(col, not pp_vis)
             for col in (14, 15, 16):  # A SPP / B SPP / ΔSPP
                 table.setColumnHidden(col, not starpp_vis)
+        self._sync_star_table_columns()
 
     def _rebalance_splitter(self) -> None:
         """SS/BL/Metric テーブルの表示状態に応じてスプリッタサイズを再調整する。"""
@@ -1588,6 +1746,7 @@ class SnapshotCompareDialog(QDialog):
                 self._right_vsplitter.setSizes([new_top, rv_total - new_top])
             else:
                 self._right_vsplitter.setSizes([rv_total, 0])
+        QTimer.singleShot(0, self._fit_comparison_tables)
 
     def _current_snapshot(self, combo: QComboBox) -> Optional[Snapshot]:
         # A/B それぞれに対応するプレイヤーコンボから現在のプレイヤーを取得
@@ -1830,7 +1989,7 @@ class SnapshotCompareDialog(QDialog):
             "ΔFC",
             "A AvgAcc",
             "B AvgAcc",
-            "ΔAcc(L / R)",
+            "ΔAcc(L / R)🔄" if self._bl_acc_show_lr else "ΔAcc🔄",
             "★",
             "A PP",
             "B PP",
@@ -1949,13 +2108,22 @@ class SnapshotCompareDialog(QDialog):
         _bl_ranked_total_a = sum(getattr(s, "map_count", 0) for s in (snap_a.beatleader_star_stats or []))
         _bl_ranked_total_b = sum(getattr(s, "map_count", 0) for s in (snap_b.beatleader_star_stats or []))
 
-        def _ranked_play_val(plays: "Optional[int]", total: int) -> "tuple[Optional[int], str] | None":
-            """(numeric, 'plays/total') タプルを返す。plays が None なら None。"""
+        def _ranked_play_val(plays, total):
             if plays is None:
                 return None
-            if total > 0:
-                return (plays, f"{plays:,}/{total:,}")
-            return (plays, f"{plays:,}")
+            return (plays, f"{plays:,}/{total:,}" if total > 0 else f"{plays:,}")
+
+        def _set_ratio_bars(row, values, totals):
+            # Reuse the existing per-cell gradient delegate; keep Diff untouched.
+            for col, value, total in zip((2, 3), values, totals):
+                item = self.table.item(row, col)
+                if value is None:
+                    item.setText("—")
+                elif total > 0:
+                    item.setData(Qt.ItemDataRole.UserRole, max(0.0, min(1.0, value / total)))
+                    item.setData(Qt.ItemDataRole.UserRole + 1, True)
+            if any(value is None for value in values):
+                self.table.item(row, 4).setText("—")
 
         # ScoreSaber
         _ss_grp_start = row_main
@@ -1998,6 +2166,8 @@ class SnapshotCompareDialog(QDialog):
             _ranked_play_val(snap_a.scoresaber_ranked_play_count, _ss_ranked_total_a),
             _ranked_play_val(snap_b.scoresaber_ranked_play_count, _ss_ranked_total_b),
         )
+        _set_ratio_bars(row_main, (snap_a.scoresaber_ranked_play_count, snap_b.scoresaber_ranked_play_count),
+                        (_ss_ranked_total_a, _ss_ranked_total_b))
         row_main += 1
         # ScoreSaber グループ: 先頭行に SS アイコンをスパン
         _grp_ss = QTableWidgetItem("")
@@ -2066,7 +2236,22 @@ class SnapshotCompareDialog(QDialog):
             _ranked_play_val(snap_a.beatleader_ranked_play_count, _bl_ranked_total_a),
             _ranked_play_val(snap_b.beatleader_ranked_play_count, _bl_ranked_total_b),
         )
+        _set_ratio_bars(row_main, (snap_a.beatleader_ranked_play_count, snap_b.beatleader_ranked_play_count),
+                        (_bl_ranked_total_a, _bl_ranked_total_b))
         row_main += 1
+        from .player_pp import PP_FIELDS, pp_limits_by_field
+        limits = pp_limits_by_field(None)
+        for label, field in PP_FIELDS:
+            limit = limits[field]
+            av, bv = getattr(snap_a, field, None), getattr(snap_b, field, None)
+            self._set_row(self.table, row_main, "[BL] " + label,
+                          (trunc(av, 2), fmt(av, 2, comma=True)) if av is not None else None,
+                          (trunc(bv, 2), fmt(bv, 2, comma=True)) if bv is not None else None)
+            _set_ratio_bars(row_main, (av, bv), (limit, limit))
+            for col, value in ((2, av), (3, bv), (4, av if bv is not None else None)):
+                if value is None:
+                    self.table.item(row_main, col).setText("—")
+            row_main += 1
         # BeatLeader グループ: 先頭行に BL アイコンをスパン
         _grp_bl = QTableWidgetItem("")
         _grp_bl.setBackground(label_cell_color())
@@ -2478,6 +2663,16 @@ class SnapshotCompareDialog(QDialog):
             ("Tech",     snap_b.accsaber_reloaded_tech_ap,      snap_b.accsaber_reloaded_tech_rank,       snap_b.accsaber_reloaded_tech_rank_country,      (snap_b.scoresaber_country or snap_b.beatleader_country), snap_b.accsaber_reloaded_tech_ranked_plays,     _rl_totals_b.get("tech"),     snap_b.accsaber_reloaded_tech_avg_acc,      snap_b.accsaber_reloaded_tech_skill_level,     "tech"),
         ]
         _fill_acc_cmp_table(self._icon_accsaber, _rl_rows_a, _rl_rows_b)
+        from .accsaber_status import status_text
+        status = "A: " + status_text(snap_a) + " ／ B: " + status_text(snap_b)
+        self._acc_metric_title_label.setText(self._acc_metric_title_label.text() + " ／ " + status)
+        self._acc_cmp_title_label.setText(self._acc_cmp_title_label.text() + " ／ " + status)
+        details = status + "\n" + "\n".join(
+            (getattr(snap_a, "accsaber_fetch_errors", []) or []) +
+            (getattr(snap_b, "accsaber_fetch_errors", []) or []))
+        self._acc_metric_title_label.setToolTip(details)
+        self._acc_cmp_title_label.setToolTip(details)
+
 
         # ----- 右側テーブル: ScoreSaber / BeatLeader の総クリア＋★別 -----
         # スナップショットに保存されている★別統計を利用する
@@ -2776,7 +2971,13 @@ class SnapshotCompareDialog(QDialog):
                         rd = b_right_val - a_right_val
                         diff_text += f"({fmt(ld, 2, sign=True)}/{fmt(rd, 2, sign=True)})"
 
-                    diff_acc_item.setText(diff_text)
+                    if table is self.bl_star_table:
+                        compact = f"{fmt(diff, 2, sign=True)}%"
+                        diff_acc_item.setData(Qt.ItemDataRole.UserRole, (compact, diff_text))
+                        diff_acc_item.setToolTip(diff_text)
+                        diff_acc_item.setText(diff_text if self._bl_acc_show_lr else compact)
+                    else:
+                        diff_acc_item.setText(diff_text)
                     if diff > 0:
                         color = diff_positive_bg()
                     elif diff < 0:
@@ -2926,6 +3127,12 @@ class SnapshotCompareDialog(QDialog):
                 pp_solo_a=bl_sp_total_a, pp_solo_b=bl_sp_total_b,
             )
 
-        self.table.resizeColumnToContents(0)  # Metric列のみ自動調整、A/B/Diff列は固定幅
+        self.table.resizeColumnToContents(0)
+        # Preserve wider user-selected columns while ensuring values remain readable.
+        for col in (2, 3):
+            previous_width = self.table.columnWidth(col)
+            self.table.resizeColumnToContents(col)
+            self.table.setColumnWidth(col, max(previous_width, self.table.columnWidth(col)))
         # チェックボックスで設定された列の表示/非表示を再適用
         self._apply_star_col_visibility_inner()
+        self._fit_comparison_tables()

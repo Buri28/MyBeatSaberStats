@@ -1,0 +1,204 @@
+{
+ "beatleader": {
+  "all": {
+   "cached_scores": 23122,
+   "returned": 2914,
+   "complete": true,
+   "removed": [],
+   "omitted": null,
+   "omitted_pp": null,
+   "omitted_stars": null,
+   "omitted_modifiers": null,
+   "failed_pages_kept": true,
+   "failed_pages": [],
+   "stats_diff": {},
+   "clears_before": 2914,
+   "clears_after": 2914,
+   "pp_total_before": 12673.343,
+   "pp_total_after": 12673.343
+  },
+  "omit1": {
+   "cached_scores": 23122,
+   "returned": 2913,
+   "complete": true,
+   "removed": [
+    "1232e71"
+   ],
+   "omitted": "1232e71",
+   "omitted_pp": 451.7832,
+   "omitted_stars": 8.539003,
+   "omitted_modifiers": "",
+   "failed_pages_kept": true,
+   "failed_pages": [],
+   "stats_diff": {
+    "2": {
+     "pp_contribution": [
+      0.000931,
+      0.000965
+     ]
+    },
+    "3": {
+     "pp_contribution": [
+      3.5e-05,
+      3.7e-05
+     ]
+    },
+    "4": {
+     "pp_contribution": [
+      2.2e-05,
+      2.3e-05
+     ]
+    },
+    "5": {
+     "pp_contribution": [
+      0.051067,
+      0.052919
+     ]
+    },
+    "6": {
+     "pp_contribution": [
+      16.938322,
+      17.552666
+     ]
+    },
+    "7": {
+     "pp_contribution": [
+      1165.045267,
+      1207.300794
+     ]
+    },
+    "8": {
+     "clear_count": [
+      355,
+      354
+     ],
+     "pp_contribution": [
+      7489.560194,
+      7358.812151
+     ]
+    },
+    "9": {
+     "pp_contribution": [
+      3312.77139,
+      3381.437244
+     ]
+    },
+    "10": {
+     "pp_contribution": [
+      688.697707,
+      697.268762
+     ]
+    },
+    "11": {
+     "pp_contribution": [
+      0.277741,
+      0.287815
+     ]
+    }
+   },
+   "clears_before": 2914,
+   "clears_after": 2913,
+   "pp_total_before": 12673.343,
+   "pp_total_after": 12662.713
+  }
+ },
+ "scoresaber": {
+  "all": {
+   "cached_scores": 24810,
+   "returned": 5639,
+   "complete": true,
+   "removed": [],
+   "omitted": null,
+   "omitted_pp": null,
+   "omitted_stars": null,
+   "omitted_modifiers": null,
+   "resume_stop_ts_kept": true,
+   "resume_stop_ts": null,
+   "stats_diff": {},
+   "clears_before": 5434,
+   "clears_after": 5434,
+   "pp_total_before": 10884.46,
+   "pp_total_after": 10884.46
+  },
+  "omit1": {
+   "cached_scores": 24810,
+   "returned": 5638,
+   "complete": true,
+   "removed": [
+    "666582"
+   ],
+   "omitted": "666582",
+   "omitted_pp": 385.63635296037324,
+   "omitted_stars": 7.81,
+   "omitted_modifiers": "",
+   "resume_stop_ts_kept": true,
+   "resume_stop_ts": null,
+   "stats_diff": {
+    "3": {
+     "pp_contribution": [
+      100.095268,
+      103.725667
+     ]
+    },
+    "4": {
+     "pp_contribution": [
+      786.874572,
+      815.414064
+     ]
+    },
+    "5": {
+     "pp_contribution": [
+      4652.97485,
+      4758.246019
+     ]
+    },
+    "6": {
+     "pp_contribution": [
+      2558.15348,
+      2613.882447
+     ]
+    },
+    "7": {
+     "clear_count": [
+      596,
+      595
+     ],
+     "pp_contribution": [
+      1613.192844,
+      1380.89064
+     ]
+    },
+    "8": {
+     "pp_contribution": [
+      458.417992,
+      475.044552
+     ]
+    },
+    "9": {
+     "pp_contribution": [
+      625.888711,
+      638.431618
+     ]
+    },
+    "10": {
+     "pp_contribution": [
+      23.918673,
+      24.786189
+     ]
+    },
+    "11": {
+     "pp_contribution": [
+      64.943357,
+      67.298816
+     ]
+    }
+   },
+   "clears_before": 5434,
+   "clears_after": 5433,
+   "pp_total_before": 10884.46,
+   "pp_total_after": 10877.72
+  }
+ }
+}
+BeatLeader: 取り直しで返らなかったランク譜面のスコア 1 件をキャッシュから外しました
+ScoreSaber: 取り直しで返らなかったランク譜面のスコア 1 件をキャッシュから外しました

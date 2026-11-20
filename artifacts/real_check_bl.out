@@ -1,0 +1,20 @@
+Entering _load_cached_pages
+Entering _get_beatleader_leaderboards_ranked
+BeatLeader Ranked Maps fetch_until 指定: 2026-09-19T11:52:54 (Unix: 1789818774)
+BL Ranked Maps: 前回の全件取得から期間が空いたため、定期の全件取り直しをします
+Entering _load_cached_pages
+Entering _save_cached_pages
+Entering _get_beatleader_leaderboards_ranked
+BeatLeader Ranked Maps fetch_until 指定: 2026-09-18T12:07:50.436110 (Unix: 1789733270)
+Entering _load_cached_pages
+BL Ranked Maps: fetch_until 1789733270 に到達 (rankedTime=1789725664)
+BL Ranked Maps: fetch_until 境界に達したため取得終了。総件数: 3972
+Entering _save_cached_pages
+Entering _load_cached_pages
+old 3972 new 3972
+added [] removed []
+★ changed 0 []
+state {   "beatleader": "2026-11-18T12:07:50Z",   "beatleader_complete": "2026-11-18T12:07:50Z",   "beatleader_unresolved_total": null,   "beatleader_last_ok": true }
+API total 3972
+tmp C:\Users\tat28\AppData\Local\Temp\rankedcopy_3hdez219
+done-bl

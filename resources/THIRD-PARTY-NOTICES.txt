@@ -1,5 +1,5 @@
 MyBeatSaberStats - Third-party notices
-(for the files distributed with MyBeatSaberStats 0.8.6)
+(for the files distributed with MyBeatSaberStats 0.9.0)
 
 MyBeatSaberStats itself is licensed under the MIT License (see the LICENSE file
 next to MyBeatSaberStats.exe or in _internal\resources\, or

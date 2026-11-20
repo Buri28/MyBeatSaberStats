@@ -1,0 +1,44 @@
+﻿[
+    {
+        "ProcessId":  11572,
+        "CreationDate":  "\/Date(1794867396906)\/",
+        "ExecutablePath":  "C:\\work\\aitask\\.venv\\Scripts\\pythonw.exe",
+        "CommandLine":  "\"C:\\work\\aitask\\.venv\\Scripts\\pythonw.exe\" \"C:\\work\\aitask\\main.py\" --no-browser"
+    },
+    {
+        "ProcessId":  12308,
+        "CreationDate":  "\/Date(1794867396945)\/",
+        "ExecutablePath":  "C:\\Users\\tat28\\AppData\\Local\\Python\\pythoncore-3.14-64\\pythonw.exe",
+        "CommandLine":  "\"C:\\work\\aitask\\.venv\\Scripts\\pythonw.exe\" \"C:\\work\\aitask\\main.py\" --no-browser"
+    },
+    {
+        "ProcessId":  40732,
+        "CreationDate":  "\/Date(1795007166846)\/",
+        "ExecutablePath":  "C:\\work\\aitask\\.venv\\Scripts\\pythonw.exe",
+        "CommandLine":  "C:\\work\\aitask\\.venv\\Scripts\\pythonw.exe C:\\work\\aitask\\main.py --child --no-browser"
+    },
+    {
+        "ProcessId":  36648,
+        "CreationDate":  "\/Date(1795007166862)\/",
+        "ExecutablePath":  "C:\\Users\\tat28\\AppData\\Local\\Python\\pythoncore-3.14-64\\pythonw.exe",
+        "CommandLine":  "C:\\work\\aitask\\.venv\\Scripts\\pythonw.exe C:\\work\\aitask\\main.py --child --no-browser"
+    },
+    {
+        "ProcessId":  33280,
+        "CreationDate":  "\/Date(1795019710842)\/",
+        "ExecutablePath":  "C:\\work\\tool\\MyBeatSaberStats\\MyBeatSaberStats.exe",
+        "CommandLine":  "\"C:\\work\\tool\\MyBeatSaberStats\\MyBeatSaberStats.exe\" "
+    },
+    {
+        "ProcessId":  10288,
+        "CreationDate":  "\/Date(1795020383927)\/",
+        "ExecutablePath":  "C:\\work\\tool\\MyBeatSaberStats\\.venv\\Scripts\\python.exe",
+        "CommandLine":  "\"C:\\work\\tool\\MyBeatSaberStats\\.venv\\Scripts\\python.exe\" player_main.py"
+    },
+    {
+        "ProcessId":  36256,
+        "CreationDate":  "\/Date(1795020383931)\/",
+        "ExecutablePath":  "C:\\Users\\tat28\\AppData\\Local\\Python\\pythoncore-3.14-64\\python.exe",
+        "CommandLine":  "\"C:\\work\\tool\\MyBeatSaberStats\\.venv\\Scripts\\python.exe\" player_main.py"
+    }
+]

@@ -1,0 +1,61 @@
+{
+  "exit_code": 0,
+  "checks": [
+    {
+      "screen": "top-live",
+      "size": [
+        1450,
+        920
+      ]
+    },
+    {
+      "screen": "top-legacy",
+      "size": [
+        1450,
+        920
+      ]
+    },
+    {
+      "screen": "top-small",
+      "size": [
+        1148,
+        650
+      ]
+    },
+    {
+      "screen": "compare-legacy-live",
+      "size": [
+        1540,
+        940
+      ]
+    },
+    {
+      "screen": "compare-diff",
+      "size": [
+        1540,
+        940
+      ]
+    },
+    {
+      "screen": "compare-small",
+      "size": [
+        1097,
+        650
+      ]
+    },
+    {
+      "screen": "compare-large-rows",
+      "size": [
+        1097,
+        650
+      ]
+    },
+    {
+      "screen": "compare-light",
+      "size": [
+        1367,
+        650
+      ]
+    }
+  ]
+}

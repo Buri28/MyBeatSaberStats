@@ -13,7 +13,11 @@ import traceback
 
 from ..snapshot import BASE_DIR, StarClearStat
 from ..http_client import make_session
-from ..fileio import atomic_write_text, mark_now, recently_marked
+from ..fileio import atomic_write_text
+from ..ranked_sync import (
+    flag_star_drift_if_any, load_newly_ranked_checked, full_traversal_due, mismatch_traversal_allowed,
+    record_full_traversal, save_newly_ranked_checked,
+)
 from ..modifiers import classify_play
 from ..http_client import get_memoized
 
@@ -23,9 +27,8 @@ LOG_PATH = LOG_DIR / "beatleader_api.log"
 
 BEATLEADER_LEADERBOARDS_URL = "https://api.beatleader.xyz/leaderboards"
 BL_BASE_URL = "https://api.beatleader.xyz"
-# ランク譜面の全件取り直しをした時刻（「キャッシュ > API の総数」での全件取得を 24 時間に 1 回までにする）
+# ランク譜面の全件取り直しの記録（いつ・最後まで取れたか・総数が合わないまま終わったか）。判定は ranked_sync.py。
 _RANKED_FULL_TRAVERSAL_STATE = BASE_DIR / "cache" / "ranked_full_traversal.json"
-_RANKED_FULL_TRAVERSAL_INTERVAL_HOURS = 24
 
 
 def _log_api_failure(api_name: str, message: str, exc: Optional[BaseException] = None) -> None:
@@ -251,7 +254,9 @@ def _build_beatleader_star_stats(
         if status_val != 3:
             continue
 
-        stars_value = diff.get("stars") or diff.get("difficultyRating")
+        stars_value = diff.get("stars")
+        if stars_value is None:
+            stars_value = diff.get("difficultyRating")
         if stars_value is None:
             continue
         try:
@@ -518,6 +523,15 @@ def collect_beatleader_star_stats_from_cache(beatleader_id: str) -> list[StarCle
     return _build_beatleader_star_stats(leaderboards, list(scores_dict.values()))
 
 
+def _ranked_time(lb: dict) -> int:
+    """譜面の rankedTime（無い・不正なら 0）。"""
+    diff = lb.get("difficulty") if isinstance(lb, dict) else None
+    try:
+        return int(diff.get("rankedTime") or 0) if isinstance(diff, dict) else 0
+    except (TypeError, ValueError):
+        return 0
+
+
 def _get_beatleader_leaderboards_ranked(
     session: requests.Session,
     progress: Optional[Callable[[int, Optional[int]], None]] = None,
@@ -541,6 +555,11 @@ def _get_beatleader_leaderboards_ranked(
     if fetch_until is not None:
         fetch_until_ts = _utc_timestamp(fetch_until)
         print(f"BeatLeader Ranked Maps fetch_until 指定: {fetch_until.isoformat()} (Unix: {fetch_until_ts})")
+        if fetch_until_ts >= 978307200 and full_traversal_due(_RANKED_FULL_TRAVERSAL_STATE, "beatleader"):
+            # 窓の外で変わった★は日付の窓では拾えない。初回と★のずれを見つけたときだけ全件取り直す。
+            print("BL Ranked Maps: 全件取得の記録が無いか★のずれを検知したため、全件取り直しをします")
+            fetch_until = datetime(2000, 1, 1)
+            fetch_until_ts = _utc_timestamp(fetch_until)
 
     page = 1
 
@@ -591,7 +610,18 @@ def _get_beatleader_leaderboards_ranked(
                 "order": "desc",
             }
             resp = session.get(BEATLEADER_LEADERBOARDS_URL, params=params_first, timeout=10)
-            if resp.status_code != 404:
+            if resp.status_code == 404:
+                # 1 ページ目から取れなかった。キャッシュをそのまま返すが、最後まで取れていないことは伝える
+                # （ランクから外れたばかりの譜面のスコアを外さないため）。
+                print("BL Ranked Maps: 1 ページ目が 404 のため、キャッシュをそのまま使います")
+                if status is not None:
+                    status["complete"] = False
+                if fetch_until_ts is not None and fetch_until_ts < 978307200:
+                    record_full_traversal(_RANKED_FULL_TRAVERSAL_STATE, "beatleader", False, None)
+                if progress is not None:
+                    progress(1, 1)
+                return leaderboards
+            else:
                 resp.raise_for_status()
                 data_first = resp.json()
                 meta = data_first.get("metadata") or {}
@@ -615,6 +645,10 @@ def _get_beatleader_leaderboards_ranked(
                 seen_ids: set[str] = set()
                 # 2000 年まで遡る＝全件取得。このときは見つかった譜面だけでキャッシュを作り直し、ランクから外れた譜面を消す。
                 full_traversal = fetch_until_ts is not None and fetch_until_ts < 978307200  # 2001-01-01
+                # 一覧の終わり（100 件未満のページ）まで自然に読み終えたか。404・空ページで抜けたときは False
+                # （ただし、読んだ件数が API の総数に届いた後の 404・空ページは、ちょうど割り切れた一覧の終わりとみなす）。
+                natural_end = False
+                raw_items = 0  # 一覧で読んだ件数（重複を含む）
 
                 page = 1
                 while True:
@@ -632,6 +666,7 @@ def _get_beatleader_leaderboards_ranked(
                     else:
                         resp_page = session.get(BEATLEADER_LEADERBOARDS_URL, params=params, timeout=10)
                         if resp_page.status_code == 404:
+                            natural_end = 0 < raw_items >= new_total
                             break
                         resp_page.raise_for_status()
                         data = resp_page.json()
@@ -642,7 +677,10 @@ def _get_beatleader_leaderboards_ranked(
                     if items is None and isinstance(data, dict):
                         items = data.get("leaderboards")
                     if not isinstance(items, list) or not items:
+                        # 1 件も読めていない（総数 0 の異常な応答など）ときは、一覧の終わりとみなさない
+                        natural_end = 0 < raw_items >= new_total
                         break
+                    raw_items += len(items)
 
                     for lb in items:
                         if not isinstance(lb, dict):
@@ -665,32 +703,65 @@ def _get_beatleader_leaderboards_ranked(
 
                     if reached_fetch_until:
                         print(f"BL Ranked Maps: fetch_until 境界に達したため取得終了。総件数: {len(lb_by_id)}")
+                        natural_end = True
                         break
 
                     if len(items) < page_size:
+                        natural_end = True
                         break
 
                     page += 1
 
+                if not full_traversal and fetch_until_ts is not None and not reached_fetch_until \
+                        and len(seen_ids) >= new_total:
+                    # 境界に達する前に一覧が終わり、API の総数まで全部読めた＝実質、全件取得
+                    full_traversal = True
                 if full_traversal:
-                    mark_now(_RANKED_FULL_TRAVERSAL_STATE, "beatleader")
-                    if seen_ids and len(seen_ids) >= new_total:
+                    complete_full = bool(natural_end and seen_ids and len(seen_ids) >= new_total)
+                    if complete_full:
                         # API の総数まで全部取れたので、見つからなかった譜面（ランクから外れたもの）を消す
                         lb_by_id = {lb_id: lb for lb_id, lb in lb_by_id.items() if lb_id in seen_ids}
                     else:
-                        # 途中で止まった（404・空ページなど）。消すと残りの譜面まで消えるので消さない
+                        # 途中で止まった（404・空ページなど）か、列挙数が総数に届かなかった。
+                        # 消すと残りの譜面まで消えるので消さない
                         print(f"BL Ranked Maps: 全件取得が途中で止まりました（{len(seen_ids)}/{new_total} 件）。古い譜面は消しません")
                         if status is not None:
                             status["complete"] = False
-                elif new_total < len(lb_by_id) and not recently_marked(
-                    _RANKED_FULL_TRAVERSAL_STATE, "beatleader", _RANKED_FULL_TRAVERSAL_INTERVAL_HOURS
-                ):
-                    # キャッシュの方が多い＝ランクから外れた譜面が残っている。全件取り直して消す。
-                    # （API の総数が実際の件数と食い違っていても毎回にならないよう、24 時間に 1 回まで）
-                    print(f"BL Ranked Maps: キャッシュ {len(lb_by_id)} 件 > API {new_total} 件のため、全件取り直します")
-                    return _get_beatleader_leaderboards_ranked(
-                        session, progress=progress, fetch_until=datetime(2000, 1, 1), status=status,
-                    )
+                    if natural_end:
+                        # 一覧が最後まで読めた。キャッシュの件数が API の総数と合えば完了。
+                        # 総数が合わないときは API の総数も残して繰り返さない。
+                        ok = len(lb_by_id) == new_total
+                        record_full_traversal(
+                            _RANKED_FULL_TRAVERSAL_STATE, "beatleader", ok,
+                            new_total if not ok else None,
+                        )
+                    else:
+                        # 途中で止まった（404・空ページ）。キャッシュの古い分で件数が合っても完了にしない
+                        # （★のずれの印も残し、次回も全件取り直す）。
+                        record_full_traversal(_RANKED_FULL_TRAVERSAL_STATE, "beatleader", False, None)
+                else:
+                    if reached_fetch_until and fetch_until_ts is not None:
+                        # 窓の中（rankedTime が境界以降）の譜面は全部読んだ。API に無い＝ランクから外れた/入れ替わった。
+                        # 総数が同じままの入れ替わりは総数の突き合わせでは見えないので、ここで消す。
+                        # （rankedTime が 0 の譜面は並び順が分からないので対象外。誤って消しても総数チェックで戻る）
+                        stale = [
+                            lb_id for lb_id, cached_lb in lb_by_id.items()
+                            if lb_id not in seen_ids and _ranked_time(cached_lb) > 0
+                            and _ranked_time(cached_lb) >= fetch_until_ts
+                        ]
+                        for lb_id in stale:
+                            del lb_by_id[lb_id]
+                        if stale:
+                            print(f"BL Ranked Maps: 窓の中でランクから外れた譜面 {len(stale)} 件をキャッシュから消しました")
+                    if (
+                        fetch_until_ts is not None and len(lb_by_id) != new_total
+                        and mismatch_traversal_allowed(_RANKED_FULL_TRAVERSAL_STATE, "beatleader", new_total)
+                    ):
+                        # キャッシュと API の総数が合わない＝窓より古い所の取りこぼし/ランク外れが残っている。全件取り直す。
+                        print(f"BL Ranked Maps: キャッシュ {len(lb_by_id)} 件 ≠ API {new_total} 件のため、全件取り直します")
+                        return _get_beatleader_leaderboards_ranked(
+                            session, progress=progress, fetch_until=datetime(2000, 1, 1), status=status,
+                        )
 
                 leaderboards = list(lb_by_id.values())
                 # 増分更新後は全マップを含む統合単一ページとして保存する。
@@ -735,6 +806,9 @@ def _get_beatleader_leaderboards_ranked(
                 raise
             if status is not None:
                 status["complete"] = False
+            if fetch_until_ts is not None and fetch_until_ts < 978307200:
+                # 全件取得が途中で失敗した。キャッシュは変えない。次回（1 時間後以降）取り直す。
+                record_full_traversal(_RANKED_FULL_TRAVERSAL_STATE, "beatleader", False, None)
             # メタデータ確認に失敗した場合は、既存キャッシュをそのまま返す
             if progress is not None:
                 progress(1, 1)
@@ -1270,25 +1344,104 @@ def _extract_beatleader_accuracy(score_info: dict) -> Optional[float]:
         return None
 
 
+# 読めた件数が metadata.total を超えてよい幅（読んでいる間に新しいスコアが入った分）。下回るときは許さない
+_PRUNE_TOTAL_OVER_TOLERANCE = 5
+# 一度に外す件数がこれを超えたら、API の異常（読み飛ばしなど）を疑って外さない。
+# サーバー側でスコアが消えるのは普通は数件なので、小さい固定値にする。
+_PRUNE_MAX = 20
+
+
+def _bl_score_pp(item: dict) -> float:
+    try:
+        return float(item.get("pp") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _prune_missing_ranked_scores(
+    scores: dict, fetched: dict, items_read: int, api_total: Optional[int],
+) -> int:
+    """ランク譜面のスコアの取り直し（最後まで読めたもの）で返らなかったスコアを scores から外す。
+
+    外すのは、キャッシュ上で leaderboard.difficulty.status == 3（Ranked）かつ pp > 0 で、
+    ランク譜面キャッシュでも Ranked(3) の譜面なのに、今回返ってこなかったものだけ
+    （サーバー側でスコアが消えたもの）。ランク外・pp 0 のスコアは Clears・プレイ数・プレイリストの ✔ に使うので外さない。
+    ランクから外れたばかりでキャッシュの status がまだ 3 のスコアを外さないよう、ランク譜面キャッシュと突き合わせる。
+    次のときは何も外さない：metadata.total と読めた件数が大きく食い違う／ランク譜面キャッシュが無い／
+    外す件数が多すぎる。読んだ件数に重複がある（読んでいる途中で pp の並びが動いた）。戻り値は外した件数。
+    """
+    if not fetched:
+        return 0
+    if api_total is None:
+        print("BeatLeader: API の総数が分からないため、返らなかったスコアは外しません")
+        return 0
+    if items_read != len(fetched):
+        # 再プレイ・再計算で並びが動くと、重複して返るスコアと、どのページにも出ないスコアができる
+        print("BeatLeader: 取り直しの途中で並びが動いた（重複あり）ため、返らなかったスコアは外しません")
+        return 0
+    if not (api_total <= items_read <= api_total + _PRUNE_TOTAL_OVER_TOLERANCE):
+        # 足りない＝途中のページが空で返った・読み飛ばした
+        print(
+            f"BeatLeader: 取り直しの件数（{items_read}）が API の総数（{api_total}）と食い違うため、"
+            "返らなかったスコアは外しません"
+        )
+        return 0
+    ranked_ids = {
+        str(lb.get("id"))
+        for lb in _load_cached_ranked_leaderboards(CACHE_DIR / "beatleader_ranked_maps.json")
+        if lb.get("id") is not None and ((lb.get("difficulty") or {}).get("status") == 3)
+    }
+    if not ranked_ids:
+        print("BeatLeader: ランク譜面キャッシュが無いため、返らなかったスコアは外しません")
+        return 0
+    cached_ranked = [
+        k for k, item in scores.items()
+        if isinstance(item, dict)
+        and (((item.get("leaderboard") or {}).get("difficulty") or {}).get("status") == 3)
+        and _bl_score_pp(item) > 0
+    ]
+    missing = [k for k in cached_ranked if k not in fetched and k in ranked_ids]
+    if not missing:
+        return 0
+    if len(missing) > _PRUNE_MAX:
+        print(
+            f"BeatLeader: 取り直しで返らなかったランク譜面のスコアが {len(missing)} 件と多すぎるため、外しません"
+        )
+        return 0
+    for k in missing:
+        del scores[k]
+    print(f"BeatLeader: 取り直しで返らなかったランク譜面のスコア {len(missing)} 件をキャッシュから外しました")
+    return len(missing)
+
+
 def refresh_beatleader_ranked_scores(
     player_id: str,
     session: requests.Session,
     progress: Optional[Callable[[int, Optional[int]], None]] = None,
     status: Optional[dict] = None,
+    prune_missing: bool = True,
 ) -> int:
     """ランク譜面のスコアだけを pp の高い順に全部取り直し、スコアキャッシュに上書きする。
 
     PP の作り直し（PPv4 など）で変わるのは pp の付くランク譜面のスコアだけなので、
     全スコア（ランク外を含めて 200 ページ以上）ではなく、ランク譜面の分（約 30 ページ）だけ読む。
     途中で失敗したら status["complete"] = False を入れ、それまでに取れた分だけ反映する。
+    最後まで読めたときだけ、今回返ってこなかったランク譜面の pp > 0 のスコア（サーバー側で消えたもの）を
+    キャッシュから外す（prune_missing=False なら外さない。条件は _prune_missing_ranked_scores）。
     戻り値は取り直したスコアの件数。
     """
+    # 呼ぶ前に別の取得（ランク譜面の取り直しなど）が失敗していたら、ランク譜面キャッシュが古いかもしれないので外さない
+    prior_incomplete = status is not None and status.get("complete") is False
     cache_path = CACHE_DIR / f"beatleader_player_scores_{player_id}.json"
     url = f"{BL_BASE_URL}/player/{player_id}/scores"
     fetched: dict[str, dict] = {}
     page = 1
     max_pages: Optional[int] = None
     complete = True
+    hit_page_cap = False
+    ended_short = False  # 100 件未満のページで終わった
+    items_read = 0
+    api_total: Optional[int] = None
     while True:
         if progress is not None:
             progress(page, max_pages)
@@ -1308,10 +1461,12 @@ def refresh_beatleader_ranked_scores(
         items = data.get("data") if isinstance(data, dict) else None
         if not isinstance(items, list) or not items:
             break
+        items_read += len(items)
         if max_pages is None:
             try:
                 total = int((data.get("metadata") or {}).get("total") or 0)
                 max_pages = max(1, math.ceil(total / 100)) if total > 0 else None
+                api_total = total if total > 0 else None
             except (TypeError, ValueError):
                 max_pages = None
         for item in items:
@@ -1322,16 +1477,33 @@ def refresh_beatleader_ranked_scores(
             lb_id_raw = leaderboard.get("id") or diff.get("leaderboardId") or diff.get("id")
             if lb_id_raw is not None:
                 fetched[str(lb_id_raw)] = item
-        if len(items) < 100 or page >= 300:
+        if len(items) < 100:
+            ended_short = True
+            break
+        if page >= 300:
+            # ページ上限で打ち切った。続きがあるかもしれないので、返らなかったスコアは外さない
+            hit_page_cap = True
             break
         page += 1
 
     if not complete and status is not None:
         status["complete"] = False
+    if status is not None:
+        # 一覧の終わりまで読めたか。100 件未満のページで終わった、または読んだ件数が総数に届いた後の空ページ。
+        # 空ページ（総数に届く前）・ページ上限で抜けたときは False。新ランク譜面の検知済みの印に使う
+        status["ranked_scores_read_to_end"] = bool(
+            complete and not hit_page_cap
+            and (ended_short or (api_total is not None and 0 < items_read >= api_total))
+        )
     if not fetched:
         return 0
     scores = _load_cached_player_scores(cache_path) or {}
     scores.update(fetched)
+    if prune_missing:
+        if not complete or hit_page_cap or prior_incomplete:
+            print("BeatLeader: 取り直しを最後まで終えられなかったため、返らなかったスコアは外しません")
+        else:
+            _prune_missing_ranked_scores(scores, fetched, items_read, api_total)
     ordered = dict(
         sorted(scores.items(), key=lambda kv: _extract_leaderboard_timeset_from_score_item(kv[1]) or 0, reverse=True)
     )
@@ -1339,6 +1511,87 @@ def refresh_beatleader_ranked_scores(
         cache_path, ordered, failed_pages=_load_cached_player_score_failed_pages(cache_path),
     )
     return len(fetched)
+
+
+def refresh_scores_of_newly_ranked_maps(
+    player_id: str,
+    session: requests.Session,
+    progress: Optional[Callable[[int, Optional[int]], None]] = None,
+    status: Optional[dict] = None,
+) -> int:
+    """新しくランクになった譜面に自分の古いプレイがあるとき、そのスコアの pp を取り直す。
+
+    スコアの差分取得は timeset（プレイした日時）で打ち切るので、ランクになる前の古いプレイは拾えない。
+    検知は API を使わずキャッシュ同士で行う：スコアキャッシュ上で status が Ranked(3) でない譜面が、ランク譜面キャッシュにある。
+    見つかったときだけ、ランク譜面のスコアを取り直す。取り直しても更新されなかった譜面（ランクから外れた譜面が
+    キャッシュに残っているなど）は、スコアの譜面情報は書き換えず、「検知済み」の印（newly_ranked_checked.json）だけ
+    残して毎回の再検知を防ぐ。印はランクになった日時（rankedTime）ごとなので、ランクになり直したら再び検知する。
+    戻り値は検知した譜面の数。
+    """
+    cache_path = CACHE_DIR / f"beatleader_player_scores_{player_id}.json"
+    checked_path = CACHE_DIR / "newly_ranked_checked.json"
+    ranked = {str(lb.get("id")): lb for lb in _load_cached_ranked_leaderboards(CACHE_DIR / "beatleader_ranked_maps.json")}
+    scores = _load_cached_player_scores(cache_path) or {}
+    checked = load_newly_ranked_checked(checked_path, "beatleader", player_id)
+
+    def _mark(k: str) -> str:
+        return str(_ranked_time(ranked[k]))
+
+    def _stale() -> list[str]:
+        out = []
+        for k, item in scores.items():
+            if k not in ranked or not isinstance(item, dict):
+                continue
+            diff = (item.get("leaderboard") or {}).get("difficulty") or {}
+            # ランク譜面キャッシュの側も Ranked(3) のものだけ（掃除が遅れてランク外れが残っていても書き換えない）
+            if (
+                diff.get("status") != 3 and ((ranked[k].get("difficulty") or {}).get("status") == 3)
+                and checked.get(k) != _mark(k)
+            ):
+                out.append(k)
+        return out
+
+    def _star_entries():
+        for k, item in scores.items():
+            if k not in ranked or not isinstance(item, dict):
+                continue
+            ts = _extract_leaderboard_timeset_from_score_item(item)
+            try:
+                played = datetime.fromtimestamp(ts, tz=timezone.utc) if ts else None
+            except (OverflowError, OSError, ValueError):
+                played = None
+            yield (((item.get("leaderboard") or {}).get("difficulty") or {}).get("stars"),
+                   (ranked[k].get("difficulty") or {}).get("stars"), played)
+
+    # 窓の外で★が変わった譜面を、最近のプレイのスコアから検知する（次回の全件取り直しを前倒し）
+    if flag_star_drift_if_any(_RANKED_FULL_TRAVERSAL_STATE, "beatleader", _star_entries()):
+        print("BeatLeader: ランク譜面キャッシュの★が最新のスコアと食い違うため、次回全件取り直します")
+
+    stale = _stale()
+    if not stale:
+        return 0
+    print(f"BeatLeader: 新しくランクになった譜面に自分のスコアがある（{len(stale)} 件）。ランク譜面のスコアを取り直します")
+    local_status: dict = {}
+    # ここでは外さない：目的は新しくランクになった譜面の pp の取得で、直前のランク譜面の取得は差分だけなので
+    # キャッシュにランクから外れた譜面が残っていることがある（外すのは PP のずれの取り直しのときだけ）
+    refresh_beatleader_ranked_scores(
+        player_id, session, progress=progress, status=local_status, prune_missing=False,
+    )
+    if local_status.get("complete") is False:
+        if status is not None:
+            status["complete"] = False
+        return len(stale)
+    if not local_status.get("ranked_scores_read_to_end"):
+        # 空ページ・ページ上限で途中までしか読めていない。読んでいない譜面に印を付けない（次回また検知する）
+        return len(stale)
+    scores = _load_cached_player_scores(cache_path) or {}
+    still = _stale()
+    if still:
+        # スコアは書き換えず、検知済みの印だけ残す（ランク譜面キャッシュに無くなった譜面の印は捨てる）
+        marks = {k: v for k, v in checked.items() if k in ranked}
+        marks.update({k: _mark(k) for k in still})
+        save_newly_ranked_checked(checked_path, "beatleader", player_id, marks)
+    return len(stale)
 
 
 def collect_beatleader_star_stats(

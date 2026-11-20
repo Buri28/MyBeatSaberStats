@@ -1,0 +1,42 @@
+{
+  "overall": {
+    "player_id": "76561198324870685",
+    "name": "Buri",
+    "country": "JP",
+    "ap": 23806.292986,
+    "average_acc": 0.980895,
+    "ranked_plays": 611,
+    "rank_global": 579,
+    "rank_country": 33
+  },
+  "true": {
+    "player_id": "76561198324870685",
+    "name": "Buri",
+    "country": "JP",
+    "ap": 7735.177859,
+    "average_acc": 0.986975,
+    "ranked_plays": 133,
+    "rank_global": 552,
+    "rank_country": 42
+  },
+  "standard": {
+    "player_id": "76561198324870685",
+    "name": "Buri",
+    "country": "JP",
+    "ap": 8068.451781,
+    "average_acc": 0.982164,
+    "ranked_plays": 268,
+    "rank_global": 789,
+    "rank_country": 42
+  },
+  "tech": {
+    "player_id": "76561198324870685",
+    "name": "Buri",
+    "country": "JP",
+    "ap": 8002.663346,
+    "average_acc": 0.975424,
+    "ranked_plays": 210,
+    "rank_global": 732,
+    "rank_country": 42
+  }
+}

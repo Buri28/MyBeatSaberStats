@@ -1,0 +1,4309 @@
+from __future__ import annotations
+
+import re
+import threading
+from collections import defaultdict
+from pathlib import Path
+from typing import Callable, Dict, List, Optional
+
+import json
+from datetime import datetime, timezone
+
+from PySide6.QtCore import QEvent, QSize, Qt, QDateTime, QTimer, Signal, QObject
+from PySide6.QtGui import QBrush, QColor, QFont, QIcon, QPalette, QPen, QPixmap, QCursor
+from PySide6.QtWidgets import (
+    QAbstractItemView,
+    QApplication,
+    QCheckBox,
+    QComboBox,
+    QDateTimeEdit,
+    QDialog,
+    QDialogButtonBox,
+    QFileDialog,
+    QFormLayout,
+    QGridLayout,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMainWindow,
+    QPushButton,
+    QSplitter,
+    QSizePolicy,
+    QTableWidget,
+    QTableWidgetItem,
+    QVBoxLayout,
+    QWidget,
+    QMessageBox,
+    QHeaderView,
+    QProgressDialog,
+    QStyledItemDelegate,
+    QScrollArea,
+)
+from PySide6.QtGui import QDesktopServices
+from PySide6.QtCore import QUrl
+
+from .numfmt import fmt
+from .snapshot import Snapshot, SNAPSHOT_DIR, BASE_DIR, RESOURCES_DIR, StarClearStat, resource_path
+from .theme import table_stylesheet, toggle as _toggle_theme, is_dark, label_cell_color, label_cell_text_color, init_theme as _init_theme, button_label as _theme_button_label, current_theme_mode as _current_theme_mode, set_theme_mode as _set_theme_mode
+from .updater import StartupUpdateChecker, get_current_version
+from .http_client import get_shared_session as _get_shared_session
+from .accsaber_reloaded import fetch_all_maps_full as _rl_fetch_all_maps
+from .accsaber_reloaded import build_unplayed_bplist as _rl_build_unplayed_bplist
+from .accsaber_reloaded import fetch_player_all_categories as _rl_fetch_player
+from .accsaber_reloaded import fetch_player_scored_diff_ids as _rl_fetch_scored_diff_ids
+from .accsaber_reloaded import CATEGORY_IDS as _RL_CATEGORY_IDS
+from .accsaber_reloaded import get_title_icon_cache_path as _rl_title_icon_path
+from .accsaber_reloaded import download_title_icon as _rl_download_title_icon
+from .snapshot_view import SnapshotCompareDialog, AccPlayCountBarDelegate, ACC_PLAY_COLORS, ACC_PLAY_COL_CATS
+from .snapshot_graph import SnapshotGraphDialog
+from .settings_store import (
+    load_export_all_after_snapshot as _load_export_all_after_snapshot_setting,
+    load_mapper_load_new_after_maps as _load_mapper_load_new_after_maps_setting,
+    save_export_all_after_snapshot as _save_export_all_after_snapshot_setting,
+    save_mapper_load_new_after_maps as _save_mapper_load_new_after_maps_setting,
+)
+from .collector.collector import (
+    collect_beatleader_star_stats,
+    create_snapshot_for_steam_id,
+    SnapshotOptions,
+    _read_cache_fetched_at,
+)
+from mybeatsaberstats.collector.map_store import MapStore
+from .fileio import atomic_write_text
+from .playlist_view import PlaylistWindow, _make_playlist_cover as _make_cover, \
+    load_accsaber_reloaded_maps as _rl_load_maps_with_scores, \
+    _apply_config_filter as _rl_apply_filter, _BatchConfig as _RLBatchConfig, \
+    _make_bplist as _rl_make_bplist, load_playlist_export_dir as _load_playlist_export_dir, \
+    save_playlist_export_dir as _save_playlist_export_dir, \
+    load_beatsaber_dir as _load_beatsaber_dir, \
+    save_beatsaber_dir as _save_beatsaber_dir, \
+    load_enabled_playlist_batch_configs as _load_enabled_playlist_batch_configs, \
+    export_all_playlist_batches as _export_all_playlist_batches, \
+    show_bplist_covers_dialog as _show_playlist_covers_dialog
+
+
+def _format_bplist(bplist: dict) -> str:
+    """bplist を人間が読みやすいフォーマットに整形する。
+
+    トップレベルのキーはインデント付き、songs 配列の各エントリは1行にまとめる。
+    例:
+      {"hash": "abc...", "songName": "...", "difficulties": [{"characteristic": "Standard", "name": "ExpertPlus"}]}
+    """
+    songs = bplist.get("songs", [])
+    song_lines = []
+    for s in songs:
+        diffs = json.dumps(s.get("difficulties", []), ensure_ascii=False, separators=(", ", ": "))
+        # separators でコンパクトに、でも key: value の間はスペースあり
+        diffs = diffs.replace('{"characteristic":', '{"characteristic":').replace('"name":', '"name":')
+        entry = json.dumps(
+            {"hash": s.get("hash", ""), "songName": s.get("songName", ""), "difficulties": s.get("difficulties", [])},
+            ensure_ascii=False,
+            separators=(",", ": "),
+        )
+        song_lines.append(f"    {entry}")
+
+    header = {k: v for k, v in bplist.items() if k != "songs"}
+    lines = []
+    lines.append("{")
+    for k, v in header.items():
+        lines.append(f'  {json.dumps(k, ensure_ascii=False)}: {json.dumps(v, ensure_ascii=False)},')
+    lines.append(f'  "songs": [')
+    for i, sl in enumerate(song_lines):
+        comma = "," if i < len(song_lines) - 1 else ""
+        lines.append(f"{sl}{comma}")
+    lines.append("  ]")
+    lines.append("}")
+    return "\n".join(lines)
+
+
+def _get_player_ids_from_index(steam_id: str):
+    """players_index.json から (scoresaber_id, beatleader_id) を返す。見つからない場合は steam_id を返す。"""
+    if not steam_id:
+        return None, None
+    index_path = BASE_DIR / "cache" / "players_index.json"
+    if not index_path.exists():
+        return steam_id, steam_id
+    try:
+        data = json.loads(index_path.read_text(encoding="utf-8"))
+        for entry in data:
+            if entry.get("steam_id") == steam_id:
+                ss = entry.get("scoresaber") or {}
+                bl = entry.get("beatleader") or {}
+                ss_id = str(ss.get("id") or steam_id)
+                bl_id = str(bl.get("id") or steam_id)
+                return ss_id, bl_id
+    except Exception:  # noqa: BLE001
+        pass
+    return steam_id, steam_id
+
+
+def _extract_steam_id_from_input(text: str) -> str:
+    """URL または準 URL から SteamID (17桌数字) を抽出する。
+
+    対応パターン:
+        https://scoresaber.com/u/<id>
+        https://beatleader.com/u/<id>
+        https://steamcommunity.com/profiles/<id>
+        https://accsaber.com/players/<id>
+    ID が見つからない場合は元のテキストをそのまま返す。
+    """
+    text = text.strip()
+    m = re.search(r'(?:/u/|/profiles/|/players/)([0-9]{17})', text)
+    return m.group(1) if m else text
+
+
+# AccSaber サイトの CSS 変数（--text-primary / --text-secondary）と同じ文字色
+# ダーク: :root, ライト: [data-theme=light]
+_ACC_SITE_TEXT_PRIMARY = {True: "#e6e4ee", False: "#1a1726"}
+_ACC_SITE_TEXT_SECONDARY = {True: "#8c87a3", False: "#6a6580"}
+
+
+def _acc_site_text_primary() -> str:
+    return _ACC_SITE_TEXT_PRIMARY[bool(is_dark())]
+
+
+def _acc_site_text_secondary() -> str:
+    return _ACC_SITE_TEXT_SECONDARY[bool(is_dark())]
+
+
+# XP レベル称号の色。AccSaber サイトの CSS 変数 --tier-* と同じ値（ライト/ダーク共通）
+_ACC_SITE_TIER_COLORS = {
+    "newcomer": "#6b7280",
+    "apprentice": "#3b82f6",
+    "adept": "#10b981",
+    "skilled": "#cd7f32",
+    "expert": "#c0c0d0",
+    "master": "#fbbf24",
+    "grandmaster": "#8b5cf6",
+    "legend": "#f97316",
+    "transcendent": "#22d3ee",
+    "mythic": "#ef4444",
+    "ascendant": "#f472b6",
+}
+
+
+# 将来 AccSaber 側に Ascendant より上の称号が追加された場合に割り当てる色。
+# サイトのパレット（--accent-* / --xp-* / --tier-*）から未使用のものを上位順に並べたもの。
+_ACC_SITE_TIER_FUTURE_COLORS = (
+    "#f5b800",  # accent-overall
+    "#a855f7",  # tier-apex
+    "#3ccfd6",  # xp-set-bonus
+    "#e56fb0",  # xp-campaign
+    "#22c55e",  # accent-true-acc
+    "#b9f2ff",  # tier-diamond
+    "#6a9bf5",  # xp-mission
+    "#e58a3a",  # xp-score
+)
+
+
+def _acc_site_level_title_color(title: str | None) -> str:
+    """レベル称号（例: Transcendent）に対応するサイトの色を返す。
+
+    サイト未定義（＝新しく追加された上位称号）の場合は、称号名から決まる
+    固定の色を _ACC_SITE_TIER_FUTURE_COLORS から割り当てる。同じ称号なら
+    常に同じ色になり、既存の称号色とも重複しない。
+    """
+    key = (title or "").strip().lower().replace(" ", "-")
+    if not key:
+        return _acc_site_text_secondary()
+    known = _ACC_SITE_TIER_COLORS.get(key)
+    if known:
+        return known
+    _idx = sum(ord(c) for c in key) % len(_ACC_SITE_TIER_FUTURE_COLORS)
+    return _ACC_SITE_TIER_FUTURE_COLORS[_idx]
+
+
+_TAKE_SNAPSHOT_DIALOG_PATH = BASE_DIR / "cache" / "take_snapshot_dialog.json"
+
+
+def _load_take_snapshot_dialog_state() -> dict:
+    try:
+        if _TAKE_SNAPSHOT_DIALOG_PATH.exists():
+            data = json.loads(_TAKE_SNAPSHOT_DIALOG_PATH.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return data
+    except Exception:
+        pass
+    return {}
+
+
+def _save_take_snapshot_dialog_state(updates: dict) -> None:
+    try:
+        payload = _load_take_snapshot_dialog_state()
+        payload.update(updates)
+        _TAKE_SNAPSHOT_DIALOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_text(_TAKE_SNAPSHOT_DIALOG_PATH, 
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
+
+
+def _load_export_all_after_snapshot() -> bool:
+    return _load_export_all_after_snapshot_setting()
+
+
+def _save_export_all_after_snapshot(enabled: bool) -> None:
+    _save_export_all_after_snapshot_setting(enabled)
+
+
+def _load_mapper_load_new_after_maps() -> bool:
+    return _load_mapper_load_new_after_maps_setting()
+
+
+def _save_mapper_load_new_after_maps(enabled: bool) -> None:
+    _save_mapper_load_new_after_maps_setting(enabled)
+
+
+class TakeSnapshotDialog(QDialog):
+    """スナップショット取得時にSteamIDとデータ取得オプションを選択するダイアログ。"""
+
+    def __init__(self, parent=None, default_steam_id: str = "") -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Take Snapshot")
+        self.setMinimumWidth(420)
+        self._saved_state = self._load_state()
+
+        layout = QVBoxLayout(self)
+
+        # SteamID / URL 入力（URL を貼ると自動で SteamID を抽出する）
+        form = QFormLayout()
+        self._id_edit = QLineEdit(default_steam_id, self)
+        self._id_edit.setPlaceholderText("SteamID or ScoreSaber/BeatLeader/AccSaber/Steam URL")
+        self._id_edit.textChanged.connect(self._on_id_text_changed)
+        form.addRow("SteamID:", self._id_edit)
+        layout.addLayout(form)
+
+        # データ取得オプション
+        group = QGroupBox("Fetch Options", self)
+        group_layout = QGridLayout(group)
+        group_layout.setColumnStretch(0, 0)
+        group_layout.setColumnStretch(1, 1)
+
+        self._cb_ss_ranked_maps = QCheckBox("ScoreSaber Ranked Maps", self)
+        self._cb_bl_ranked_maps = QCheckBox("BeatLeader Ranked Maps", self)
+        self._cb_scoresaber     = QCheckBox("ScoreSaber (Player Info / Scores / Stats)", self)
+        self._cb_beatleader     = QCheckBox("BeatLeader (Player Info / Scores / Stats)", self)
+        self._cb_accsaber_rl    = QCheckBox("AccSaber (Rank)", self)
+
+        _cache_dir = BASE_DIR / "cache"
+
+        def _fmt_fetched(path: Path) -> str:
+            dt = _read_cache_fetched_at(path)
+            if dt is None:
+                return "Never fetched"
+            dt_local = dt.replace(tzinfo=timezone.utc).astimezone()
+            return dt_local.strftime("%Y-%m-%d %H:%M")
+
+        def _fmt_fetched_with_name(path: Path) -> str:
+            return f"{_fmt_fetched(path)} <{path.name}>"
+
+        def _fmt_rl_map_counts_fetched_with_name(category: str) -> str:
+            try:
+                data = json.loads((_cache_dir / "accsaber_reloaded_map_counts.json").read_text(encoding="utf-8"))
+                if not isinstance(data, dict):
+                    return "Never fetched"
+                fat = data.get("fetched_at")
+                entry = data.get(category, {})
+                count = entry.get("count") if isinstance(entry, dict) else None
+                if fat and isinstance(fat, str):
+                    dt = datetime.fromisoformat(fat.rstrip("Z"))
+                    dt_local = dt.replace(tzinfo=timezone.utc).astimezone()
+                    date_str = dt_local.strftime("%Y-%m-%d %H:%M")
+                    count_str = f" ({count}maps)" if count is not None else ""
+                    return f"{date_str} <accsaber_reloaded_map_counts.json>{count_str}"
+            except Exception:  # noqa: BLE001
+                pass
+            return "Never fetched"
+
+        _ss_id, _bl_id = _get_player_ids_from_index(default_steam_id)
+
+        # (checkbox, label_text, [extra_info_rows])
+        _fetch_rows = [
+            (self._cb_ss_ranked_maps, _fmt_fetched_with_name(_cache_dir / "scoresaber_ranked_maps.json"), []),
+            (self._cb_bl_ranked_maps, _fmt_fetched_with_name(_cache_dir / "beatleader_ranked_maps.json"), []),
+            (self._cb_scoresaber,     _fmt_fetched_with_name(_cache_dir / f"scoresaber_player_scores_{_ss_id}.json") if _ss_id else "N/A", []),
+            (self._cb_beatleader,     _fmt_fetched_with_name(_cache_dir / f"beatleader_player_scores_{_bl_id}.json") if _bl_id else "N/A", []),
+            (self._cb_accsaber_rl,    _fmt_fetched_with_name(_cache_dir / "accsaber_reloaded_map_counts.json"), [
+                ("　　True Maps:",     _fmt_rl_map_counts_fetched_with_name("true")),
+                ("　　Standard Maps:", _fmt_rl_map_counts_fetched_with_name("standard")),
+                ("　　Tech Maps:",     _fmt_rl_map_counts_fetched_with_name("tech")),
+            ]),
+        ]
+
+        _grid_row = 0
+        for (cb, _label_text, _extra) in _fetch_rows:
+            cb.setChecked(True)
+            group_layout.addWidget(cb, _grid_row, 0)
+            _lbl = QLabel(_label_text, self)
+            _lbl.setStyleSheet("color: gray; font-size: 11px;")
+            group_layout.addWidget(_lbl, _grid_row, 1)
+            _grid_row += 1
+            for (_ek_text, _ev_text) in _extra:
+                _ek = QLabel(_ek_text, self)
+                _ek.setStyleSheet("color: gray; font-size: 11px;")
+                _ev = QLabel(_ev_text, self)
+                _ev.setStyleSheet("color: gray; font-size: 11px;")
+                group_layout.addWidget(_ek, _grid_row, 0)
+                group_layout.addWidget(_ev, _grid_row, 1)
+                _grid_row += 1
+
+        layout.addWidget(group)
+
+        # スコア取得モード（Fetch ALL / Fetch Until は排他）
+        fetch_mode_group = QGroupBox("Score Fetch Mode", self)
+        fetch_mode_layout = QFormLayout(fetch_mode_group)
+
+        # --- ScoreSaber ---
+        ss_mode_row = QHBoxLayout()
+        self._cb_ss_fetch_all = QCheckBox("Fetch ALL (full history)", self)
+        self._cb_ss_fetch_all.setChecked(False)
+        self._cb_ss_fetch_all.setEnabled(self._cb_scoresaber.isChecked())
+        ss_mode_row.addWidget(self._cb_ss_fetch_all)
+        ss_mode_row.addSpacing(16)
+        self._cb_ss_until = QCheckBox("Fetch from:", self)
+        self._cb_ss_until.setChecked(False)
+        self._cb_ss_until.setEnabled(self._cb_scoresaber.isChecked())
+        self._dt_ss_until = QDateTimeEdit(QDateTime.currentDateTime(), self)
+        self._dt_ss_until.setDisplayFormat("yyyy-MM-dd HH:mm:ss")
+        self._dt_ss_until.setCalendarPopup(True)
+        self._dt_ss_until.setEnabled(False)
+        self._cb_ss_until.toggled.connect(self._dt_ss_until.setEnabled)
+        ss_mode_row.addWidget(self._cb_ss_until)
+        ss_mode_row.addWidget(self._dt_ss_until, 1)
+        fetch_mode_layout.addRow("ScoreSaber:", ss_mode_row)
+
+        # --- BeatLeader ---
+        bl_mode_row = QHBoxLayout()
+        self._cb_bl_fetch_all = QCheckBox("Fetch ALL (full history)", self)
+        self._cb_bl_fetch_all.setChecked(False)
+        self._cb_bl_fetch_all.setEnabled(self._cb_beatleader.isChecked())
+        bl_mode_row.addWidget(self._cb_bl_fetch_all)
+        bl_mode_row.addSpacing(16)
+        self._cb_bl_until = QCheckBox("Fetch from:", self)
+        self._cb_bl_until.setChecked(False)
+        self._cb_bl_until.setEnabled(self._cb_beatleader.isChecked())
+        self._dt_bl_until = QDateTimeEdit(QDateTime.currentDateTime(), self)
+        self._dt_bl_until.setDisplayFormat("yyyy-MM-dd HH:mm:ss")
+        self._dt_bl_until.setCalendarPopup(True)
+        self._dt_bl_until.setEnabled(False)
+        self._cb_bl_until.toggled.connect(self._dt_bl_until.setEnabled)
+        bl_mode_row.addWidget(self._cb_bl_until)
+        bl_mode_row.addWidget(self._dt_bl_until, 1)
+        fetch_mode_layout.addRow("BeatLeader:", bl_mode_row)
+
+        layout.addWidget(fetch_mode_group)
+
+        playlist_export_group = QGroupBox("Playlist Export", self)
+        playlist_export_layout = QVBoxLayout(playlist_export_group)
+        playlist_export_layout.setContentsMargins(9, 12, 9, 9)
+        playlist_export_layout.setSpacing(6)
+
+        self._cb_playlist_export_all = QCheckBox("Export All after snapshot", self)
+        playlist_export_layout.addWidget(self._cb_playlist_export_all)
+
+        playlist_dir_row = QHBoxLayout()
+        playlist_dir_row.setSpacing(8)
+        playlist_dir_row.addWidget(QLabel("Folder:", self))
+        self._playlist_export_dir_edit = QLineEdit(_load_playlist_export_dir(), self)
+        self._playlist_export_dir_edit.setReadOnly(True)
+        self._playlist_export_dir_edit.setPlaceholderText("Select playlist export folder...")
+        playlist_dir_row.addWidget(self._playlist_export_dir_edit, 1)
+        self._btn_playlist_export_dir = QPushButton("Change...", self)
+        self._btn_playlist_export_dir.clicked.connect(self._browse_playlist_export_dir)
+        playlist_dir_row.addWidget(self._btn_playlist_export_dir)
+        playlist_export_layout.addLayout(playlist_dir_row)
+        self._cb_playlist_export_all.toggled.connect(self._update_playlist_export_ui)
+        layout.addWidget(playlist_export_group)
+
+        # 親チェックの ON/OFF に応じてモード行全体を有効/無効化
+        def _ss_enabled_toggled(checked: bool) -> None:
+            self._cb_ss_fetch_all.setEnabled(checked and not self._cb_ss_until.isChecked())
+            self._cb_ss_until.setEnabled(checked and not self._cb_ss_fetch_all.isChecked())
+            self._dt_ss_until.setEnabled(checked and self._cb_ss_until.isChecked())
+
+        def _bl_enabled_toggled(checked: bool) -> None:
+            self._cb_bl_fetch_all.setEnabled(checked and not self._cb_bl_until.isChecked())
+            self._cb_bl_until.setEnabled(checked and not self._cb_bl_fetch_all.isChecked())
+            self._dt_bl_until.setEnabled(checked and self._cb_bl_until.isChecked())
+
+        self._cb_scoresaber.toggled.connect(_ss_enabled_toggled)
+        self._cb_beatleader.toggled.connect(_bl_enabled_toggled)
+
+        # Fetch ALL と Fetch Until は相互排他
+        def _ss_all_toggled(checked: bool) -> None:
+            if checked:
+                self._cb_ss_until.setChecked(False)
+                self._cb_ss_until.setEnabled(False)
+                self._dt_ss_until.setEnabled(False)
+            else:
+                self._cb_ss_until.setEnabled(self._cb_scoresaber.isChecked())
+
+        def _ss_until_toggled(checked: bool) -> None:
+            if checked:
+                self._cb_ss_fetch_all.setChecked(False)
+                self._cb_ss_fetch_all.setEnabled(False)
+            else:
+                self._cb_ss_fetch_all.setEnabled(self._cb_scoresaber.isChecked())
+
+        def _bl_all_toggled(checked: bool) -> None:
+            if checked:
+                self._cb_bl_until.setChecked(False)
+                self._cb_bl_until.setEnabled(False)
+                self._dt_bl_until.setEnabled(False)
+            else:
+                self._cb_bl_until.setEnabled(self._cb_beatleader.isChecked())
+
+        def _bl_until_toggled(checked: bool) -> None:
+            if checked:
+                self._cb_bl_fetch_all.setChecked(False)
+                self._cb_bl_fetch_all.setEnabled(False)
+            else:
+                self._cb_bl_fetch_all.setEnabled(self._cb_beatleader.isChecked())
+
+        self._cb_ss_fetch_all.toggled.connect(_ss_all_toggled)
+        self._cb_ss_until.toggled.connect(_ss_until_toggled)
+        self._cb_bl_fetch_all.toggled.connect(_bl_all_toggled)
+        self._cb_bl_until.toggled.connect(_bl_until_toggled)
+
+        button_row = QHBoxLayout()
+
+        self._btn_save = QPushButton("Save", self)
+        self._btn_save.clicked.connect(self._save_current_settings)
+        button_row.addWidget(self._btn_save)
+
+        button_row.addStretch()
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
+            self,
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        button_row.addWidget(buttons)
+        layout.addLayout(button_row)
+
+        self._restore_state()
+
+        _ss_enabled_toggled(self._cb_scoresaber.isChecked())
+        _bl_enabled_toggled(self._cb_beatleader.isChecked())
+        _ss_all_toggled(self._cb_ss_fetch_all.isChecked())
+        _ss_until_toggled(self._cb_ss_until.isChecked())
+        _bl_all_toggled(self._cb_bl_fetch_all.isChecked())
+        _bl_until_toggled(self._cb_bl_until.isChecked())
+        self._update_playlist_export_ui(self._cb_playlist_export_all.isChecked())
+
+    def _on_id_text_changed(self, text: str) -> None:
+        """URL が貼られたとき SteamID を抽出してテキストボックスを置き換える。"""
+        extracted = _extract_steam_id_from_input(text)
+        if extracted != text:
+            self._id_edit.blockSignals(True)
+            self._id_edit.setText(extracted)
+            self._id_edit.blockSignals(False)
+
+    def steam_id(self) -> str:
+        return self._id_edit.text().strip()
+
+    def _restore_state(self) -> None:
+        widgets = [
+            self._cb_ss_ranked_maps,
+            self._cb_bl_ranked_maps,
+            self._cb_scoresaber,
+            self._cb_beatleader,
+            self._cb_accsaber_rl,
+            self._cb_ss_fetch_all,
+            self._cb_ss_until,
+            self._cb_bl_fetch_all,
+            self._cb_bl_until,
+            self._cb_playlist_export_all,
+        ]
+        for widget in widgets:
+            widget.blockSignals(True)
+        try:
+            self._cb_ss_ranked_maps.setChecked(bool(self._saved_state.get("fetch_ss_ranked_maps", True)))
+            self._cb_bl_ranked_maps.setChecked(bool(self._saved_state.get("fetch_bl_ranked_maps", True)))
+            self._cb_scoresaber.setChecked(bool(self._saved_state.get("fetch_scoresaber", True)))
+            self._cb_beatleader.setChecked(bool(self._saved_state.get("fetch_beatleader", True)))
+            self._cb_accsaber_rl.setChecked(bool(self._saved_state.get("fetch_accsaber_rl", True)))
+            self._cb_ss_fetch_all.setChecked(bool(self._saved_state.get("ss_fetch_all", False)))
+            self._cb_ss_until.setChecked(bool(self._saved_state.get("ss_fetch_from_enabled", False)))
+            self._cb_bl_fetch_all.setChecked(bool(self._saved_state.get("bl_fetch_all", False)))
+            self._cb_bl_until.setChecked(bool(self._saved_state.get("bl_fetch_from_enabled", False)))
+            self._cb_playlist_export_all.setChecked(_load_export_all_after_snapshot())
+            self._playlist_export_dir_edit.setText(_load_playlist_export_dir())
+
+            ss_until = self._saved_state.get("ss_fetch_from_datetime", "")
+            if isinstance(ss_until, str) and ss_until:
+                qdt = QDateTime.fromString(ss_until, Qt.DateFormat.ISODate)
+                if qdt.isValid():
+                    self._dt_ss_until.setDateTime(qdt)
+            bl_until = self._saved_state.get("bl_fetch_from_datetime", "")
+            if isinstance(bl_until, str) and bl_until:
+                qdt = QDateTime.fromString(bl_until, Qt.DateFormat.ISODate)
+                if qdt.isValid():
+                    self._dt_bl_until.setDateTime(qdt)
+        finally:
+            for widget in widgets:
+                widget.blockSignals(False)
+
+    def _load_state(self) -> dict:
+        return _load_take_snapshot_dialog_state()
+
+    def _save_state(self) -> None:
+        _save_take_snapshot_dialog_state(
+            {
+                "fetch_ss_ranked_maps": self._cb_ss_ranked_maps.isChecked(),
+                "fetch_bl_ranked_maps": self._cb_bl_ranked_maps.isChecked(),
+                "fetch_scoresaber": self._cb_scoresaber.isChecked(),
+                "fetch_beatleader": self._cb_beatleader.isChecked(),
+                "fetch_accsaber_rl": self._cb_accsaber_rl.isChecked(),
+                "ss_fetch_all": self._cb_ss_fetch_all.isChecked(),
+                "ss_fetch_from_enabled": self._cb_ss_until.isChecked(),
+                "ss_fetch_from_datetime": self._dt_ss_until.dateTime().toString(Qt.DateFormat.ISODate),
+                "bl_fetch_all": self._cb_bl_fetch_all.isChecked(),
+                "bl_fetch_from_enabled": self._cb_bl_until.isChecked(),
+                "bl_fetch_from_datetime": self._dt_bl_until.dateTime().toString(Qt.DateFormat.ISODate),
+                "export_all_after_snapshot": self._cb_playlist_export_all.isChecked(),
+            }
+        )
+
+    def _update_playlist_export_ui(self, checked: bool) -> None:
+        self._playlist_export_dir_edit.setEnabled(checked)
+        self._btn_playlist_export_dir.setEnabled(checked)
+
+    def _browse_playlist_export_dir(self) -> None:
+        initial_dir = self._playlist_export_dir_edit.text().strip() or str(BASE_DIR)
+        folder = QFileDialog.getExistingDirectory(self, "Select playlist export folder", initial_dir)
+        if folder:
+            self._playlist_export_dir_edit.setText(folder)
+
+    def _persist_snapshot_settings(self) -> bool:
+        playlist_export_dir = self._playlist_export_dir_edit.text().strip()
+        if self._cb_playlist_export_all.isChecked() and not playlist_export_dir:
+            QMessageBox.warning(self, "Take Snapshot", "Playlist export folder is empty.")
+            return False
+        self._save_state()
+        _save_export_all_after_snapshot(self._cb_playlist_export_all.isChecked())
+        if playlist_export_dir:
+            _save_playlist_export_dir(playlist_export_dir)
+        parent = self.parent()
+        sync_settings = getattr(parent, "_sync_shared_settings_to_open_windows", None)
+        if callable(sync_settings):
+            sync_settings()
+        return True
+
+    def _save_current_settings(self) -> None:
+        if not self._persist_snapshot_settings():
+            return
+        QMessageBox.information(self, "Take Snapshot", "Settings saved.")
+
+    def accept(self) -> None:  # type: ignore[override]
+        if not self._persist_snapshot_settings():
+            return
+        super().accept()
+
+    def should_export_playlists(self) -> bool:
+        return self._cb_playlist_export_all.isChecked()
+
+    def playlist_export_dir(self) -> str:
+        return self._playlist_export_dir_edit.text().strip()
+
+    def snapshot_options(self) -> SnapshotOptions:
+        ss_until: Optional[datetime] = None
+        if self._cb_ss_until.isChecked():
+            qdt = self._dt_ss_until.dateTime()
+            ss_until = datetime(
+                qdt.date().year(), qdt.date().month(), qdt.date().day(),
+                qdt.time().hour(), qdt.time().minute(), qdt.time().second(),
+            )
+
+        bl_until: Optional[datetime] = None
+        if self._cb_bl_until.isChecked():
+            qdt = self._dt_bl_until.dateTime()
+            bl_until = datetime(
+                qdt.date().year(), qdt.date().month(), qdt.date().day(),
+                qdt.time().hour(), qdt.time().minute(), qdt.time().second(),
+            )
+
+        return SnapshotOptions(
+            fetch_ss_ranked_maps=self._cb_ss_ranked_maps.isChecked(),
+            fetch_bl_ranked_maps=self._cb_bl_ranked_maps.isChecked(),
+            fetch_scoresaber=self._cb_scoresaber.isChecked(),
+            fetch_beatleader=self._cb_beatleader.isChecked(),
+            fetch_accsaber_reloaded=self._cb_accsaber_rl.isChecked(),
+            fetch_ss_star_stats=True,
+            fetch_bl_star_stats=True,
+            ss_fetch_until=ss_until,
+            bl_fetch_until=bl_until,
+            ss_ranked_until=ss_until,
+            bl_ranked_until=bl_until,
+            ss_fetch_all=self._cb_ss_fetch_all.isChecked(),
+            bl_fetch_all=self._cb_bl_fetch_all.isChecked(),
+        )
+
+
+class SettingsDialog(QDialog):
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Settings")
+        self.setMinimumWidth(480)
+        self._parent_window = parent if isinstance(parent, PlayerWindow) else None
+
+        layout = QVBoxLayout(self)
+
+        beatsaber_group = QGroupBox("Beat Saber", self)
+        beatsaber_layout = QVBoxLayout(beatsaber_group)
+        beatsaber_layout.setContentsMargins(9, 12, 9, 9)
+        beatsaber_layout.setSpacing(6)
+
+        beatsaber_dir_row = QHBoxLayout()
+        beatsaber_dir_row.setSpacing(8)
+        beatsaber_dir_row.addWidget(QLabel("Folder:", self))
+        # 直接入力も可能。検出できた候補はドロップダウンから選択できる。
+        self._beatsaber_dir_combo = QComboBox(self)
+        self._beatsaber_dir_combo.setEditable(True)
+        self._beatsaber_dir_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self._beatsaber_dir_edit = QLineEdit(self)
+        self._beatsaber_dir_combo.setLineEdit(self._beatsaber_dir_edit)
+        self._beatsaber_dir_edit.setPlaceholderText("Enter or select Beat Saber folder...")
+        for candidate in _find_beatsaber_dir_candidates():
+            self._beatsaber_dir_combo.addItem(candidate)
+        self._beatsaber_dir_edit.setText(_load_beatsaber_dir())
+        beatsaber_dir_row.addWidget(self._beatsaber_dir_combo, 1)
+        self._btn_beatsaber_dir = QPushButton("Change...", self)
+        self._btn_beatsaber_dir.clicked.connect(self._browse_beatsaber_dir)
+        beatsaber_dir_row.addWidget(self._btn_beatsaber_dir)
+        beatsaber_layout.addLayout(beatsaber_dir_row)
+        layout.addWidget(beatsaber_group)
+
+        theme_group = QGroupBox("Theme", self)
+        theme_layout = QFormLayout(theme_group)
+        self._theme_mode_combo = QComboBox(self)
+        self._theme_mode_combo.addItem("Default (System)", "default")
+        self._theme_mode_combo.addItem("Dark", "dark")
+        self._theme_mode_combo.addItem("Light", "light")
+        current_mode = _current_theme_mode()
+        current_index = max(0, self._theme_mode_combo.findData(current_mode))
+        self._theme_mode_combo.setCurrentIndex(current_index)
+        theme_layout.addRow("Mode:", self._theme_mode_combo)
+        layout.addWidget(theme_group)
+
+        playlist_export_group = QGroupBox("Playlist Export", self)
+        playlist_export_layout = QVBoxLayout(playlist_export_group)
+        playlist_export_layout.setContentsMargins(9, 12, 9, 9)
+        playlist_export_layout.setSpacing(6)
+
+        self._cb_playlist_export_all = QCheckBox("Export All after snapshot", self)
+        self._cb_playlist_export_all.setChecked(_load_export_all_after_snapshot())
+        playlist_export_layout.addWidget(self._cb_playlist_export_all)
+
+        self._cb_mapper_load_new_after_maps = QCheckBox("Mapper Load New after Maps load", self)
+        self._cb_mapper_load_new_after_maps.setChecked(_load_mapper_load_new_after_maps())
+        self._cb_mapper_load_new_after_maps.setToolTip(
+            "Maps を読み込んだあとに Mapper List の Load New を自動で実行します"
+        )
+        playlist_export_layout.addWidget(self._cb_mapper_load_new_after_maps)
+
+        playlist_dir_row = QHBoxLayout()
+        playlist_dir_row.setSpacing(8)
+        playlist_dir_row.addWidget(QLabel("Folder:", self))
+        self._playlist_export_dir_edit = QLineEdit(_load_playlist_export_dir(), self)
+        self._playlist_export_dir_edit.setReadOnly(True)
+        self._playlist_export_dir_edit.setPlaceholderText("Select playlist export folder...")
+        playlist_dir_row.addWidget(self._playlist_export_dir_edit, 1)
+        self._btn_playlist_export_dir = QPushButton("Change...", self)
+        self._btn_playlist_export_dir.clicked.connect(self._browse_playlist_export_dir)
+        playlist_dir_row.addWidget(self._btn_playlist_export_dir)
+        playlist_export_layout.addLayout(playlist_dir_row)
+
+        self._cb_playlist_export_all.toggled.connect(self._update_playlist_export_ui)
+        layout.addWidget(playlist_export_group)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
+            self,
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        self._update_playlist_export_ui(self._cb_playlist_export_all.isChecked())
+
+    def _update_playlist_export_ui(self, checked: bool) -> None:
+        self._playlist_export_dir_edit.setEnabled(checked)
+        self._btn_playlist_export_dir.setEnabled(checked)
+
+    def _browse_playlist_export_dir(self) -> None:
+        initial_dir = self._playlist_export_dir_edit.text().strip() or str(BASE_DIR)
+        folder = QFileDialog.getExistingDirectory(self, "Select playlist export folder", initial_dir)
+        if folder:
+            self._playlist_export_dir_edit.setText(folder)
+
+    def _browse_beatsaber_dir(self) -> None:
+        initial_dir = self._beatsaber_dir_edit.text().strip() or str(BASE_DIR)
+        folder = QFileDialog.getExistingDirectory(self, "Select Beat Saber folder", initial_dir)
+        if folder:
+            self._beatsaber_dir_edit.setText(folder)
+
+    def accept(self) -> None:  # type: ignore[override]
+        beatsaber_dir = self._beatsaber_dir_edit.text().strip()
+        # 空欄（未設定のまま）は許容し、入力があるときだけ検証する
+        if beatsaber_dir and not _validate_beatsaber_dir(self, beatsaber_dir):
+            return
+
+        theme_mode = str(self._theme_mode_combo.currentData() or "default")
+        app = QApplication.instance()
+        _set_theme_mode(theme_mode, app if isinstance(app, QApplication) else None)
+
+        playlist_export_dir = self._playlist_export_dir_edit.text().strip()
+        _save_export_all_after_snapshot(self._cb_playlist_export_all.isChecked())
+        _save_mapper_load_new_after_maps(self._cb_mapper_load_new_after_maps.isChecked())
+        if playlist_export_dir:
+            _save_playlist_export_dir(playlist_export_dir)
+
+        if beatsaber_dir:
+            _save_beatsaber_dir(beatsaber_dir)
+        if self._parent_window is not None:
+            self._parent_window._sync_shared_settings_to_open_windows()
+            self._parent_window._sync_ui_after_theme_change()
+        super().accept()
+
+
+BEATSABER_EXE_NAME = "Beat Saber.exe"
+
+
+def _is_beatsaber_dir(folder: str) -> bool:
+    """指定フォルダが Beat Saber のインストールフォルダか（Beat Saber.exe の有無）を判定する。"""
+    try:
+        return (Path(folder) / BEATSABER_EXE_NAME).is_file()
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _validate_beatsaber_dir(parent: QWidget, folder: str) -> bool:
+    """Beat Saber フォルダとして妥当か検証し、NG なら警告を表示して False を返す。"""
+    if not Path(folder).is_dir():
+        QMessageBox.warning(parent, "Beat Saber Folder", f"Folder does not exist:\n{folder}")
+        return False
+    if not _is_beatsaber_dir(folder):
+        QMessageBox.warning(
+            parent,
+            "Beat Saber Folder",
+            f"{BEATSABER_EXE_NAME} was not found in:\n{folder}\n\n"
+            "Please select the Beat Saber installation folder.",
+        )
+        return False
+    return True
+
+
+def _steam_beatsaber_dirs() -> List[str]:
+    """Steam のライブラリフォルダから Beat Saber のインストール先を探す。"""
+    found: List[str] = []
+    try:
+        import winreg  # type: ignore
+    except Exception:  # noqa: BLE001
+        return found
+
+    steam_path = ""
+    for hive, key in (
+        (winreg.HKEY_CURRENT_USER, r"Software\Valve\Steam"),
+        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Valve\Steam"),
+    ):
+        try:
+            with winreg.OpenKey(hive, key) as k:
+                value = winreg.QueryValueEx(k, "SteamPath" if hive == winreg.HKEY_CURRENT_USER else "InstallPath")[0]
+            if value:
+                steam_path = str(value)
+                break
+        except Exception:  # noqa: BLE001
+            continue
+    if not steam_path:
+        return found
+
+    libraries = [Path(steam_path)]
+    vdf = Path(steam_path) / "steamapps" / "libraryfolders.vdf"
+    try:
+        text = vdf.read_text(encoding="utf-8", errors="ignore")
+        for m in re.finditer(r'"path"\s*"([^"]+)"', text):
+            libraries.append(Path(m.group(1).replace("\\\\", "\\")))
+    except Exception:  # noqa: BLE001
+        pass
+
+    for lib in libraries:
+        candidate = lib / "steamapps" / "common" / "Beat Saber"
+        if _is_beatsaber_dir(str(candidate)):
+            found.append(str(candidate))
+    return found
+
+
+def _bsmanager_beatsaber_dirs() -> List[str]:
+    """BS Manager の設定から各インスタンスのフォルダを探す。"""
+    found: List[str] = []
+    config = Path.home() / "AppData" / "Roaming" / "bs-manager" / "config.json"
+    roots: List[Path] = []
+    try:
+        data = json.loads(config.read_text(encoding="utf-8"))
+        install_folder = data.get("installation-folder")
+        if install_folder:
+            roots.append(Path(str(install_folder)))
+        last = (data.get("last-version-launched") or {}).get("path")
+        if last:
+            found.append(str(Path(str(last))))
+    except Exception:  # noqa: BLE001
+        pass
+    # 設定が読めない場合の既定位置
+    roots.append(Path.home() / "AppData" / "Roaming")
+
+    for root in roots:
+        instances = root / "BSManager" / "BSInstances"
+        try:
+            for entry in sorted(instances.iterdir(), reverse=True):
+                if entry.is_dir():
+                    found.append(str(entry))
+        except Exception:  # noqa: BLE001
+            continue
+    return found
+
+
+def _find_beatsaber_dir_candidates() -> List[str]:
+    """Beat Saber フォルダの候補（Beat Saber.exe が存在するもののみ）を返す。"""
+    candidates: List[str] = []
+    seen = set()
+    for folder in _bsmanager_beatsaber_dirs() + _steam_beatsaber_dirs():
+        key = folder.rstrip("\\/").lower()
+        if key in seen or not _is_beatsaber_dir(folder):
+            continue
+        seen.add(key)
+        candidates.append(folder)
+    return candidates
+
+
+class BeatSaberFolderDialog(QDialog):
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Beat Saber Folder")
+        self.setMinimumWidth(480)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("Beat Saber folder is not configured. Please select it.", self))
+
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        row.addWidget(QLabel("Folder:", self))
+        # 直接入力も可能。検出できた候補はドロップダウンから選択できる。
+        self._dir_combo = QComboBox(self)
+        self._dir_combo.setEditable(True)
+        self._dir_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self._beatsaber_dir_edit = QLineEdit(self)
+        self._dir_combo.setLineEdit(self._beatsaber_dir_edit)
+        self._beatsaber_dir_edit.setPlaceholderText("Enter or select Beat Saber folder...")
+        for candidate in _find_beatsaber_dir_candidates():
+            self._dir_combo.addItem(candidate)
+        self._beatsaber_dir_edit.setText(_load_beatsaber_dir())
+        row.addWidget(self._dir_combo, 1)
+        self._btn_browse = QPushButton("Change...", self)
+        self._btn_browse.clicked.connect(self._browse_beatsaber_dir)
+        row.addWidget(self._btn_browse)
+        layout.addLayout(row)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
+            self,
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _browse_beatsaber_dir(self) -> None:
+        initial_dir = self._beatsaber_dir_edit.text().strip() or str(BASE_DIR)
+        folder = QFileDialog.getExistingDirectory(self, "Select Beat Saber folder", initial_dir)
+        if folder:
+            self._beatsaber_dir_edit.setText(folder)
+
+    def accept(self) -> None:  # type: ignore[override]
+        beatsaber_dir = self._beatsaber_dir_edit.text().strip()
+        if not beatsaber_dir:
+            QMessageBox.warning(self, "Beat Saber Folder", "Beat Saber folder is empty.")
+            return
+        if not _validate_beatsaber_dir(self, beatsaber_dir):
+            return
+        _save_beatsaber_dir(beatsaber_dir)
+        super().accept()
+
+
+class PercentageBarDelegate(QStyledItemDelegate):
+    """パーセンテージ値を持つセルに簡易な横棒グラフを描画するデリゲート。
+
+    gradient_min を指定すると、その値以下は常に「0%扱い」（=赤）とし、
+    そこから max_value に向けてグラデーションさせる。
+
+    テキスト色はダーク/ライト × バー重なりあり/なし の4パターンを個別に指定可能。
+    None を指定するとパレットのデフォルト色をそのまま使用する。
+    """
+
+    def __init__(
+        self,
+        parent: Optional[QWidget] = None,
+        max_value: float = 100.0,
+        gradient_min: float = 0.0,
+        dark_text_on_bar: Optional[str] = "#3333FF",
+        dark_text_off_bar: Optional[str] = "#4499FF",
+        light_text_on_bar: Optional[str] = "#2222FF",
+        light_text_off_bar: Optional[str] = "#111199",
+    ) -> None:
+        """ コンストラクタ。
+        :param parent: 親ウィジェット
+        :param max_value: パーセンテージの最大値（100% に対応する値）
+        :param gradient_min: グラデーションの最小値。この値以下は常に 0% 扱いとする。
+        :param dark_text_on_bar: ダークモード・明るいバー重なり時のテキスト色（None=デフォルト）
+        :param dark_text_off_bar: ダークモード・バーなし/暗いバー時のテキスト色（None=デフォルト）
+        :param light_text_on_bar: ライトモード・明るいバー重なり時のテキスト色（None=デフォルト）
+        :param light_text_off_bar: ライトモード・バーなし/暗いバー時のテキスト色（None=デフォルト）
+        """
+        super().__init__(parent)
+        self._max_value = max_value
+        self._min_value = gradient_min
+        self._dark_text_on_bar = dark_text_on_bar
+        self._dark_text_off_bar = dark_text_off_bar
+        self._light_text_on_bar = light_text_on_bar
+        self._light_text_off_bar = light_text_off_bar
+
+    def _parse_value(self, value_str) -> "Optional[float]":
+        try:
+            return float(str(value_str)) if value_str not in (None, "") else None
+        except ValueError:
+            return None
+
+    def _bar_value(self, index) -> "Optional[float]":
+        """UserRole が設定されている場合はそれをバー値に使用する。なければ DisplayRole を解析。"""
+        user_val = index.data(Qt.ItemDataRole.UserRole)
+        if user_val is not None:
+            try:
+                return float(user_val)
+            except (TypeError, ValueError):
+                pass
+        return self._parse_value(index.data())
+
+    def initStyleOption(self, option, index) -> None:  # type: ignore[override]
+        super().initStyleOption(option, index)
+        value = self._bar_value(index)
+        if value is not None and value >= self._max_value - 1e-9:
+            option.font.setBold(True)
+            # UserRole+1 が True のときは FC 100% だが Clear Rate が 100% 未満 → 🏅
+            use_medal = index.data(Qt.ItemDataRole.UserRole + 1)
+            option.text = option.text + (" 🏅" if use_medal else " 🏆")
+
+    def paint(self, painter, option, index):  # type: ignore[override]
+        """index の値をパーセンテージとして解釈し、横棒グラフを描画する。"""
+        value = self._bar_value(index)
+
+        # 通常描画のみ
+        if value is None or not (self._max_value > 0):
+            return super().paint(painter, option, index)
+
+        # gradient_min 以下は常に 0（赤）とし、それより上だけを 0-1 に正規化
+        if value <= self._min_value:
+            ratio = 0.0
+        else:
+            span = self._max_value - self._min_value
+            if span <= 0:
+                ratio = 0.0
+            else:
+                ratio = (value - self._min_value) / span
+        ratio = max(0.0, min(1.0, ratio))
+
+        painter.save()
+        # rect = option.rect.adjusted(2, 2, -2, -2)
+        rect = option.rect.adjusted(1, 1, -1, -1)
+        bar_width = int(rect.width() * ratio)
+        bar_rect = rect.adjusted(0, 0, bar_width - rect.width(), 0)
+
+        # 0.0 → 赤, 0.5 → 黄, 0.8 → 緑 → 1.0 のグラデーション
+        if ratio <= 0.5:
+            t = ratio / 0.5 if ratio > 0 else 0.0
+            r = 255
+            g = int(255 * t)
+            b = 0
+        elif ratio <= 0.8:
+            t = (ratio - 0.5) / 0.3
+            r = int(255 * (1.0 - t))
+            g = 255
+            b = 0
+        else:
+            t = (ratio - 0.8) / 0.2
+            r = 0
+            g = 255
+            b = int(255 * t/2)
+        color = QColor(r, g, b if ratio > 0.8 else 0, 180)
+
+        painter.fillRect(bar_rect, color)
+        painter.restore()
+
+        # 100% だけは太字で少しだけ強調する
+        is_full = value >= self._max_value - 1e-9
+
+        # バー色の輝度からテキスト色を決定
+        bar_lum = 0.299 * r + 0.587 * g + 0.114 * b
+        # 閾値は30%のバー重なりで切り替える。バーが薄いときはテキストを濃く、バーが濃いときはテキストを薄くする。
+        use_dark_text = ratio >= 0.3 and bar_lum > 140
+        dark = is_dark()
+        text_color_str = (
+            self._dark_text_on_bar if dark else self._light_text_on_bar
+        ) if use_dark_text else (
+            self._dark_text_off_bar if dark else self._light_text_off_bar
+        )
+        if text_color_str is not None:
+            option.palette.setColor(QPalette.ColorRole.Text, QColor(text_color_str))
+
+        super().paint(painter, option, index)
+
+
+class ColumnMaxBarDelegate(QStyledItemDelegate):
+    """列内の最大値を MAX として横棒グラフを描画するデリゲート。
+
+    グラデーションは赤→青。太字・メダル表示は行わない。
+    skip_rows: バーを描画しない行インデックスのセット（max 計算からも除外）。
+    """
+
+    def __init__(self, parent=None, skip_rows: "set[int] | None" = None, skip_last_row: bool = True) -> None:
+        super().__init__(parent)
+        self._skip_rows: set[int] = skip_rows or set()
+        self._skip_last_row = skip_last_row
+
+    def _parse_value(self, text) -> Optional[float]:
+        try:
+            if text in (None, ""):
+                return None
+            return float(str(text).replace(",", ""))
+        except (ValueError, TypeError):
+            return None
+
+    def _col_max(self, index) -> Optional[float]:
+        model = index.model()
+        if model is None:
+            return None
+        col = index.column()
+        last_row = model.rowCount() - 1
+        max_val: Optional[float] = None
+        for row in range(model.rowCount()):
+            if (self._skip_last_row and row == last_row) or row in self._skip_rows:  # Total行・除外行は除外
+                continue
+            v = self._parse_value(model.data(model.index(row, col)))
+            if v is not None and (max_val is None or v > max_val):
+                max_val = v
+        return max_val
+
+    def paint(self, painter, option, index):  # type: ignore[override]
+        # Total行（最終行）または除外行はバーなしで通常描画
+        model = index.model()
+        if model is not None and ((self._skip_last_row and index.row() == model.rowCount() - 1) or index.row() in self._skip_rows):
+            return super().paint(painter, option, index)
+
+        value = self._parse_value(index.data())
+        col_max = self._col_max(index)
+
+        if value is None or col_max is None or col_max <= 0:
+            return super().paint(painter, option, index)
+
+        ratio = max(0.0, min(1.0, value / col_max))
+
+        painter.save()
+        rect = option.rect.adjusted(1, 1, -1, -1)
+        bar_width = int(rect.width() * ratio)
+        bar_rect = rect.adjusted(0, 0, bar_width - rect.width(), 0)
+
+        # # 赤 (ratio=0) → 青 (ratio=1)
+        # r = int(255 * (1.0 - ratio) ) 
+        # g = 160 + int(255 * ratio / 4)
+        # b = int(255 * ratio)
+        # グラデーションはなし
+        r = 0 
+        g = 160
+        b = 255
+        color = QColor(r, g, b, 160)
+
+        painter.fillRect(bar_rect, color)
+        painter.restore()
+
+        super().paint(painter, option, index)
+
+
+class _ClickableColHover(QObject):
+    """テーブルの特定列にホバーカーソルとグロー演出を追加するヘルパー。
+
+    inner デリゲートをラップした新しいデリゲートを列に設定し、
+    ビューポートのイベントフィルタでカーソル変更とセル再描画を管理する。
+    """
+
+    def __init__(self, table: QTableWidget, col: int, inner: QStyledItemDelegate) -> None:
+        super().__init__(table)
+        self._table = table
+        self._col = col
+        self._hover_row: int = -1
+
+        vp = table.viewport()
+        vp.setMouseTracking(True)
+        vp.installEventFilter(self)
+
+        hover_ref = self
+
+        class _HoverDelegate(QStyledItemDelegate):
+            def initStyleOption(self, option, index) -> None:  # type: ignore[override]
+                inner.initStyleOption(option, index)
+
+            def sizeHint(self, option, index):  # type: ignore[override]
+                return inner.sizeHint(option, index)
+
+            def paint(self, painter, option, index) -> None:  # type: ignore[override]
+                inner.paint(painter, option, index)
+                if index.row() == hover_ref._hover_row:
+                    painter.save()
+                    if is_dark():
+                        glow = QColor(255, 255, 255, 55)
+                        border = QColor(100, 180, 255, 190)
+                    else:
+                        glow = QColor(0, 0, 0, 28)
+                        border = QColor(60, 120, 220, 160)
+                    painter.fillRect(option.rect, glow)
+                    painter.setPen(QPen(border, 1))
+                    painter.drawRect(option.rect.adjusted(0, 0, -1, -1))
+                    painter.restore()
+
+        self._delegate = _HoverDelegate(table)
+        table.setItemDelegateForColumn(col, self._delegate)
+
+    def eventFilter(self, obj, event) -> bool:  # type: ignore[override]
+        try:
+            viewport = self._table.viewport()
+        except RuntimeError:
+            # 基となる QTableWidget が既に破棄されている場合は何もしない。
+            return False
+        if obj is viewport:
+            etype = event.type()
+            if etype == QEvent.Type.MouseMove:
+                pos = event.position().toPoint()
+                idx = self._table.indexAt(pos)
+                new_row = idx.row() if (idx.isValid() and idx.column() == self._col) else -1
+                if new_row != self._hover_row:
+                    old = self._hover_row
+                    self._hover_row = new_row
+                    self._repaint(old)
+                    self._repaint(new_row)
+                self._table.viewport().setCursor(
+                    Qt.CursorShape.PointingHandCursor if new_row >= 0 else Qt.CursorShape.ArrowCursor
+                )
+            elif etype == QEvent.Type.Leave:
+                old = self._hover_row
+                self._hover_row = -1
+                self._table.viewport().unsetCursor()
+                self._repaint(old)
+        return False
+
+    def _repaint(self, row: int) -> None:
+        if row < 0:
+            return
+        try:
+            model = self._table.model()
+            if model is None:
+                return
+            rect = self._table.visualRect(model.index(row, self._col))
+            if rect.isValid():
+                self._table.viewport().update(rect)
+        except RuntimeError:
+            # 基となる QTableWidget が既に破棄されている場合は無視する。
+            return
+
+
+class _AvatarFetchSignals(QObject):
+    """非同期アバター取得の完了シグナル。"""
+    fetched = Signal(str, bytes, int)   # service ("ss" | "bl"), image_bytes, 要求の番号
+
+
+class _TitleIconSignals(QObject):
+    """称号アイコンの非同期ダウンロードの完了シグナル。"""
+    downloaded = Signal(str)   # icon_url
+
+
+class _RemoteImageFetchSignals(QObject):
+    """非同期画像取得の完了シグナル。"""
+    fetched = Signal(int, str, bytes)
+
+
+class RemotePixmapLabel(QLabel):
+    """URL から画像を非同期取得して表示する小さな QLabel。"""
+
+    _pixmap_cache: Dict[str, QPixmap] = {}
+
+    def __init__(self, size: int = 18, parent=None) -> None:
+        super().__init__(parent)
+        self._size = size
+        self._request_id = 0
+        self._signals = _RemoteImageFetchSignals()
+        self._signals.fetched.connect(self._on_fetched)
+        self.setFixedSize(size, size)
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+    def set_image_url(self, url: Optional[str]) -> None:
+        self._request_id += 1
+        request_id = self._request_id
+        if not url:
+            self.setPixmap(QPixmap())
+            return
+        cached = self._pixmap_cache.get(url)
+        if cached is not None:
+            self.setPixmap(cached)
+            return
+        self.setPixmap(QPixmap())
+        threading.Thread(target=self._fetch, args=(request_id, url), daemon=True).start()
+
+    def _fetch(self, request_id: int, url: str) -> None:
+        try:
+            # 直接 requests.get すると User-Agent もレート制御も付かないため、
+            # 共有セッション（http_client）経由で投げる。
+            response = _get_shared_session().get(url, timeout=8, headers={"Accept": "*/*"})
+            response.raise_for_status()
+            self._signals.fetched.emit(request_id, url, response.content)
+        except Exception:
+            pass
+
+    def _on_fetched(self, request_id: int, url: str, data: bytes) -> None:
+        if request_id != self._request_id:
+            return
+        pixmap = QPixmap()
+        if not pixmap.loadFromData(data):
+            return
+        pixmap = pixmap.scaled(
+            self._size,
+            self._size,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        self._pixmap_cache[url] = pixmap
+        self.setPixmap(pixmap)
+
+
+class _EventsFetchSignals(QObject):
+    """イベント情報の非同期取得完了シグナル。"""
+    fetched = Signal(object, object)  # (accsaber_event, beatleader_event) — 各 dict | None
+
+
+class EventsPanel(QWidget):
+    """AccSaber / BeatLeader の現在のイベントを表示するパネル。"""
+
+    def __init__(self, parent=None, show_title: bool = True) -> None:
+        super().__init__(parent)
+        self._signals = _EventsFetchSignals()
+        self._signals.fetched.connect(self._on_fetched)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(2, 2, 2, 2)
+        layout.setSpacing(2)
+
+        if show_title:
+            _title = QLabel("Events", self)
+            _title.setStyleSheet("font-weight: bold; font-size: 11px; padding: 0px 2px;")
+            _title.setFixedHeight(20)
+            layout.addWidget(_title)
+
+        resources_dir = RESOURCES_DIR
+        self._rows: list[tuple[QLabel, RemotePixmapLabel, QLabel]] = []
+        for logo_name in ("asssaber_logo.webp", "beatleader_logo.webp"):
+            row = QHBoxLayout()
+            row.setContentsMargins(2, 0, 2, 0)
+            row.setSpacing(6)
+            svc_icon = QLabel(self)
+            svc_icon.setPixmap(QIcon(str(resources_dir / logo_name)).pixmap(16, 16))
+            svc_icon.setFixedSize(16, 16)
+            ev_icon = RemotePixmapLabel(24, self)
+            text = QLabel("Loading...", self)
+            text.setStyleSheet("font-size: 11px;")
+            text.setTextFormat(Qt.TextFormat.RichText)
+            text.setOpenExternalLinks(True)
+            text.setWordWrap(True)
+            row.addWidget(svc_icon)
+            row.addWidget(ev_icon)
+            row.addWidget(text, 1)
+            layout.addLayout(row)
+            self._rows.append((svc_icon, ev_icon, text))
+        layout.addStretch(1)
+
+        threading.Thread(target=self._fetch, daemon=True).start()
+
+    # --- 取得 ---
+
+    def _fetch(self) -> None:
+        # User-Agent とホスト単位のレート制御を効かせるため共有セッションを使う
+        _requests = _get_shared_session()
+
+        acc_event: Optional[dict] = None
+        bl_event: Optional[dict] = None
+        try:
+            resp = _requests.get("https://api.accsaberreloaded.com/v1/events", timeout=10)
+            resp.raise_for_status()
+            events = resp.json()
+            if isinstance(events, list) and events:
+                # active / live を優先し、なければ先頭
+                acc_event = next((e for e in events if e.get("active") or e.get("live")), events[0])
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            resp = _requests.get("https://api.beatleader.xyz/events?page=1&count=1", timeout=10)
+            resp.raise_for_status()
+            data = resp.json().get("data") or []
+            if data:
+                bl_event = data[0]
+        except Exception:  # noqa: BLE001
+            pass
+        self._signals.fetched.emit(acc_event, bl_event)
+
+    # --- 表示 ---
+
+    @staticmethod
+    def _fmt_iso_date(iso: Optional[str]) -> str:
+        if not iso:
+            return "?"
+        try:
+            return (
+                datetime.fromisoformat(str(iso).rstrip("Z"))
+                .replace(tzinfo=timezone.utc)
+                .astimezone()
+                .strftime("%Y-%m-%d")
+            )
+        except Exception:  # noqa: BLE001
+            return str(iso)[:10]
+
+    def _on_fetched(self, acc_event: Optional[dict], bl_event: Optional[dict]) -> None:
+        _link_color = "#5aaaee" if is_dark() else "#0066cc"
+        _link_style = f"color:{_link_color}; text-decoration:none; font-weight:bold;"
+        _dim = "color: gray;"
+
+        # AccSaber
+        _, acc_icon, acc_text = self._rows[0]
+        if acc_event is None:
+            acc_text.setText('<span style="color:gray;">No event info</span>')
+        else:
+            title = acc_event.get("title") or acc_event.get("slug") or "Event"
+            start = self._fmt_iso_date(acc_event.get("startsAt"))
+            end = self._fmt_iso_date(acc_event.get("endsAt"))
+            _slug = acc_event.get("slug") or ""
+            _acc_url = (
+                f"https://www.accsaber.com/news?event={_slug}"
+                if _slug else "https://www.accsaber.com/news"
+            )
+            parts = [f'<a href="{_acc_url}" style="{_link_style}">{title}</a>']
+            status = "LIVE" if acc_event.get("live") or acc_event.get("active") else "Ended"
+            parts.append(f'<span style="{_dim}">{start} 〜 {end} ({status})</span>')
+            week = acc_event.get("currentWeek")
+            total_weeks = acc_event.get("totalWeeks")
+            if week is not None and total_weeks:
+                parts.append(f"Week {week}/{total_weeks}")
+            acc_text.setText("<br>".join(parts))
+            acc_icon.set_image_url(acc_event.get("iconUrl") or None)
+
+        # BeatLeader
+        _, bl_icon, bl_text = self._rows[1]
+        if bl_event is None:
+            bl_text.setText('<span style="color:gray;">No event info</span>')
+        else:
+            title = bl_event.get("name") or "Event"
+            end_ts = bl_event.get("endDate")
+            end_str = "?"
+            ongoing = False
+            if end_ts is not None:
+                try:
+                    end_dt = datetime.fromtimestamp(int(end_ts), tz=timezone.utc)
+                    end_str = end_dt.astimezone().strftime("%Y-%m-%d")
+                    ongoing = end_dt > datetime.now(timezone.utc)
+                except (TypeError, ValueError):
+                    pass
+            ev_id = bl_event.get("id")
+            url = f"https://beatleader.com/event/{ev_id}" if ev_id is not None else "https://beatleader.com/events"
+            status = f"〜 {end_str} (LIVE)" if ongoing else f"Ended {end_str}"
+            bl_text.setText(
+                f'<a href="{url}" style="{_link_style}">{title}</a><br>'
+                f'<span style="{_dim}">{status}</span>'
+            )
+            bl_icon.set_image_url(bl_event.get("image") or None)
+
+
+class PlayerAvatarWidget(QLabel):
+    """プレイヤーアバターを表示し、クリックで SS/BL を切り替えるウィジェット。"""
+
+    SIZE = 48
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setFixedSize(self.SIZE, self.SIZE)
+        self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.setToolTip("Click to toggle SS / BL avatar")
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setScaledContents(True)
+
+        self._ss_pixmap: Optional[QPixmap] = None
+        self._bl_pixmap: Optional[QPixmap] = None
+        self._showing: str = "ss"   # "ss" or "bl"
+        # 要求の番号。プレイヤーを素早く切り替えたとき、前のプレイヤーの遅れた応答を捨てるため。
+        self._request_gen = 0
+        self._current_ids: tuple = (None, None)
+        self._on_toggled: Optional[Callable[[str], None]] = None
+        self._signals = _AvatarFetchSignals()
+        self._signals.fetched.connect(self._on_fetched)
+        self._show_placeholder()
+
+    def set_toggle_callback(self, callback: "Optional[Callable[[str], None]]") -> None:
+        """SS/BL 切替時に呼ばれるコールバックを設定する。"""
+        self._on_toggled = callback
+
+    # 取得したアバター画像（アプリを開いている間だけ覚える）。スナップショットを切り替えるたびに API を叩かないため。
+    _image_cache: "dict[tuple[str, str], bytes]" = {}
+
+    def set_ids(self, ss_id: Optional[str], bl_id: Optional[str], preferred: str = "ss") -> None:
+        """SS/BL ID を受け取り、アバターを非同期で取得する。"""
+        ids = (ss_id or None, bl_id or None)
+        if ids == self._current_ids:
+            # 同じプレイヤーのまま（スナップショットやテーマの切り替え）なら取り直さない（取得中も含む）
+            return
+        self._current_ids = ids
+        self._request_gen += 1
+        gen = self._request_gen
+        self._ss_pixmap = None
+        self._bl_pixmap = None
+        self._showing = preferred if preferred in ("ss", "bl") else "ss"
+        self._show_placeholder()
+        for service, player_id in (("ss", ss_id), ("bl", bl_id)):
+            if not player_id:
+                continue
+            cached = PlayerAvatarWidget._image_cache.get((service, str(player_id)))
+            if cached is not None:
+                self._on_fetched(service, cached, gen)
+                continue
+            threading.Thread(target=self._fetch, args=(service, player_id, gen), daemon=True).start()
+
+    def _fetch(self, service: str, player_id: str, gen: int) -> None:
+        try:
+            # User-Agent とホスト単位のレート制御を効かせるため共有セッションを使う
+            _requests = _get_shared_session()
+            if service == "ss":
+                url = f"https://scoresaber.com/api/player/{player_id}/basic"
+                r = _requests.get(url, timeout=8)
+                r.raise_for_status()
+                img_url = r.json().get("profilePicture", "")
+            else:
+                url = f"https://api.beatleader.xyz/player/{player_id}"
+                r = _requests.get(url, timeout=8)
+                r.raise_for_status()
+                img_url = r.json().get("avatar", "")
+            if not img_url:
+                return
+            img_r = _requests.get(img_url, timeout=8, headers={"Accept": "*/*"})
+            img_r.raise_for_status()
+            PlayerAvatarWidget._image_cache[(service, str(player_id))] = img_r.content
+            self._signals.fetched.emit(service, img_r.content, gen)
+        except Exception:
+            # 失敗したら、次に同じプレイヤーで呼ばれたときに取り直せるようにする（オフライン起動など）
+            if gen == self._request_gen:
+                self._current_ids = (None, None)
+
+    def _on_fetched(self, service: str, data: bytes, gen: int) -> None:
+        if gen != self._request_gen:
+            # 前のプレイヤーの応答が遅れて届いた
+            return
+        px = QPixmap()
+        if not px.loadFromData(data):
+            return
+        px = px.scaled(self.SIZE, self.SIZE, Qt.AspectRatioMode.KeepAspectRatio,
+                       Qt.TransformationMode.SmoothTransformation)
+        if service == "ss":
+            self._ss_pixmap = px
+        else:
+            self._bl_pixmap = px
+        # 現在表示中のサービスが届いたら即更新
+        if service == self._showing:
+            self.setPixmap(px)
+        # SS がまだなければ取得できた方を表示
+        elif self._showing == "ss" and self._ss_pixmap is None:
+            self.setPixmap(px)
+
+    def _show_placeholder(self) -> None:
+        self.setPixmap(QPixmap())
+        self.setText("👤")
+
+    def mousePressEvent(self, event) -> None:
+        if self._showing == "ss":
+            self._showing = "bl"
+            if self._bl_pixmap:
+                self.setPixmap(self._bl_pixmap)
+                self.setText("")
+            else:
+                self.setText("BL")
+        else:
+            self._showing = "ss"
+            if self._ss_pixmap:
+                self.setPixmap(self._ss_pixmap)
+                self.setText("")
+            else:
+                self.setText("SS")
+        if self._on_toggled:
+            self._on_toggled(self._showing)
+        super().mousePressEvent(event)
+
+
+class PlayerWindow(QMainWindow):
+    """steamId 単位のランク情報とスナップショットを表示する専用画面。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setWindowTitle("My Beat Saber Stats β")
+
+        # --- UI 状態保存用変数 ---
+        self._row_height: int = 24
+        self._saved_main_splitter_sizes: list[int] = [578, 610]
+        self._saved_bottom_splitter_sizes: list[int] = [578, 610]
+        self._saved_mid_splitter_sizes: list[int] = [528, 165]
+        self._default_window_size = (1211, 770)
+        self.resize(*self._default_window_size)
+
+        central = QWidget(self)
+        layout = QVBoxLayout(central)
+
+        # --- 上部: アバター + [Player行 / Snapshot行] + ボタン群 ---
+        # プレイヤーアバターウィジェット（クリックで SS/BL 切替）
+        self._avatar_widget = PlayerAvatarWidget(self)
+        self._avatar_widget.set_toggle_callback(self._save_avatar_showing)
+
+        # Player 行 / Snapshot 行を縦に積む
+        _rows_widget = QWidget(self)
+        _rows_layout = QVBoxLayout(_rows_widget)
+        _rows_layout.setContentsMargins(0, 0, 0, 0)
+        _rows_layout.setSpacing(2)
+
+        # --- 上部: SteamID 選択 & 操作ボタン ---
+        top_row = QHBoxLayout()
+        top_row.setSpacing(2)  # ライトモードの初期間隔
+        self._top_row = top_row
+        _header_control_h = 22
+
+        # SteamID 選択コンボボックス
+        _label_width = 55
+        _player_label = QLabel("Player:")
+        _player_label.setFixedWidth(_label_width)
+        top_row.addWidget(_player_label)
+        self.player_combo = QComboBox(self)
+        self.player_combo.setFixedWidth(250)
+        self.player_combo.setFixedHeight(_header_control_h)
+        top_row.addWidget(self.player_combo)
+
+        # スナップショット取得ボタン
+        self.snapshot_button = QPushButton("📷 Snapshot")
+        self.snapshot_button.clicked.connect(self._take_snapshot_for_current_player)
+        self.snapshot_button.setFixedHeight(_header_control_h)
+        self.snapshot_button.setFixedWidth(86)
+        self.snapshot_button.setToolTip("プレイヤーのスナップショットを取得します")
+        top_row.addWidget(self.snapshot_button)
+        
+
+        top_row.addSpacing(12) 
+
+        # スナップショット比較 / グラフ表示
+        self.compare_button = QPushButton("🔍 Compare")
+        self.compare_button.clicked.connect(self.open_compare)
+        self.compare_button.setFixedHeight(_header_control_h)
+        self.compare_button.setToolTip("プレイヤーのスナップショットを比較します")
+        top_row.addWidget(self.compare_button)
+
+        self.graph_button = QPushButton("📈 Graph")
+        self.graph_button.clicked.connect(self.open_graph)
+        self.graph_button.setFixedHeight(_header_control_h)
+        self.graph_button.setToolTip("プレイヤーのグラフを表示します")
+        top_row.addWidget(self.graph_button)
+
+        self.playlist_button = QPushButton("📋 Playlist")
+        self.playlist_button.clicked.connect(self.open_playlist)
+        self.playlist_button.setFixedHeight(_header_control_h)
+        self.playlist_button.setToolTip("プレイヤーのプレイリストを表示します")
+        top_row.addWidget(self.playlist_button)
+
+        self.maps_button = QPushButton("🗺 Maps")
+        self.maps_button.clicked.connect(self.open_maps)
+        self.maps_button.setFixedHeight(_header_control_h)
+        self.maps_button.setToolTip("プレイヤーの未プレイ譜面マップ一覧を表示します")
+        top_row.addWidget(self.maps_button)
+
+        self.settings_button = QPushButton("⚙ Settings")
+        self.settings_button.clicked.connect(self.open_settings)
+        self.settings_button.setFixedHeight(_header_control_h)
+        self.settings_button.setToolTip("アプリ設定を開きます")
+        top_row.addWidget(self.settings_button)
+
+        top_row.addStretch(1)
+
+        _initial_dark = is_dark()
+        self.dark_mode_button = QPushButton(_theme_button_label())
+        self.dark_mode_button.setCheckable(True)
+        self.dark_mode_button.setChecked(_initial_dark)
+        self.dark_mode_button.clicked.connect(self._toggle_dark_mode)
+        self.dark_mode_button.setFixedWidth(32)
+        self.dark_mode_button.setFixedHeight(_header_control_h)
+        if _initial_dark:
+            self.dark_mode_button.setToolTip(f"ライトモードに切り替えます")
+        else:
+            self.dark_mode_button.setToolTip(f"ダークモードに切り替えます")
+        top_row.addWidget(self.dark_mode_button)
+
+        self.btn_row_height_up = QPushButton("▲")
+        self.btn_row_height_up.setFixedWidth(28)
+        self.btn_row_height_up.setFixedHeight(_header_control_h)
+        self.btn_row_height_up.setToolTip("行の高さを増やす")
+        top_row.addWidget(self.btn_row_height_up)
+
+        self.btn_row_height_dn = QPushButton("▼")
+        self.btn_row_height_dn.setFixedWidth(28)
+        self.btn_row_height_dn.setFixedHeight(_header_control_h)
+        self.btn_row_height_dn.setToolTip("行の高さを減らす")
+        top_row.addWidget(self.btn_row_height_dn)
+
+        self.btn_default_layout = QPushButton("Default Layout")
+        self.btn_default_layout.setFixedHeight(_header_control_h)
+        self.btn_default_layout.setToolTip("レイアウトをデフォルトにリセットする")
+        top_row.addWidget(self.btn_default_layout)
+
+        self.update_button = QPushButton("🔄 Update")
+        self.update_button.setFixedHeight(_header_control_h)
+        top_row.addWidget(self.update_button)
+
+        _rows_layout.addLayout(top_row)
+
+        # --- スナップショット選択行 ---
+        snapshot_row = QHBoxLayout()
+        snapshot_row.setSpacing(2)
+        _snapshot_label = QLabel("Snapshot:")
+        _snapshot_label.setFixedWidth(_label_width)
+        snapshot_row.addWidget(_snapshot_label)
+        self.snapshot_combo = QComboBox(self)
+        self.snapshot_combo.setFixedWidth(250)
+        self.snapshot_combo.setFixedHeight(_header_control_h)
+        snapshot_row.addWidget(self.snapshot_combo)
+        
+        self.snapshot_latest_button = QPushButton("Latest")
+        self.snapshot_latest_button.setFixedWidth(86)
+        self.snapshot_latest_button.setFixedHeight(_header_control_h)
+        self.snapshot_latest_button.clicked.connect(lambda: self.snapshot_combo.setCurrentIndex(0))
+        self.snapshot_latest_button.setToolTip("最新のスナップショットを選択します")
+        snapshot_row.addWidget(self.snapshot_latest_button)
+
+        snapshot_row.addSpacing(12)
+
+        self._header_buttons = [
+            self.snapshot_button,
+            self.compare_button,
+            self.graph_button,
+            self.playlist_button,
+            self.maps_button,
+            self.settings_button,
+            self.dark_mode_button,
+            self.btn_row_height_up,
+            self.btn_row_height_dn,
+            self.btn_default_layout,
+            self.update_button,
+            self.snapshot_latest_button,
+        ]
+        self._header_combos = [self.player_combo, self.snapshot_combo]
+        self._apply_header_control_style()
+
+        _ver = get_current_version()
+        self._ver_label = QLabel(f"version：v{_ver}" if _ver else "", self)
+        _ver_color = "#cccccc" if is_dark() else "black"
+        self._ver_label.setStyleSheet(f"font-size: 12px; color: {_ver_color}; padding-right: 4px;")
+        snapshot_row.addStretch(1)
+
+        snapshot_row.addSpacing(96)  # ダミースペースで右端のボタン群とバージョン表示を分離
+        snapshot_row.addWidget(self._ver_label)
+        _rows_layout.addLayout(snapshot_row)
+
+        # アバター + [Player行 / Snapshot行] を横並びにしてレイアウトに追加
+        _header_row = QHBoxLayout()
+        _header_row.setSpacing(6)
+        _header_row.setContentsMargins(0, 0, 0, 0)
+        _header_row.addWidget(self._avatar_widget)
+        _header_row.addSpacing(8)
+        _header_row.addWidget(_rows_widget, 1)
+        layout.addLayout(_header_row)
+
+        # キャッシュ情報ラベル（下部エリアに配置）
+        self._ss_cache_label = QLabel("ScoreSaber scores: -", self)
+        self._bl_cache_label = QLabel("BeatLeader scores: -", self)
+        self._bl_prestige_icon_label = RemotePixmapLabel(18, self)
+        self._bl_prestige_icon_label.setToolTip("BeatLeader Prestige")
+        self._bl_prestige_text_label = QLabel("", self)
+        self._bl_prestige_text_label.setStyleSheet("font-size: 11px; font-weight: 600; color: #DF8511; padding: 0px 2px;")
+        self._bl_prestige_text_label.setTextFormat(Qt.TextFormat.RichText)
+
+        # --- 中央〜下部: 2 列レイアウト (SS パネル | BL パネル) + 下部 AccSaber ---
+
+        # SS / BL プレイヤー情報テーブル (2行×6列、star_table のヘッダ上に固定配置)
+        # 列: [col0=ID(icon+bold) | col1=空 | col2="PP" | col3=PP値 | col4="Rank" | col5=Rank値]
+        #       [col0="Name"         | col1=Name値 | col2="Avg ACC" | col3=Avg値 | col4="Total/Ranked" | col5=値]
+        def _make_info_table() -> QTableWidget:
+            tbl = QTableWidget(0, 6, self)   # 先に0行で作成してから行を追加する
+            tbl.verticalHeader().setDefaultSectionSize(22)
+            tbl.verticalHeader().setMinimumSectionSize(0)
+            tbl.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
+            tbl.verticalHeader().setVisible(False)
+            tbl.horizontalHeader().setVisible(False)
+            tbl.setStyleSheet(table_stylesheet())
+            tbl.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+            tbl.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            tbl.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            hdr = tbl.horizontalHeader()
+            hdr.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+            hdr.setStretchLastSection(True)
+            tbl.setRowCount(2)              # デフォルト行高18px が適用された状態で2行追加
+            for _r in range(2):
+                tbl.setRowHeight(_r, 22)    # 明示的に行高を固定
+            tbl.setFixedHeight(2 * 22 + tbl.frameWidth() * 2 + 2)  # frame + grid分を加算
+            return tbl
+
+        self.ss_info_table = _make_info_table()
+        self.bl_info_table = _make_info_table()
+
+        # AccSaber 用の指標テーブル
+        self.acc_rl_table = QTableWidget(0, 6, self)
+        self.acc_rl_table.setStyleSheet(table_stylesheet())
+        self.acc_rl_table.verticalHeader().setDefaultSectionSize(14)
+        self.acc_rl_table.verticalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.acc_rl_table.verticalHeader().setMinimumSectionSize(0)
+        self.acc_rl_table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
+        self.acc_rl_table.setHorizontalHeaderLabels([
+            "Metric",
+            "AP",
+            "Rank",
+            "Play Count",
+            "Avg Acc",
+            "Skill Level",
+        ])
+
+        # SS ★別クリア統計テーブル
+        # SS(スローソング) も未クリア扱いとして別カラムで表示するため、NF/SS の 2 列を用意する。
+        self.star_table = QTableWidget(0, 12, self)
+        self.star_table.verticalHeader().setDefaultSectionSize(14)  # 行の高さを少し詰める
+        self.star_table.setStyleSheet(table_stylesheet() + "\nQTableWidget::item { padding: 0px; margin: 0px; }")
+        self.star_table.verticalHeader().setMinimumSectionSize(0)
+        self.star_table.setHorizontalHeaderLabels([
+            "★",
+            "Maps",
+            "Clears",
+            "Clear Rate (%) ",
+            "FC",
+            "FC Rate (%) ",
+            "Avg ACC (%) ",
+            "NF",
+            "SS",
+            "NA",
+            "PP",
+            "SPP",
+        ])
+
+        # BL ★別クリア統計テーブル
+        self.bl_star_table = QTableWidget(0, 12, self)
+        self.bl_star_table.verticalHeader().setDefaultSectionSize(14)  # 行の高さを少し詰める
+        self.bl_star_table.setStyleSheet(table_stylesheet() + "\nQTableWidget::item { padding: 0px; margin: 0px; }")
+        self.bl_star_table.setHorizontalHeaderLabels([
+            "★",
+            "Maps",
+            "Clears",
+            "Clear Rate (%) ",
+            "FC",
+            "FC Rate (%) ",
+            "Avg ACC (%) ",
+            "NF",
+            "SS",
+            "NA",
+            "PP",
+            "SPP",
+        ])
+
+        # 列幅は内容に合わせて自動調整し、最後の列がレイアウト都合で
+        # 不自然に広がらないように stretchLastSection は無効にする
+        for table in (self.acc_rl_table, self.star_table, self.bl_star_table):
+            header = table.horizontalHeader()
+            header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+            header.setStretchLastSection(False)
+            table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+
+        # AccSaber テーブルはカラムが少ないため最小幅を広めに取る
+        self.acc_rl_table.horizontalHeader().setMinimumSectionSize(80)
+
+        # サービスごとのアイコンをヘッダに設定
+        resources_dir = RESOURCES_DIR
+        icon_scoresaber = QIcon(str(resources_dir / "scoresaber_logo.svg"))
+        icon_beatleader = QIcon(str(resources_dir / "beatleader_logo.webp"))
+        icon_accsaber = QIcon(str(resources_dir / "asssaber_logo.webp"))
+        # _update_view から参照できるようインスタンス属性として保存
+        self._icon_scoresaber = icon_scoresaber
+        self._icon_beatleader = icon_beatleader
+
+        # AccSaber テーブル: Metric列(col 0)にアイコンのみ表示、行番号非表示
+        _rl_metric_item = QTableWidgetItem("")
+        _rl_metric_item.setIcon(icon_accsaber)
+        _rl_metric_item.setToolTip("AccSaber")
+        self.acc_rl_table.setHorizontalHeaderItem(0, _rl_metric_item)
+        self.acc_rl_table.verticalHeader().setVisible(False)
+
+        # ★テーブル: 先頭列ヘッダにサービスアイコン＋★を表示
+        ss_star_header = self.star_table.horizontalHeaderItem(0) or QTableWidgetItem("★")
+        ss_star_header.setIcon(icon_scoresaber)
+        ss_star_header.setToolTip("ScoreSaber")
+        self.star_table.setHorizontalHeaderItem(0, ss_star_header)
+
+        bl_star_header = self.bl_star_table.horizontalHeaderItem(0) or QTableWidgetItem("★")
+        bl_star_header.setIcon(icon_beatleader)
+        bl_star_header.setToolTip("BeatLeader")
+        self.bl_star_table.setHorizontalHeaderItem(0, bl_star_header)
+
+        # ★テーブルは行番号(No.1〜)が紛らわしいので非表示にする
+        self.star_table.verticalHeader().setVisible(False)
+        self.bl_star_table.verticalHeader().setVisible(False)
+
+        # AccSaber Play Count 列 (col 3) にバーを表示するデリゲート（ホバー演出付き）
+        _ClickableColHover(self.acc_rl_table, 3, AccPlayCountBarDelegate(self))
+        # AccSaber Avg Acc 列 (col 4): 70〜100% グラデーション
+        self.acc_rl_table.setItemDelegateForColumn(4, PercentageBarDelegate(self, max_value=100.0, gradient_min=70.0))
+        # AccSaber Skill Level 列 (col 5): Play Count と同じカテゴリ色バー（MAX 100）
+        self.acc_rl_table.setItemDelegateForColumn(5, AccPlayCountBarDelegate(self))
+
+        # パーセンテージ列に横棒グラフを表示するデリゲートを適用
+        # Clear Rate 用: 0〜100% で赤→黄→緑グラデーション
+        perc_clear = PercentageBarDelegate(self, max_value=100.0, gradient_min=0.0)
+        # Avg ACC 用: 70% 以下は常に赤、それ以上を 70〜100% の範囲でグラデーション
+        perc_acc = PercentageBarDelegate(self, max_value=100.0, gradient_min=70.0)
+
+        # ScoreSaber: Clears/FC はリンクのみ(バーなし)、Clear Rate/FC Rate はバー付き、Avg ACC
+        _plain = QStyledItemDelegate(self)
+        _ClickableColHover(self.star_table, 1, _plain)
+        _ClickableColHover(self.star_table, 2, _plain)
+        _ClickableColHover(self.star_table, 3, perc_clear)
+        _ClickableColHover(self.star_table, 4, _plain)
+        _ClickableColHover(self.star_table, 5, perc_clear)
+        _ClickableColHover(self.star_table, 7, _plain)
+        self.star_table.setItemDelegateForColumn(6, perc_acc)
+        # BeatLeader: Clears/FC はリンクのみ(バーなし)、Clear Rate/FC Rate はバー付き、Avg ACC
+        _ClickableColHover(self.bl_star_table, 1, _plain)
+        _ClickableColHover(self.bl_star_table, 2, _plain)
+        _ClickableColHover(self.bl_star_table, 3, perc_clear)
+        _ClickableColHover(self.bl_star_table, 4, _plain)
+        _ClickableColHover(self.bl_star_table, 5, perc_clear)
+        _ClickableColHover(self.bl_star_table, 7, _plain)
+        self.bl_star_table.setItemDelegateForColumn(6, perc_acc)
+        # PP 列はデリゲート対象のため、列番号が 9→10 にシフトしたことに合わせて後で上書き
+
+        # ★テーブルの列をドラッグ&ドロップで並べ替え可能にする
+        self.star_table.horizontalHeader().setSectionsMovable(True)
+        self.bl_star_table.horizontalHeader().setSectionsMovable(True)
+
+        # PP 列 (col 10): 列内最大値を MAX として赤→青グラデーションバーを表示（ホバー演出付き）
+        perc_pp = ColumnMaxBarDelegate(self)
+        _ClickableColHover(self.star_table, 10, perc_pp)
+        _ClickableColHover(self.bl_star_table, 10, perc_pp)
+
+        # AccSaber AP 列 (col 1) にホバー演出を追加
+        _ClickableColHover(self.acc_rl_table, 1, QStyledItemDelegate(self))
+
+        # BL Avg ACC 列の L/R トグル変数
+        self._bl_acc_show_lr: bool = False
+        self._current_bl_stats: list = []
+        self.bl_star_table.cellClicked.connect(self._on_bl_acc_cell_clicked)
+        self.bl_star_table.horizontalHeader().sectionClicked.connect(
+            lambda col: self._on_bl_acc_cell_clicked(0, col)
+        )
+
+        # Stats → Playlist 連携: Maps / Clears / Clear Rate / FC / FC Rate / NF / PP / AP クリックでプレイリスト画面を開く
+        self.star_table.cellClicked.connect(self._on_ss_maps_clicked)
+        self.star_table.cellClicked.connect(self._on_ss_clears_clicked)
+        self.star_table.cellClicked.connect(self._on_ss_clear_rate_clicked)
+        self.star_table.cellClicked.connect(self._on_ss_fc_clicked)
+        self.star_table.cellClicked.connect(self._on_ss_fc_rate_clicked)
+        self.star_table.cellClicked.connect(self._on_ss_nf_clicked)
+        self.star_table.cellClicked.connect(self._on_ss_pp_clicked)
+        self.bl_star_table.cellClicked.connect(self._on_bl_maps_clicked)
+        self.bl_star_table.cellClicked.connect(self._on_bl_clears_clicked)
+        self.bl_star_table.cellClicked.connect(self._on_bl_clear_rate_clicked)
+        self.bl_star_table.cellClicked.connect(self._on_bl_fc_clicked)
+        self.bl_star_table.cellClicked.connect(self._on_bl_fc_rate_clicked)
+        self.bl_star_table.cellClicked.connect(self._on_bl_nf_clicked)
+        self.bl_star_table.cellClicked.connect(self._on_bl_pp_clicked)
+        self.acc_rl_table.cellClicked.connect(self._on_acc_rl_play_count_clicked)
+        self.acc_rl_table.cellClicked.connect(self._on_acc_rl_ap_clicked)
+
+        # --- SS パネル (左列): [アイコン+IDヘッダ] + [情報テーブル(2行6列)] + [★テーブル] ---
+        self._ss_id_label = QLabel("", self)
+        self._ss_id_label.setStyleSheet("font-size: 13px; font-weight: bold; padding: 2px 4px;")
+        self._ss_id_label.setOpenExternalLinks(True)
+        _ss_icon_label = QLabel(self)
+        _ss_icon_label.setPixmap(icon_scoresaber.pixmap(16, 16))
+        _ss_hdr_row = QHBoxLayout()
+        _ss_hdr_row.setSpacing(4)
+        _ss_hdr_row.setContentsMargins(2, 2, 2, 2)
+        _ss_hdr_row.addWidget(_ss_icon_label)
+        _ss_hdr_row.addWidget(self._ss_id_label)
+        _ss_hdr_row.addWidget(self._ss_cache_label)
+        _ss_hdr_row.addStretch(1)
+        _ss_hdr_widget = QWidget(self)
+        _ss_hdr_widget.setLayout(_ss_hdr_row)
+
+        ss_column = QWidget(self)
+        ss_col_layout = QVBoxLayout(ss_column)
+        ss_col_layout.setContentsMargins(0, 0, 0, 0)
+        ss_col_layout.setSpacing(0)
+        ss_col_layout.addWidget(_ss_hdr_widget)         # アイコン + SteamID
+        ss_col_layout.addWidget(self.ss_info_table)     # スクロールしない情報行
+        ss_col_layout.addWidget(self.star_table, 1)     # stretch=1 → 残りを占有
+
+        # --- BL パネル (右列): [アイコン+IDヘッダ] + [情報テーブル(2行6列)] + [★テーブル] ---
+        self._bl_id_label = QLabel("", self)
+        self._bl_id_label.setStyleSheet("font-size: 13px; font-weight: bold; padding: 2px 4px;")
+        self._bl_id_label.setOpenExternalLinks(True)
+        _bl_icon_label = QLabel(self)
+        _bl_icon_label.setPixmap(icon_beatleader.pixmap(16, 16))
+        _bl_hdr_row = QHBoxLayout()
+        _bl_hdr_row.setSpacing(4)
+        _bl_hdr_row.setContentsMargins(2, 2, 2, 2)
+        _bl_hdr_row.addWidget(_bl_icon_label)
+        _bl_hdr_row.addWidget(self._bl_id_label)
+        _bl_hdr_row.addWidget(self._bl_prestige_icon_label)
+        _bl_hdr_row.addWidget(self._bl_prestige_text_label)
+        _bl_hdr_row.addWidget(self._bl_cache_label)
+        _bl_hdr_row.addStretch(1)
+        _bl_hdr_widget = QWidget(self)
+        _bl_hdr_widget.setLayout(_bl_hdr_row)
+
+        bl_column = QWidget(self)
+        bl_col_layout = QVBoxLayout(bl_column)
+        bl_col_layout.setContentsMargins(0, 0, 0, 0)
+        bl_col_layout.setSpacing(0)
+        bl_col_layout.addWidget(_bl_hdr_widget)         # アイコン + SteamID
+        bl_col_layout.addWidget(self.bl_info_table)     # スクロールしない情報行
+        from .player_pp import PlayerPPPanel
+        self.bl_pp_table = PlayerPPPanel(self, PercentageBarDelegate)
+        bl_col_layout.addWidget(self.bl_star_table, 1)  # stretch=1 → 残りを占有
+
+        # 全体: 2列横スプリッタ [SS パネル (左) | BL パネル (右)]
+        self._main_splitter = QSplitter(Qt.Orientation.Horizontal, self)
+        self._main_splitter.addWidget(ss_column)
+        self._main_splitter.addWidget(bl_column)
+        self._main_splitter.setStretchFactor(0, 1)
+        self._main_splitter.setStretchFactor(1, 1)
+        self._main_splitter.setSizes([578, 610])  # 初期サイズ配分の目安
+
+        # AccSaber (旧 Reloaded) テーブルを左下に表示するウィジェット
+        left_acc_widget = QWidget(self)
+        left_acc_layout = QVBoxLayout(left_acc_widget)
+        left_acc_layout.setContentsMargins(2, 2, 2, 2)
+        left_acc_layout.setSpacing(2)
+        # タイトル行: ラベル + 未プレイ抽出ボタン
+        _acc_rl_header = QWidget(self)
+        _acc_rl_header_layout = QHBoxLayout(_acc_rl_header)
+        _acc_rl_header_layout.setContentsMargins(0, 0, 0, 0)
+        _acc_rl_header_layout.setSpacing(4)
+        self._acc_rl_title = QLabel("AccSaber", self)
+        self._acc_rl_title.setStyleSheet("font-weight: bold; font-size: 11px; padding: 0px 2px;")
+        self._acc_rl_title.setOpenExternalLinks(True)
+        # キャンペーン称号バッジ（AccSaber ラベルの右隣）: ヘッダを広げないサイズ
+        self._acc_rl_badge = QLabel("", self)
+        self._acc_rl_badge.setFixedHeight(16)
+        self._acc_rl_badge.setVisible(False)
+        # 称号名テキスト（God / Elder / Champ / Mercenary）
+        self._acc_rl_badge_text = QLabel("", self)
+        self._acc_rl_badge_text.setStyleSheet("font-size: 11px; font-weight: bold; color: #DF8511; padding: 0px 1px;")
+        self._acc_rl_badge_text.setVisible(False)
+        # XP表示ラベル
+        self._acc_rl_xp_label = QLabel("", self)
+        self._acc_rl_xp_label.setStyleSheet("font-size: 11px; font-weight: 600; color: #DF8511; padding: 0px 2px;")
+        self._acc_rl_xp_label.setTextFormat(Qt.TextFormat.RichText)
+        self._acc_rl_xp_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        _acc_rl_header_layout.addWidget(self._acc_rl_title)
+        _acc_rl_header_layout.addWidget(self._acc_rl_badge)
+        _acc_rl_header_layout.addWidget(self._acc_rl_badge_text)
+        _acc_rl_header_layout.addWidget(self._acc_rl_xp_label, 1)
+        _acc_rl_header.setFixedHeight(20)
+        left_acc_layout.addWidget(_acc_rl_header)
+
+        # 本体: AccSaber テーブルのみ（ScoreSaber 枠と幅を揃える左ペイン）
+        left_acc_layout.addWidget(self.acc_rl_table, 1)
+
+        # 右ペイン: [ボタン列 | Events(縦スクロール, stretch で右端に寄る)]
+        _acc_btn_col = QVBoxLayout()
+        _acc_btn_col.setContentsMargins(0, 0, 0, 0)
+        _acc_btn_col.setSpacing(3)
+        _btn_qss = "font-size: 11px; padding: 2px 6px;"
+        self._btn_rl_unplayed = QPushButton("💾Unplayed Playlist", self)
+        self._btn_rl_unplayed.setToolTip("BeatLeader 未プレイの AccSaber 譜面を bplist ファイルに出力します。")
+        self._btn_rl_unplayed.setStyleSheet(_btn_qss)
+        self._btn_rl_unplayed.clicked.connect(self._on_export_rl_unplayed)
+        self._btn_rl_campaigns = QPushButton("🏆Campaigns", self)
+        self._btn_rl_campaigns.setToolTip("AccSaber の Campaigns ページを開きます。")
+        self._btn_rl_campaigns.setStyleSheet(_btn_qss)
+        self._btn_rl_campaigns.clicked.connect(self._on_open_campaigns)
+        self._btn_rl_ms_progress = QPushButton("📊Milestones", self)
+        self._btn_rl_ms_progress.setToolTip("AccSaber の Milestones ページを開きます。")
+        self._btn_rl_ms_progress.setStyleSheet(_btn_qss)
+        self._btn_rl_ms_progress.clicked.connect(self._on_open_milestones)
+        _acc_btn_col.addWidget(self._btn_rl_unplayed)
+        _acc_btn_col.addWidget(self._btn_rl_campaigns)
+        _acc_btn_col.addWidget(self._btn_rl_ms_progress)
+        _acc_btn_col.addStretch(1)
+
+        # Events: ヘッダ(枠外) + 枠付きスクロールエリア(イベント本体)
+        self._events_panel = EventsPanel(self, show_title=False)
+        self._events_scroll = QScrollArea(self)
+        self._events_scroll.setWidgetResizable(True)
+        self._events_scroll.setWidget(self._events_panel)
+        self._events_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._apply_events_frame()
+
+        _events_container = QWidget(self)
+        _events_container.setMinimumWidth(self.bl_pp_table.minimumWidth())
+        _events_vbox = QVBoxLayout(_events_container)
+        _events_vbox.setContentsMargins(0, 0, 0, 0)
+        _events_vbox.setSpacing(2)
+        _events_header = QLabel("Events", self)
+        _events_header.setStyleSheet("font-weight: bold; font-size: 11px; padding: 0px 2px;")
+        _events_header.setFixedHeight(20)
+        _events_vbox.addWidget(_events_header)          # ヘッダは枠外
+        _events_vbox.addWidget(self._events_scroll, 1)  # 本体は枠内
+
+        _right_bottom_widget = QWidget(self)
+        _right_bottom_layout = QVBoxLayout(_right_bottom_widget)
+        _right_bottom_layout.setContentsMargins(0, 0, 0, 0)
+        _right_bottom_layout.setSpacing(6)
+        _pp_container = QWidget(self)
+        _pp_layout = QVBoxLayout(_pp_container)
+        _pp_layout.setContentsMargins(0, 0, 0, 0)
+        _pp_layout.setSpacing(2)
+        _pp_header = QLabel("BeatLeader PP", self)
+        _pp_header.setStyleSheet("font-weight: bold; font-size: 11px; padding: 0px 2px;")
+        _pp_header.setFixedHeight(20)
+        _pp_layout.addWidget(_pp_header)
+        _pp_layout.addWidget(self.bl_pp_table)
+        _pp_layout.addStretch(1)
+        _bottom_actions = QHBoxLayout()
+        _bottom_actions.setSpacing(6)
+        _bottom_actions.addLayout(_acc_btn_col)
+        _bottom_actions.addSpacing(4)
+        _bottom_actions.addWidget(_pp_container, 1)
+        _bottom_actions.addWidget(_events_container, 1)
+        _right_bottom_layout.addLayout(_bottom_actions, 1)
+
+        # 下部: 横スプリッタ [AccSaber テーブル | ボタン＋Events]
+        # ScoreSaber/BeatLeader の _main_splitter と同じ分割比にし、左端を揃える
+        self._bottom_h_splitter = QSplitter(Qt.Orientation.Horizontal, self)
+        self._bottom_h_splitter.addWidget(left_acc_widget)
+        self._bottom_h_splitter.addWidget(_right_bottom_widget)
+        self._bottom_h_splitter.setStretchFactor(0, 1)
+        self._bottom_h_splitter.setStretchFactor(1, 1)
+        self._bottom_h_splitter.setSizes([578, 610])  # _main_splitter と同じ初期比で SS 枠と揃える
+        self._main_splitter.splitterMoved.connect(
+            lambda *_: self._bottom_h_splitter.setSizes(self._main_splitter.sizes()))
+        self._bottom_h_splitter.splitterMoved.connect(
+            lambda *_: self._main_splitter.setSizes(self._bottom_h_splitter.sizes()))
+
+        # 中央エリア (★テーブル) と下部エリアの間に縦スプリッタを設置
+        self._mid_bottom_splitter = QSplitter(Qt.Orientation.Vertical, self)
+        self._mid_bottom_splitter.addWidget(self._main_splitter)
+        self._mid_bottom_splitter.addWidget(self._bottom_h_splitter)
+        self._mid_bottom_splitter.setStretchFactor(0, 1)
+        self._mid_bottom_splitter.setStretchFactor(1, 0)
+        self._mid_bottom_splitter.setSizes([528, 165])  # 初期サイズ配分の目安
+
+        layout.addWidget(self._mid_bottom_splitter, 1)
+
+        self.setCentralWidget(central)
+
+        # データ
+        self._snapshots_by_player: Dict[str, List[Snapshot]] = defaultdict(list)
+        self._ss_country_by_id: Dict[str, str] = {}
+
+        self._load_player_index_countries()
+
+        # 前回表示していたプレイヤーIDをキャッシュから復元しておく
+        self._last_player_id: Optional[str] = self._load_last_player_id()
+
+        self.player_combo.currentIndexChanged.connect(self._on_player_changed)
+        self.snapshot_combo.currentIndexChanged.connect(self._on_snapshot_changed)
+
+        self.reload_snapshots()
+
+        # ボタンシグナル接続
+        self.btn_row_height_up.clicked.connect(self._on_row_height_up)
+        self.btn_row_height_dn.clicked.connect(self._on_row_height_dn)
+        self.btn_default_layout.clicked.connect(self._on_default_layout)
+
+        # スプリッター移動時に自動保存
+        self._main_splitter.splitterMoved.connect(lambda *_: self._save_ui_state())
+        self._bottom_h_splitter.splitterMoved.connect(lambda *_: self._save_ui_state())
+        self._mid_bottom_splitter.splitterMoved.connect(lambda *_: self._save_ui_state())
+
+        # 保存済み UI 状態を復元（ウィンドウサイズ → QTimer でスプリッター）
+        self._load_ui_state()
+        self._apply_row_height()
+
+        # 起動時にバックグラウンドで更新確認を開始する
+        # ウィンドウ表示が落ち着いてから開始することで、ボタン幅変化による
+        # レイアウトのちらつきを防ぐ。
+        self._update_checker = StartupUpdateChecker(self.update_button, self)
+        QTimer.singleShot(100, self._update_checker.start)
+
+    # ---------------- internal helpers ----------------
+
+    def closeEvent(self, event) -> None:  # type: ignore[override]
+        """ウィンドウクローズ時に UI 状態を確実に保存する。"""
+        self._save_ui_state()
+        super().closeEvent(event)
+
+    def _cache_dir(self) -> Path:
+        return BASE_DIR / "cache"
+
+    def _settings_path(self) -> Path:
+        return self._cache_dir() / "player_window.json"
+
+    def _read_score_cache_meta(self, filename: str) -> Optional[tuple]:
+        """キャッシュ JSON から (fetched_at ローカル時刻文字列, total_play_count) を返す。
+
+        ファイルが存在しない、または読み取れない場合は None を返す。
+        """
+        path = self._cache_dir() / filename
+        if not path.exists():
+            return None
+        # スコアキャッシュは数十 MB あり、画面を切り替えるたびに読むと固まる。
+        # ファイルが変わっていなければ前回読んだ値を使う。
+        try:
+            st = path.stat()
+            sig = (str(path), st.st_mtime_ns, st.st_size)
+        except OSError:
+            sig = None
+        memo = getattr(self, "_score_cache_meta_memo", None)
+        if memo is None:
+            memo = {}
+            self._score_cache_meta_memo = memo
+        if sig is not None and sig in memo:
+            return memo[sig]
+        result = self._read_score_cache_meta_uncached(path)
+        if sig is not None:
+            memo[sig] = result
+        return result
+
+    def _read_score_cache_meta_uncached(self, path: Path) -> Optional[tuple]:
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            fetched_at_str = raw.get("fetched_at")
+            total_play_count = raw.get("total_play_count")
+            if fetched_at_str is None or total_play_count is None:
+                return None
+            # UTC → ローカル時刻に変換
+            fa = fetched_at_str
+            if fa.endswith("Z"):
+                fa = fa[:-1]
+            dt_utc = datetime.fromisoformat(fa).replace(tzinfo=timezone.utc)
+            dt_local = dt_utc.astimezone()
+            local_str = dt_local.strftime("%Y-%m-%d %H:%M:%S")
+            return (local_str, int(total_play_count))
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _load_last_player_id(self) -> Optional[str]:
+        """前回 Stats 画面で表示していたプレイヤーの SteamID を読み込む。"""
+
+        path = self._settings_path()
+        if not path.exists():
+            return None
+
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            return None
+
+        value = data.get("last_steam_id")
+        if isinstance(value, (str, int)):
+            s = str(value).strip()
+            return s or None
+        return None
+
+    def _load_last_rl_unplayed_dir(self) -> Optional[str]:
+        """Unplayed 出力で最後に使ったフォルダを読み込む。"""
+
+        path = self._settings_path()
+        if not path.exists():
+            return None
+
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            return None
+
+        value = data.get("rl_unplayed_last_dir")
+        if isinstance(value, str):
+            s = value.strip()
+            return s or None
+        return None
+
+    def _save_last_player_id(self) -> None:
+        """現在選択中のプレイヤーIDをキャッシュに保存する。"""
+
+        steam_id = self._current_player_id()
+        if not steam_id:
+            return
+
+        path = self._settings_path()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {}
+            if path.exists():
+                try:
+                    raw = json.loads(path.read_text(encoding="utf-8"))
+                    if isinstance(raw, dict):
+                        payload = raw
+                except Exception:  # noqa: BLE001
+                    payload = {}
+            payload["last_steam_id"] = steam_id
+            atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:  # noqa: BLE001
+            # 設定保存に失敗しても画面の動作には影響させない
+            return
+
+    def _save_last_rl_unplayed_dir(self, out_dir: str) -> None:
+        """Unplayed 出力で使ったフォルダを保存する。"""
+
+        out_dir = (out_dir or "").strip()
+        if not out_dir:
+            return
+
+        path = self._settings_path()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {}
+            if path.exists():
+                try:
+                    raw = json.loads(path.read_text(encoding="utf-8"))
+                    if isinstance(raw, dict):
+                        payload = raw
+                except Exception:  # noqa: BLE001
+                    payload = {}
+            payload["rl_unplayed_last_dir"] = out_dir
+            atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:  # noqa: BLE001
+            return
+
+    def _load_avatar_showing(self) -> str:
+        """前回のアバター表示サービス ("ss" or "bl") を読み込む。"""
+        path = self._settings_path()
+        if not path.exists():
+            return "ss"
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            return "ss"
+        v = data.get("avatar_showing", "ss")
+        return v if v in ("ss", "bl") else "ss"
+
+    def _save_avatar_showing(self, showing: str) -> None:
+        """現在のアバター表示サービスを保存する。"""
+        path = self._settings_path()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            payload: dict = {}
+            if path.exists():
+                try:
+                    raw = json.loads(path.read_text(encoding="utf-8"))
+                    if isinstance(raw, dict):
+                        payload = raw
+                except Exception:  # noqa: BLE001
+                    payload = {}
+            payload["avatar_showing"] = showing
+            atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:  # noqa: BLE001
+            return
+
+    # --- 行高さ調整 / UI 状態保存・復元 ---
+
+    def _apply_row_height(self) -> None:
+        """テーブルの行高さを self._row_height に揃える。"""
+        h = self._row_height
+        for tbl in (self.acc_rl_table, self.star_table, self.bl_star_table):
+            tbl.verticalHeader().setMinimumSectionSize(0)
+            tbl.verticalHeader().setDefaultSectionSize(h)
+            tbl.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
+
+    def _on_row_height_up(self) -> None:
+        if self._row_height < 40:
+            self._row_height += 1
+            self._apply_row_height()
+            self._save_ui_state()
+
+    def _on_row_height_dn(self) -> None:
+        if self._row_height > 8:
+            self._row_height -= 1
+            self._apply_row_height()
+            self._save_ui_state()
+
+    def _apply_events_frame(self) -> None:
+        """Events エリアにテーブルと同系色の枠・背景を付ける（テーマ対応）。"""
+        _border = "#3c3c3c" if is_dark() else "#a8a8a8"
+        _bg = "#121212" if is_dark() else "#ffffff"
+        self._events_scroll.setFrameShape(QScrollArea.Shape.StyledPanel)
+        self._events_scroll.setStyleSheet(
+            f"QScrollArea {{ border: 2px solid {_border}; border-radius: 3px; background-color: {_bg}; }}"
+        )
+        # 枠内（ビューポート/イベントパネル）もテーブルと同じ暗い背景にする
+        self._events_scroll.viewport().setStyleSheet(f"background-color: {_bg};")
+        self._events_panel.setStyleSheet(f"background-color: {_bg};")
+
+    def _on_default_layout(self) -> None:
+        """レイアウトをデフォルト値にリセットする。"""
+        self._row_height = 24
+        self._saved_main_splitter_sizes = [578, 610]
+        self._saved_bottom_splitter_sizes = [578, 610]
+        self._saved_mid_splitter_sizes = [528, 165]
+        self.resize(1211, 770)
+        self._apply_row_height()
+
+        def _apply() -> None:
+            self._main_splitter.setSizes(self._saved_main_splitter_sizes)
+            self._bottom_h_splitter.setSizes(self._saved_bottom_splitter_sizes)
+            self._mid_bottom_splitter.setSizes(self._saved_mid_splitter_sizes)
+
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(0, _apply)
+        self._save_ui_state()
+
+    def _save_ui_state(self) -> None:
+        """行高さ・スプリッター位置・ウィンドウサイズを設定ファイルに保存する。"""
+        path = self._settings_path()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            payload: dict = {}
+            if path.exists():
+                try:
+                    raw = json.loads(path.read_text(encoding="utf-8"))
+                    if isinstance(raw, dict):
+                        payload = raw
+                except Exception:  # noqa: BLE001
+                    payload = {}
+            payload["ui_row_height"] = self._row_height
+            payload["ui_main_splitter_sizes"] = self._main_splitter.sizes()
+            payload["ui_bottom_splitter_sizes"] = self._bottom_h_splitter.sizes()
+            payload["ui_mid_splitter_sizes"] = self._mid_bottom_splitter.sizes()
+            payload["ui_window_width"] = self.width()
+            payload["ui_window_height"] = self.height()
+            atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:  # noqa: BLE001
+            return
+
+    def _load_ui_state(self) -> None:
+        """設定ファイルから行高さ・スプリッター位置・ウィンドウサイズを読み込んで適用する。"""
+        path = self._settings_path()
+        if not path.exists():
+            return
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            return
+
+        # ウィンドウサイズを最初に適用（スプリッターピクセル値がサイズ依存のため）
+        w = data.get("ui_window_width")
+        h = data.get("ui_window_height")
+        if isinstance(w, int) and isinstance(h, int) and w > 200 and h > 200:
+            self.resize(w, h)
+
+        rh = data.get("ui_row_height")
+        if isinstance(rh, int) and 8 <= rh <= 40:
+            self._row_height = rh
+
+        main_sz = data.get("ui_main_splitter_sizes")
+        if isinstance(main_sz, list) and len(main_sz) == 2:
+            self._saved_main_splitter_sizes = [int(v) for v in main_sz]
+        bottom_sz = data.get("ui_bottom_splitter_sizes")
+        if isinstance(bottom_sz, list) and len(bottom_sz) == 2:
+            self._saved_bottom_splitter_sizes = [int(v) for v in bottom_sz]
+        mid_sz = data.get("ui_mid_splitter_sizes")
+        if isinstance(mid_sz, list) and len(mid_sz) == 2:
+            self._saved_mid_splitter_sizes = [int(v) for v in mid_sz]
+
+        # スプリッター位置はウィンドウがリサイズされた後に適用する
+        def _restore_splitters() -> None:
+            self._main_splitter.setSizes(self._saved_main_splitter_sizes)
+            self._bottom_h_splitter.setSizes(self._saved_bottom_splitter_sizes)
+            self._mid_bottom_splitter.setSizes(self._saved_mid_splitter_sizes)
+
+        QTimer.singleShot(0, _restore_splitters)
+
+    def _on_open_campaigns(self) -> None:
+        """AccSaber の Campaigns ページをブラウザで開く。"""
+        QDesktopServices.openUrl(QUrl("https://accsaber.com/campaigns"))
+
+    def _on_open_milestones(self) -> None:
+        """AccSaber の Milestones ページをブラウザで開く（グローバルルート）。"""
+        QDesktopServices.openUrl(QUrl("https://accsaber.com/milestones"))
+
+    def _on_export_rl_unplayed(self) -> None:
+        """playlist_view の AccSaber ローダーを使い、未クリア譜面を bplist に出力する。"""
+        from PySide6.QtWidgets import QFileDialog
+
+        steam_id = self._current_player_id()
+        if not steam_id:
+            QMessageBox.warning(self, "AccSaber", "No player selected.")
+            return
+
+        _, bl_id = _get_player_ids_from_index(steam_id)
+
+        # 保存先フォルダを選択
+        _last_dir = self._load_last_rl_unplayed_dir()
+        _initial_dir = Path(_last_dir) if _last_dir else Path.home()
+        if not _initial_dir.exists() or not _initial_dir.is_dir():
+            _initial_dir = Path.home()
+        save_dir = QFileDialog.getExistingDirectory(
+            self, "Select output folder", str(_initial_dir),
+        )
+        if not save_dir:
+            return
+        self._save_last_rl_unplayed_dir(save_dir)
+        save_dir_path = Path(save_dir)
+
+        save_cancelled = {"value": False}
+        save_progress = QProgressDialog("Loading AccSaber maps...", "Cancel", 0, 5, self)
+        save_progress.setWindowTitle("AccSaber Unplayed")
+        save_progress.setWindowModality(Qt.WindowModality.WindowModal)
+        save_progress.canceled.connect(lambda: save_cancelled.__setitem__("value", True))
+        save_progress.show()
+
+        def _set_save_step(step: int, text: str) -> None:
+            save_progress.setLabelText(text)
+            save_progress.setValue(step)
+            QApplication.processEvents()
+
+        saved_files: list[str] = []
+
+        try:
+            _set_save_step(0, "Loading AccSaber maps with player scores...")
+
+            def _on_prog(d: int, t: int, label: str) -> None:
+                if save_cancelled["value"]:
+                    raise RuntimeError("CANCELLED")
+                _set_save_step(0, label)
+
+            sid = bl_id or steam_id
+            rl_entries = _rl_load_maps_with_scores(sid, "all", on_progress=_on_prog)
+
+            for idx, cat in enumerate(("true", "standard", "tech"), start=1):
+                if save_cancelled["value"]:
+                    return
+                _set_save_step(idx, f"Building {cat.capitalize()} unplayed list...")
+                cfg = _RLBatchConfig(
+                    label=f"AccSaber Unplayed - {cat.capitalize()}",
+                    filename_base="",
+                    source="rl",
+                    show_cleared=False,
+                    show_nf=True,
+                    show_unplayed=True,
+                    cat_true=(cat == "true"),
+                    cat_standard=(cat == "standard"),
+                    cat_tech=(cat == "tech"),
+                    star_min=0.0, star_max=20.0,
+                    split_mode="single",
+                    sort_mode="star_asc",
+                )
+                filtered = _rl_apply_filter(list(rl_entries), cfg)
+                image = _make_cover(cat, "", "asc", "rl")
+                bplist = _rl_make_bplist(f"AccSaber Unplayed - {cat.capitalize()}", filtered, image)
+                filename = f"accsaber_reloaded_unplayed_{cat}.bplist"
+                out_path = save_dir_path / filename
+                atomic_write_text(out_path, _format_bplist(bplist), encoding="utf-8")
+                n_maps = len(filtered)
+                saved_files.append(f"{filename}  ({n_maps} maps)")
+
+            _set_save_step(4, "Done")
+        except RuntimeError:
+            return
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "AccSaber Unplayed", f"Failed to save unplayed maps:\n{exc}")
+            return
+        finally:
+            save_progress.close()
+
+        if saved_files:
+            QMessageBox.information(
+                self, "AccSaber Unplayed",
+                "Saved the following files:\n" + "\n".join(saved_files),
+            )
+        else:
+            QMessageBox.information(self, "AccSaber Unplayed", "No unplayed maps found.")
+
+    def _take_snapshot_for_current_player(self) -> bool:
+        """Snapshot 取得時に任意の SteamID と取得オプションを選択できるダイアログを表示する。
+
+        戻り値: スナップショットが正常に作成できたら True、それ以外は False。
+        （ボタンから呼ばれる通常利用では戻り値は無視される。）
+        """
+
+        # デフォルトは現在選択中のプレイヤーID（なければ空文字）
+        current_id = self._current_player_id() or ""
+
+        dlg = TakeSnapshotDialog(self, default_steam_id=current_id)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return False
+
+        steam_id = dlg.steam_id()
+        if not steam_id:
+            QMessageBox.warning(self, "Take Snapshot", "SteamID is empty.")
+            return False
+
+        options = dlg.snapshot_options()
+        export_playlists = dlg.should_export_playlists()
+        playlist_export_dir = dlg.playlist_export_dir()
+        if export_playlists:
+            if not playlist_export_dir:
+                QMessageBox.warning(self, "Take Snapshot", "Playlist export folder is empty.")
+                return False
+            try:
+                Path(playlist_export_dir).mkdir(parents=True, exist_ok=True)
+            except Exception as exc:  # noqa: BLE001
+                QMessageBox.warning(self, "Take Snapshot", f"Failed to create playlist export folder:\n{playlist_export_dir}\n\n{exc}")
+                return False
+            _save_playlist_export_dir(playlist_export_dir)
+
+        # スナップショット取得処理の途中でキャンセルできるように、Cancel ボタン付きの
+        # QProgressDialog を用意し、キャンセル状態をフラグで管理する。
+        cancelled = {"value": False}
+        warning_lines: list[str] = []
+        current_progress_message = {"value": "Taking snapshot..."}
+
+        dlg = QProgressDialog("Taking snapshot...", "Cancel", 0, 100, self)
+        dlg.setWindowTitle("Take Snapshot")
+        dlg.setWindowModality(Qt.WindowModality.WindowModal)
+        dlg.setAutoClose(False)
+        dlg.setAutoReset(False)
+        dlg.canceled.connect(lambda: cancelled.__setitem__("value", True))
+        status_label = QLabel("Taking snapshot...", dlg)
+        status_label.setWordWrap(True)
+        status_label.setTextFormat(Qt.TextFormat.RichText)
+        dlg.setLabel(status_label)
+        dlg.show()
+
+        def _escape_html(text: str) -> str:
+            return (
+                text.replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+                .replace("\n", "<br>")
+            )
+
+        def _render_progress_label(message: str) -> None:
+            body = _escape_html(message)
+            if warning_lines:
+                warning_text = "<br>".join(_escape_html(line) for line in warning_lines[-4:])
+                body += f"<br><br><span style='color:#DF8511; font-weight:600;'>Warnings:<br>{warning_text}</span>"
+            status_label.setText(body)
+
+        def _on_progress(message: str, fraction: float) -> None:
+            # キャンセルされていたら、例外を投げて処理全体を中断する
+            if cancelled["value"]:
+                raise RuntimeError("SNAPSHOT_CANCELLED")
+            current_progress_message["value"] = message
+            _render_progress_label(message)
+            dlg.setValue(int(fraction * 100))
+            QApplication.processEvents()
+
+        def _on_warning(message: str) -> None:
+            if not message or message in warning_lines:
+                return
+            warning_lines.append(message)
+            _render_progress_label(current_progress_message["value"])
+            QApplication.processEvents()
+
+        def _on_playlist_export_progress(_done: int, _total: int, label: str) -> None:
+            if cancelled["value"]:
+                raise RuntimeError("SNAPSHOT_CANCELLED")
+            current_progress_message["value"] = label
+            _render_progress_label(label)
+            QApplication.processEvents()
+
+        snapshot: Optional[Snapshot] = None
+        playlist_saved_files: List[str] = []
+        playlist_errors: List[str] = []
+        playlist_export_exception: Optional[Exception] = None
+        playlist_export_cancelled = False
+        enabled_playlist_configs = _load_enabled_playlist_batch_configs() if export_playlists else []
+
+        try:
+            # print文は日本語
+            print(f"1.スナップショットを取得中: {steam_id}")
+            # 取得は別スレッドで行う。画面のスレッドで直接動かすと、API の待ち時間
+            # （間隔の調整や Retry-After）の間は画面も Cancel ボタンも反応しなかった。
+            # 別スレッドは Qt に触らず、進捗と警告を worker_state に置くだけにする。
+            worker_state: dict = {"message": None, "fraction": 0.0, "done": False, "result": None, "exc": None}
+            worker_warnings: List[str] = []
+            worker_lock = threading.Lock()
+
+            def _worker_progress(message: str, fraction: float) -> None:
+                if cancelled["value"]:
+                    raise RuntimeError("SNAPSHOT_CANCELLED")
+                with worker_lock:
+                    worker_state["message"] = message
+                    worker_state["fraction"] = fraction
+
+            def _worker_warning(message: str) -> None:
+                with worker_lock:
+                    worker_warnings.append(message)
+
+            def _worker_run() -> None:
+                try:
+                    worker_state["result"] = create_snapshot_for_steam_id(
+                        steam_id,
+                        progress=_worker_progress,
+                        options=options,
+                        on_warning=_worker_warning,
+                    )
+                except BaseException as exc:  # noqa: BLE001
+                    worker_state["exc"] = exc
+                finally:
+                    worker_state["done"] = True
+
+            worker = threading.Thread(target=_worker_run, daemon=True)
+            worker.start()
+            last_shown: tuple = (None, None)
+            cancelling_shown = False
+            while True:
+                QApplication.processEvents()
+                worker.join(0.05)
+                if cancelled["value"] and not cancelling_shown and not worker_state["done"]:
+                    # 取得は次のページの区切りで止まる（API の待ちの途中だと数十秒かかることがある）。
+                    # 止まるまでの間、押したことが分かるようにする。
+                    cancelling_shown = True
+                    status_label.setText("Cancelling... (waiting for the current request to finish)")
+                    cancel_button = dlg.findChild(QPushButton)
+                    if cancel_button is not None:
+                        cancel_button.setEnabled(False)
+                with worker_lock:
+                    pending = list(worker_warnings)
+                    worker_warnings.clear()
+                    shown = (worker_state["message"], worker_state["fraction"])
+                for warning in pending:
+                    _on_warning(warning)
+                if shown != last_shown and shown[0] is not None:
+                    last_shown = shown
+                    current_progress_message["value"] = shown[0]
+                    _render_progress_label(shown[0])
+                    dlg.setValue(int(shown[1] * 100))
+                if worker_state["done"]:
+                    break
+            if worker_state["exc"] is not None:
+                raise worker_state["exc"]
+            snapshot = worker_state["result"]
+            map_store_instance = MapStore()
+            map_store_instance.snapshots[steam_id] = snapshot
+
+            if cancelled["value"] and export_playlists:
+                # スナップショットは保存できた後に Cancel が押された。保存済みのスナップショットは
+                # そのまま扱い、プレイリストの書き出しだけをやめる（以前は何も言わずに終わっていた）。
+                playlist_export_cancelled = True
+            elif export_playlists:
+                if enabled_playlist_configs:
+                    dlg.setRange(0, 0)
+                    _on_playlist_export_progress(0, 0, "Exporting playlists...")
+                    try:
+                        playlist_saved_files, playlist_errors = _export_all_playlist_batches(
+                            steam_id,
+                            Path(playlist_export_dir),
+                            progress=_on_playlist_export_progress,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        if cancelled["value"]:
+                            playlist_export_cancelled = True
+                        else:
+                            playlist_export_exception = exc
+                else:
+                    _on_warning("Playlist Export All is checked, but no enabled batch items were found.")
+
+        except Exception as exc:  # noqa: BLE001
+            # キャンセルによる中断の場合はエラーダイアログを出さずに静かに抜ける
+            if not cancelled["value"]:
+                QMessageBox.warning(self, "Take Snapshot", f"Failed to create snapshot for {steam_id}:\n{exc}")
+            return False
+        finally:
+            dlg.close()
+
+        # スナップショット作成後、一覧を再読み込みしつつ、同じプレイヤーを選択状態に保つ
+        self.reload_snapshots()
+        for idx in range(self.player_combo.count()):
+            data = self.player_combo.itemData(idx)
+            if isinstance(data, str) and data == steam_id:
+                self.player_combo.setCurrentIndex(idx)
+                break
+
+        if (
+            export_playlists
+            and enabled_playlist_configs
+            and not playlist_export_cancelled
+            and playlist_export_exception is None
+        ):
+            _show_playlist_covers_dialog(
+                self,
+                f"Export Complete — {len(playlist_saved_files)} file(s)",
+                playlist_export_dir,
+                playlist_saved_files,
+                playlist_errors,
+            )
+
+        QMessageBox.information(
+            self,
+            "Take Snapshot",
+            f"Snapshot taken at {snapshot.taken_at} for {steam_id}."
+            + (
+                f"\n\nPlaylist Export: {len(playlist_saved_files)} file(s) saved to\n{playlist_export_dir}"
+                if export_playlists and playlist_export_exception is None and not playlist_export_cancelled
+                else ""
+            )
+            + (
+                "\n\nPlaylist Export: no enabled batch items." 
+                if export_playlists and not enabled_playlist_configs
+                else ""
+            )
+            + (
+                "\n\nPlaylist Export: canceled after snapshot completed."
+                if playlist_export_cancelled
+                else ""
+            )
+            + (
+                f"\n\nPlaylist Export failed:\n{playlist_export_exception}"
+                if playlist_export_exception is not None
+                else ""
+            )
+            + (
+                "\n\nPlaylist Export warnings:\n" + "\n".join(playlist_errors)
+                if playlist_errors
+                else ""
+            )
+            + ("\n\n⚠ " + "\n⚠ ".join(snapshot.warnings) if snapshot.warnings else ""),
+        )
+        return True
+
+    def _prompt_initial_snapshot_if_needed(self) -> None:
+        """初回起動時のみ、スナップショット未作成なら取得ダイアログを開く。"""
+
+        if self.player_combo.count() != 0:
+            return
+        self._take_snapshot_for_current_player()
+
+    def _prompt_startup_dialogs_if_needed(self) -> None:
+        """起動時に必要なダイアログを順番に表示する。"""
+
+        if not _load_beatsaber_dir():
+            try:
+                dlg = BeatSaberFolderDialog(self)
+                dlg.exec()
+            except Exception as exc:  # noqa: BLE001
+                QMessageBox.warning(self, "Beat Saber Folder", f"Failed to open Beat Saber folder dialog:\n{exc}")
+
+        self._prompt_initial_snapshot_if_needed()
+
+    def _collect_star_stats_from_beatleader(self, beatleader_id: Optional[str]) -> List[StarClearStat]:
+        """BeatLeader の RankedMap 一覧とプレイヤースコアから★別統計を集計する。"""
+
+        if not beatleader_id:
+            return []
+
+        # collector 側の共通実装を利用する
+        try:
+            stats = collect_beatleader_star_stats(beatleader_id)
+        except Exception:  # noqa: BLE001
+            stats = []
+
+        return list(stats)
+
+    def _load_player_index_countries(self) -> None:
+        """players_index.json から ScoreSaber ID ごとの国コードを読み込む。"""
+
+        path = self._cache_dir() / "players_index.json"
+        self._ss_country_by_id.clear()
+
+        if not path.exists():
+            return
+
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            # 新形式: {"fetched_at": ..., "rows": [...]} / 旧形式: plain list
+            if isinstance(data, dict):
+                data = data.get("rows") or []
+            for row in data:
+                if not isinstance(row, dict):
+                    continue
+                ss = row.get("scoresaber")
+                if not isinstance(ss, dict):
+                    continue
+                sid = str(ss.get("id") or "")
+                country = str(ss.get("country") or "").upper()
+                if sid and country:
+                    self._ss_country_by_id[sid] = country
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _sync_ui_after_theme_change(self) -> None:
+        """現在のテーマ状態に合わせて Stats 画面側の UI を更新する。"""
+        dark = is_dark()
+        self.dark_mode_button.setText(_theme_button_label())
+        self.dark_mode_button.setChecked(dark)
+        self.dark_mode_button.setToolTip("ライトモードに切り替えます" if dark else "ダークモードに切り替えます")
+        self._apply_header_control_style()
+        _ver_color = "#cccccc" if dark else "black"
+        self._ver_label.setStyleSheet(f"font-size: 12px; color: {_ver_color}; padding-right: 4px;")
+        self._top_row.setSpacing(2)
+        self._update_view()
+
+        pw = getattr(self, "_playlist_window", None)
+        if pw is not None:
+            pw.apply_theme()
+
+    def _sync_shared_settings_to_open_windows(self) -> None:
+        pw = getattr(self, "_playlist_window", None)
+        if pw is not None:
+            pw._export_dir = _load_playlist_export_dir()
+
+    def _apply_header_control_style(self) -> None:
+        """ヘッダーのコントロール余白をテーマ非依存で揃える。"""
+        button_qss = ""
+        combo_qss = ""
+        theme_button_qss = ""
+        if not is_dark():
+            button_qss = (
+                "QPushButton {"
+                "margin: 0px; padding: 0px 8px;"
+                "background-color: #f6f6f6; color: #111111;"
+                "border: 1px solid #d9d9d9; border-radius: 6px;"
+                "}"
+                "QPushButton:hover { background-color: #ececec; border-color: #c8c8c8; }"
+                "QPushButton:pressed { background-color: #e2e2e2; }"
+                "QPushButton:checked { background-color: #e8f1fb; border-color: #8cb8e8; }"
+            )
+            combo_qss = (
+                "QComboBox {"
+                "margin: 0px; padding: 0px 8px;"
+                "background-color: #ffffff; color: #111111;"
+                "border: 1px solid #d9d9d9; border-radius: 6px;"
+                "}"
+                "QComboBox::drop-down { border: none; width: 24px; }"
+            )
+            theme_button_qss = (
+                "QPushButton {"
+                "margin: 0px; padding: 0px 4px;"
+                "background-color: rgba(34, 50, 90, 0.3); color: #f7f7f7;"
+                "border: 1px solid rgba(17, 25, 45, 0.3); border-radius: 6px;"
+                "}"
+                "QPushButton:hover { background-color: #223355; border-color: #99CCFF; }"
+                "QPushButton:pressed { background-color: #000000; }"
+                "QPushButton:checked { background-color: #406088; border-color: #3f78c6; }"
+            )
+
+        for button in getattr(self, "_header_buttons", []):
+            button.setStyleSheet(button_qss)
+        for combo in getattr(self, "_header_combos", []):
+            combo.setStyleSheet(combo_qss)
+        self.dark_mode_button.setStyleSheet(theme_button_qss)
+
+    def _toggle_dark_mode(self) -> None:
+        """\u30c0\u30fc\u30af / \u30e9\u30a4\u30c8\u30e2\u30fc\u30c9\u3092\u5207\u308a\u66ff\u3048\u308b\u3002"""
+        dark = _toggle_theme()
+        self.dark_mode_button.setText(_theme_button_label())
+        self.dark_mode_button.setChecked(dark)
+        self.dark_mode_button.setToolTip("ライトモードに切り替えます" if dark else "ダークモードに切り替えます")
+        self._apply_header_control_style()
+        
+        _ver_color = "#cccccc" if dark else "black"
+        self._ver_label.setStyleSheet(f"font-size: 12px; color: {_ver_color}; padding-right: 4px;" )
+        # ダーク時はデフォルト間隔、ライト時は素のネイティブボタンりも間隔を狭める
+        self._top_row.setSpacing(2)
+        # ラベルセルの色はテーブル再描画時に反映されるのでビューを再構築する
+        self._update_view()
+        # プレイリスト画面が開いていれば更新する
+        pw = getattr(self, "_playlist_window", None)
+        if pw is not None:
+            pw.apply_theme()
+
+    def reload_snapshots(self) -> None:
+        """snapshots フォルダを読み直して、プレイヤー一覧を更新する。"""
+        
+        print("■collector.reload_snapshots:スナップショットを再読み込みしています...")
+        previous_id = self._current_player_id()
+        self._snapshots_by_player.clear()
+        self.player_combo.clear()
+
+        if not SNAPSHOT_DIR.exists():
+            SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
+
+        paths = sorted(SNAPSHOT_DIR.glob("*.json"))
+        for path in paths:
+            try:
+                snap = Snapshot.load(path)
+            except Exception:
+                continue
+
+            self._snapshots_by_player[snap.steam_id].append(snap)
+
+        # 各プレイヤーについて、最新スナップショットの情報をコンボに表示する
+        for steam_id, snaps in self._snapshots_by_player.items():
+            snaps.sort(key=lambda s: s.taken_at)
+            latest = snaps[-1]
+            label = f"{latest.scoresaber_name or latest.beatleader_name or ''} ({steam_id})"
+            self.player_combo.addItem(label, userData=steam_id)
+
+        # 可能であれば、リロード前に選択していたプレイヤー、または前回起動時のプレイヤーを優先して選択する
+        target_id = previous_id or self._last_player_id
+        if target_id:
+            for idx in range(self.player_combo.count()):
+                data = self.player_combo.itemData(idx)
+                if isinstance(data, str) and data == target_id:
+                    self.player_combo.setCurrentIndex(idx)
+                    break
+        # 対象が見つからなかった場合は、一覧の最後（最新スナップショットを持つプレイヤー）を選択
+        if self.player_combo.count() > 0 and self.player_combo.currentIndex() < 0:
+            self.player_combo.setCurrentIndex(self.player_combo.count() - 1)
+
+        if self.player_combo.count() == 0:
+            self._update_view()
+
+    def _current_player_id(self) -> Optional[str]:
+        idx = self.player_combo.currentIndex()
+        if idx < 0:
+            return None
+        data = self.player_combo.currentData()
+        if isinstance(data, str):
+            return data
+        return None
+
+    def _current_player_country_code(self) -> Optional[str]:
+        """Stats 画面で現在選択しているプレイヤーの国コードを推定して返す。"""
+
+        steam_id = self._current_player_id()
+        if not steam_id:
+            return None
+
+        snaps = self._snapshots_by_player.get(steam_id)
+        if snaps:
+            snaps_sorted = sorted(snaps, key=lambda s: s.taken_at)
+            snap = snaps_sorted[-1]
+
+            # 1. ScoreSaber の国コードを優先
+            if snap.scoresaber_country:
+                code = str(snap.scoresaber_country).strip().upper()
+                if len(code) == 2:
+                    return code
+
+            # 2. BeatLeader の国コードをフォールバック
+            if snap.beatleader_country:
+                code = str(snap.beatleader_country).strip().upper()
+                if len(code) == 2:
+                    return code
+
+            # 3. players_index から ScoreSaber ID 経由で国コードを引く
+            if snap.scoresaber_id:
+                sid = str(snap.scoresaber_id)
+                cc = self._ss_country_by_id.get(sid)
+                if cc and len(cc) == 2:
+                    return cc.upper()
+
+        return None
+
+    def _on_player_changed(self, *args) -> None:  # noqa: ANN002, ARG002
+        """コンボボックスの選択変更時にビュー更新と選択プレイヤー保存を行う。"""
+
+        self._populate_snapshot_combo(self._current_player_id())
+        self._update_view()
+        self._save_last_player_id()
+
+    def _on_snapshot_changed(self, *args) -> None:  # noqa: ANN002, ARG002
+        """スナップショット選択変更時にビューを更新する。"""
+        self._update_view()
+
+    def _populate_snapshot_combo(self, steam_id: Optional[str]) -> None:
+        """指定プレイヤーのスナップショット一覧を snapshot_combo に設定する。先頭が最新。"""
+        self.snapshot_combo.blockSignals(True)
+        self.snapshot_combo.clear()
+        if steam_id:
+            snaps = self._snapshots_by_player.get(steam_id, [])
+            snaps_sorted = sorted(snaps, key=lambda s: s.taken_at, reverse=True)
+            for s in snaps_sorted:
+                try:
+                    t_str = s.taken_at
+                    if t_str.endswith("Z"):
+                        t_str = t_str[:-1]
+                    dt_utc = datetime.fromisoformat(t_str).replace(tzinfo=timezone.utc)
+                    dt_local = dt_utc.astimezone()
+                    label = dt_local.strftime("%Y-%m-%d %H:%M:%S")
+                except Exception:  # noqa: BLE001
+                    label = s.taken_at
+                self.snapshot_combo.addItem(label, s.taken_at)
+        self.snapshot_combo.setCurrentIndex(0)
+        self.snapshot_combo.blockSignals(False)
+
+    def _start_title_icon_download(self, icon_url: str) -> None:
+        """称号アイコンを裏でダウンロードする。同じ URL は 1 回しか試さない（失敗しても繰り返さない）。"""
+        tried = getattr(self, "_title_icon_tried", None)
+        if tried is None:
+            tried = set()
+            self._title_icon_tried = tried
+            self._title_icon_signals = _TitleIconSignals()
+            self._title_icon_signals.downloaded.connect(self._on_title_icon_downloaded)
+        if icon_url in tried:
+            return
+        tried.add(icon_url)
+        signals = self._title_icon_signals
+
+        def _run() -> None:
+            try:
+                if _rl_download_title_icon(icon_url) is not None:
+                    signals.downloaded.emit(icon_url)
+            except Exception:  # noqa: BLE001
+                pass
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _on_title_icon_downloaded(self, icon_url: str) -> None:
+        snap = getattr(self, "_last_badge_args", None)
+        if snap and snap[1] == icon_url:
+            self._update_acc_rl_badge(snap[0], snap[1])
+
+    def _update_acc_rl_badge(self, title_name: "str | None", icon_url: "str | None") -> None:
+        """AccSaber ラベルの右隣にキャンペーン称号バッジと称号名を表示する。"""
+        def _hide() -> None:
+            self._acc_rl_badge.clear()
+            self._acc_rl_badge.setVisible(False)
+            self._acc_rl_badge_text.clear()
+            self._acc_rl_badge_text.setVisible(False)
+
+        self._last_badge_args = (title_name, icon_url)
+        if not title_name or not icon_url:
+            _hide()
+            return
+        # キャッシュ済み画像を優先。無ければ裏でダウンロードし、終わったら表示し直す。
+        # 画面のスレッドで取りに行くと、障害時に切り替えのたびに最長 30 秒固まっていた。
+        path = _rl_title_icon_path(icon_url)
+        if path is None:
+            _hide()
+            self._start_title_icon_download(icon_url)
+            return
+        pixmap = QPixmap(str(path))
+        if pixmap.isNull():
+            _hide()
+            return
+        pixmap = pixmap.scaledToHeight(16, Qt.TransformationMode.SmoothTransformation)
+        self._acc_rl_badge.setPixmap(pixmap)
+        self._acc_rl_badge.setToolTip(title_name)
+        self._acc_rl_badge.setVisible(True)
+        # 称号名（"ACC God" → "God" など）
+        short = title_name[len("ACC "):] if title_name.startswith("ACC ") else title_name
+        self._acc_rl_badge_text.setText(short)
+        self._acc_rl_badge_text.setToolTip(title_name)
+        self._acc_rl_badge_text.setVisible(True)
+
+    def _update_view(self) -> None:
+        # テーマ変更時に全テーブルのスタイルを更新する
+        _star_qss = table_stylesheet() + "\nQTableWidget::item { padding: 0px; margin: 0px; }"
+        self.star_table.setStyleSheet(_star_qss)
+        self.bl_star_table.setStyleSheet(_star_qss)
+        self.ss_info_table.setStyleSheet(table_stylesheet())
+        self.bl_info_table.setStyleSheet(table_stylesheet())
+        self.acc_rl_table.setStyleSheet(table_stylesheet())
+        self._apply_events_frame()
+        self.ss_info_table.clearContents()
+        self.bl_info_table.clearContents()
+        self.bl_pp_table.set_snapshots(None)
+        self._ss_id_label.setText("")
+        self._bl_id_label.setText("")
+        self._bl_prestige_text_label.setText("")
+        self._bl_prestige_icon_label.set_image_url(None)
+        self._acc_rl_xp_label.setText("")
+        self._acc_rl_title.setText("AccSaber")
+        self._acc_rl_badge.clear()
+        self._acc_rl_badge.setVisible(False)
+        self._acc_rl_badge_text.clear()
+        self._acc_rl_badge_text.setVisible(False)
+        self.acc_rl_table.setRowCount(0)
+        self.star_table.setRowCount(0)
+        self.bl_star_table.setRowCount(0)
+
+        steam_id = self._current_player_id()
+        if not steam_id:
+            self._ss_cache_label.setText("／ SS scores: -")
+            self._bl_cache_label.setText("／ BL scores: -")
+            self._avatar_widget.set_ids(None, None, preferred=self._load_avatar_showing())
+            return
+
+        snaps = self._snapshots_by_player.get(steam_id) or []
+        if not snaps:
+            self._ss_cache_label.setText("／ SS scores: -")
+            self._bl_cache_label.setText("／ BL scores: -")
+            self._avatar_widget.set_ids(None, None, preferred=self._load_avatar_showing())
+            return
+
+        selected_taken_at = self.snapshot_combo.currentData()
+        snap = None
+        if isinstance(selected_taken_at, str) and selected_taken_at:
+            snap = next((s for s in snaps if s.taken_at == selected_taken_at), None)
+        if snap is None:
+            snap = max(snaps, key=lambda s: s.taken_at)
+
+        self.bl_pp_table.set_snapshots(snap)
+        from .accsaber_status import status_text
+        self._acc_rl_title.setToolTip("\n".join(getattr(snap, "accsaber_fetch_errors", []) or []))
+        # --- キャッシュ情報ラベル更新 ---
+        ss_id = snap.scoresaber_id
+        bl_id = snap.beatleader_id or steam_id
+        ss_meta = self._read_score_cache_meta(f"scoresaber_player_scores_{ss_id}.json") if ss_id else None
+        bl_meta = self._read_score_cache_meta(f"beatleader_player_scores_{bl_id}.json")
+        if ss_meta:
+            self._ss_cache_label.setText(f"／ SS scores: {ss_meta[1]:,} maps  (fetched: {ss_meta[0]})")
+        else:
+            self._ss_cache_label.setText("／ SS scores: -")
+        if bl_meta:
+            self._bl_cache_label.setText(f"／ BL scores: {bl_meta[1]:,} maps  (fetched: {bl_meta[0]})")
+        else:
+            self._bl_cache_label.setText("／ BL scores: -")
+
+        # AccSaber ラベルにリンクを設定
+        _as_link_color = "#5aaaee" if is_dark() else "#0066cc"
+        if bl_id:
+            self._acc_rl_title.setText(
+                f'<a href="https://accsaberreloaded.com/players/{bl_id}" style="color:{_as_link_color}; text-decoration:none; font-weight:bold; font-size:11px;">AccSaber</a>'
+            )
+        else:
+            self._acc_rl_title.setText("AccSaber")
+
+        self._acc_rl_title.setText(self._acc_rl_title.text() + " ／ " + status_text(snap))
+
+        # プレイヤーアバターを非同期で取得
+        _preferred_avatar = self._load_avatar_showing()
+        self._avatar_widget.set_ids(ss_id, bl_id, preferred=_preferred_avatar)
+
+        # Snapshot の取得時刻をローカル時刻に変換して表示用文字列を作る
+        taken_text = snap.taken_at
+        try:
+            t_str = snap.taken_at
+            if t_str.endswith("Z"):
+                t_str = t_str[:-1]
+                dt_utc = datetime.fromisoformat(t_str).replace(tzinfo=timezone.utc)
+            else:
+                dt_utc = datetime.fromisoformat(t_str).replace(tzinfo=timezone.utc)
+            dt_local = dt_utc.astimezone()
+            taken_text = dt_local.strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:  # noqa: BLE001
+            taken_text = snap.taken_at
+
+        stats = list(snap.star_stats or [])
+        bl_stats = list(snap.beatleader_star_stats or [])
+        total_ranked_maps = sum(s.map_count for s in stats)
+
+        # ScoreSaber / BeatLeader で対になる指標が一目で分かるよう、
+        # 同じ行番号に同じ Metric 名を並べる 1 表構成にする。
+        ss_pp_text = f"{fmt(snap.scoresaber_pp, 2, comma=True)}" if snap.scoresaber_pp is not None else None
+        bl_pp_text = f"{fmt(snap.beatleader_pp, 2, comma=True)}" if snap.beatleader_pp is not None else None
+
+        ss_acc_text = (
+            f"{fmt(snap.scoresaber_average_ranked_acc, 2)}%"
+            if snap.scoresaber_average_ranked_acc is not None
+            else None
+        )
+        bl_acc_text = (
+            f"{fmt(snap.beatleader_average_ranked_acc, 2)}%"
+            if snap.beatleader_average_ranked_acc is not None
+            else None
+        )
+
+        # ScoreSaber Ranked Play Count は「実プレイ数 / Ranked譜面総数」の形式で表示
+        ranked_play_ss_text: Optional[str]
+        if snap.scoresaber_ranked_play_count is None:
+            ranked_play_ss_text = None
+        elif total_ranked_maps > 0:
+            ranked_play_ss_text = f"{snap.scoresaber_ranked_play_count:,}/{total_ranked_maps:,}"
+        else:
+            ranked_play_ss_text = f"{snap.scoresaber_ranked_play_count:,}"
+
+        # BeatLeader Ranked Play Count も同様に / で総数を表示する。
+        # BeatLeader 側の「総 Ranked 譜面数」は、BeatLeader★統計から算出した
+        # map_count 合計を分母として用いる。
+        bl_total_maps_for_ranked = sum(s.map_count for s in bl_stats)
+        if snap.beatleader_ranked_play_count is None:
+            ranked_play_bl_text = None
+        elif bl_total_maps_for_ranked > 0:
+            ranked_play_bl_text = f"{snap.beatleader_ranked_play_count:,}/{bl_total_maps_for_ranked:,}"
+        else:
+            ranked_play_bl_text = f"{snap.beatleader_ranked_play_count:,}"
+
+        # 国コードから国旗絵文字(🇯🇵など)を生成する
+        def _country_flag(code: Optional[str]) -> Optional[str]:
+            if not code:
+                return None
+            cc = str(code).upper()
+            if len(cc) != 2 or not cc.isalpha():
+                return cc
+            base = ord("🇦")  # REGIONAL INDICATOR SYMBOL LETTER A
+            return chr(base + (ord(cc[0]) - ord("A"))) + chr(base + (ord(cc[1]) - ord("A")))
+
+        # Name / Country は「Name (🇯🇵)」形式にまとめる
+        def _format_name_country(name: Optional[str], country: Optional[str]) -> Optional[str]:
+            if not name and not country:
+                return None
+            flag = _country_flag(country)
+            if name and flag:
+                return f"{name} ({flag})"
+            return name or flag
+
+        ss_name_country = _format_name_country(snap.scoresaber_name, snap.scoresaber_country)
+        bl_name_country = _format_name_country(snap.beatleader_name, snap.beatleader_country)
+
+        # Rank 表示は「GlobalRank (🇯🇵 CountryRank)」形式にまとめる
+        def _format_rank(global_rank: Optional[int], country: Optional[str], country_rank: Optional[int]) -> Optional[str]:
+            if global_rank is None and (not country or country_rank is None):
+                return None
+
+            parts: list[str] = []
+            if global_rank is not None:
+                parts.append(f"{global_rank:,}")
+            if country and country_rank is not None:
+                flag = _country_flag(country)
+                if flag:
+                    parts.append(f"({flag} {country_rank:,})")
+                else:
+                    parts.append(f"({country} {country_rank:,})")
+            return " ".join(parts) if parts else None
+
+        ss_rank_text = _format_rank(
+            snap.scoresaber_rank_global,
+            snap.scoresaber_country,
+            snap.scoresaber_rank_country,
+        )
+        bl_rank_text = _format_rank(
+            snap.beatleader_rank_global,
+            snap.beatleader_country,
+            snap.beatleader_rank_country,
+        )
+
+        # SS / BL 情報テーブル (2行×6列) を更新する
+        # 行0: ["PP" | PP値 | "Rank" | Rank値 | "Total" | Total値]
+        # 行1: ["Name" | Name値 | "Avg ACC" | Avg ACC値 | "Ranked" | Ranked値]
+        def _set_info_tbl(
+            tbl: QTableWidget,
+            id_val: Optional[str],
+            pp_val: Optional[str],
+            rank_val: Optional[str],
+            acc_val: Optional[str],
+            total_val: Optional[int],
+            ranked_val: Optional[str],
+        ) -> None:
+            def _lbl(text: str) -> QTableWidgetItem:
+                it = QTableWidgetItem(text)
+                it.setBackground(label_cell_color())
+                it.setForeground(label_cell_text_color())
+                return it
+
+            def _val(v: Optional[object]) -> QTableWidgetItem:
+                return QTableWidgetItem(str(v) if v is not None else "")
+
+            # 行0: ["ID" | ID値 | "Rank" | Rank値 | "Total" | Total値]
+            idLbl = _lbl("ID")
+            # ラベルのサイズを変更
+            idLbl.setSizeHint(QSize(40, 30))
+            rankValItem = _val(rank_val)
+            rankValItem.setSizeHint(QSize(110, 30))
+
+            tbl.setItem(0, 0, idLbl)
+            tbl.setItem(0, 1, _val(id_val))
+            tbl.setItem(0, 2, _lbl("Rank"))
+            tbl.setItem(0, 3, rankValItem)
+            tbl.setItem(0, 4, _lbl("Total Play Count"))
+            tbl.setItem(0, 5, QTableWidgetItem(f"{total_val:,}" if total_val is not None else ""))
+            # 行1: ["PP" | PP値 | "Avg ACC" | Avg ACC値 | "Ranked" | Ranked値]
+            tbl.setItem(1, 0, _lbl("PP"))
+            tbl.setItem(1, 1, _val(pp_val))
+            tbl.setItem(1, 2, _lbl("Avg ACC"))
+            tbl.setItem(1, 3, _val(acc_val))
+            tbl.setItem(1, 4, _lbl("Ranked Play Count"))
+            tbl.setItem(1, 5, _val(ranked_val))
+            tbl.resizeColumnsToContents()
+
+        _link_color = "#5aaaee" if is_dark() else "#0066cc"
+        _link_style = f"color:{_link_color}; text-decoration:none; font-weight:bold;"
+        if ss_id and ss_name_country:
+            self._ss_id_label.setText(f'<a href="https://scoresaber.com/u/{ss_id}" style="{_link_style}">{ss_name_country}</a>')
+        else:
+            self._ss_id_label.setText(ss_name_country or "")
+        if bl_id and bl_name_country:
+            self._bl_id_label.setText(f'<a href="https://beatleader.com/u/{bl_id}" style="{_link_style}">{bl_name_country}</a>')
+        else:
+            self._bl_id_label.setText(bl_name_country or "")
+        if snap.beatleader_prestige is not None:
+            _bl_prestige_text = f'<span style="font-size:12px;">Prestige:{snap.beatleader_prestige}</span>'
+            if snap.beatleader_level is not None:
+                _bl_prestige_text += f'<span style="font-size:11px;"> (Lv.{snap.beatleader_level})</span>'
+        elif snap.beatleader_level is not None:
+            _bl_prestige_text = f'<span style="font-size:12px;">Lv.{snap.beatleader_level}</span>'
+        else:
+            _bl_prestige_text = ""
+        self._bl_prestige_text_label.setText(_bl_prestige_text)
+        self._bl_prestige_icon_label.set_image_url(snap.beatleader_prestige_icon_url)
+        _set_info_tbl(
+            self.ss_info_table,
+            snap.scoresaber_id or snap.steam_id or "", ss_pp_text, ss_rank_text,
+            ss_acc_text, snap.scoresaber_total_play_count, ranked_play_ss_text,
+        )
+        _set_info_tbl(
+            self.bl_info_table,
+            snap.beatleader_id or snap.steam_id or "", bl_pp_text, bl_rank_text,
+            bl_acc_text, snap.beatleader_total_play_count, ranked_play_bl_text,
+        )
+
+        # AccSaber の Country Rank はプレイヤーの国コードに基づいて表示する。
+        # Rank 表示は「GlobalRank (🇨🇦 CountryRank)」のような形式にまとめる。
+        acc_country_code: Optional[str] = snap.scoresaber_country or snap.beatleader_country
+
+        def _format_acc_rank(global_rank: Optional[int], country_rank: Optional[int], country_code: Optional[str]) -> Optional[str]:
+            if global_rank is None and (country_code is None or country_rank is None):
+                return None
+
+            parts: list[str] = []
+            if global_rank is not None:
+                parts.append(f"{global_rank:,}")
+            if country_code and country_rank is not None:
+                flag = _country_flag(country_code)
+                if flag:
+                    parts.append(f"({flag} {country_rank:,})")
+                else:
+                    parts.append(f"({country_code} {country_rank:,})")
+            return " ".join(parts) if parts else None
+
+        def _format_ap(value: Optional[float]) -> Optional[str]:
+            if value is None:
+                return None
+            return f"{fmt(value, 2, comma=True)}"
+
+        # Play Count バー用の割合 (0.0〜1.0)。分母/分子どちらかが None なら None。
+        def _play_ratio(plays: Optional[int], total: Optional[int]) -> Optional[float]:
+            if plays is None or total is None or total == 0:
+                return None
+            return min(1.0, plays / total)
+
+        # --- AccSaber テーブルの更新 ---
+        rl_ap_overall = snap.accsaber_reloaded_overall_ap
+        rl_ap_true    = snap.accsaber_reloaded_true_ap
+        rl_ap_std     = snap.accsaber_reloaded_standard_ap
+        rl_ap_tech    = snap.accsaber_reloaded_tech_ap
+
+        _rl_map_counts = {
+            "overall": snap.accsaber_reloaded_overall_total_maps,
+            "true": snap.accsaber_reloaded_true_total_maps,
+            "standard": snap.accsaber_reloaded_standard_total_maps,
+            "tech": snap.accsaber_reloaded_tech_total_maps,
+        }
+
+        def _rl_play_fmt(plays: int | None, cat: str) -> str:
+            if plays is None:
+                return ""
+            total = _rl_map_counts.get(cat)
+            if total:
+                return f"{plays:,}/{total:,}"
+            return f"{plays:,}"
+
+        acc_rl_rows = [
+            ("AP",
+             _format_ap(rl_ap_overall), _format_ap(rl_ap_true),
+             _format_ap(rl_ap_std), _format_ap(rl_ap_tech)),
+            ("Rank",
+             _format_acc_rank(snap.accsaber_reloaded_overall_rank, snap.accsaber_reloaded_overall_rank_country, acc_country_code),
+             _format_acc_rank(snap.accsaber_reloaded_true_rank,    snap.accsaber_reloaded_true_rank_country,    acc_country_code),
+             _format_acc_rank(snap.accsaber_reloaded_standard_rank, snap.accsaber_reloaded_standard_rank_country, acc_country_code),
+             _format_acc_rank(snap.accsaber_reloaded_tech_rank,    snap.accsaber_reloaded_tech_rank_country,    acc_country_code)),
+            ("Play Count",
+                 _rl_play_fmt(snap.accsaber_reloaded_overall_ranked_plays,  "overall"),
+                 _rl_play_fmt(snap.accsaber_reloaded_true_ranked_plays,     "true"),
+                 _rl_play_fmt(snap.accsaber_reloaded_standard_ranked_plays, "standard"),
+                 _rl_play_fmt(snap.accsaber_reloaded_tech_ranked_plays,     "tech")),
+        ]
+        _xp = snap.accsaber_reloaded_xp
+        _xp_level = snap.accsaber_reloaded_xp_level
+        _xp_str = None
+        # XP が取れずレベルだけ分かるとき（プロフィールで補ったとき）も、Lv と称号は出す
+        if _xp is not None or _xp_level:
+            # 色は AccSaber サイトの CSS 変数に合わせる
+            #   Lv 数値 = --text-primary / 称号・XP = --text-secondary
+            _ACC_TEXT_PRIMARY = _acc_site_text_primary()
+            _ACC_TEXT_SECONDARY = _acc_site_text_secondary()
+            _lv_html = (
+                f'<span style="font-size:13px; color:{_ACC_TEXT_PRIMARY};">Lv.{_xp_level} </span>'
+                if _xp_level else ""
+            )
+            # XP レベル称号（例: LEGEND）を LV の右に表示
+            _lv_title = getattr(snap, "accsaber_reloaded_level_title", None)
+            _lv_title_html = (
+                f'<span style="font-size:11px; color:{_acc_site_level_title_color(_lv_title)}; font-weight:bold;">{_lv_title.upper()} </span>'
+                if _lv_title else ""
+            )
+            _xp_html = (
+                f'<span style="font-size:11px; color:{_ACC_TEXT_SECONDARY};">({fmt(_xp, 0, comma=True)} XP)</span>'
+                if _xp is not None else ""
+            )
+            _xp_str = _lv_html + _lv_title_html + _xp_html
+        _xp_rank_str = _format_acc_rank(snap.accsaber_reloaded_xp_rank, snap.accsaber_reloaded_xp_rank_country, acc_country_code)
+        _xp_parts: list[str] = []
+        if _xp_str:
+            _xp_parts.append(f"{_xp_str}")
+        if _xp_rank_str is not None:
+            _xp_rank_html = f'<span style="font-size:12px;">{_xp_rank_str}</span>'  
+            _xp_parts.append(f"XP Rank：{_xp_rank_html}")
+        _ms_done = snap.accsaber_reloaded_milestones_completed
+        _ms_total = snap.accsaber_reloaded_milestones_total
+        if _ms_done is not None and _ms_total:
+            _ms_html = f'<span style="font-size:12px;">{_ms_done}/{_ms_total}</span>'
+            _xp_parts.append(f"Milestones：{_ms_html}")
+        self._acc_rl_xp_label.setText(" ／ ".join(_xp_parts))
+        self._acc_rl_xp_label.setToolTip(re.sub(r"<[^>]+>", "", " ／ ".join(_xp_parts)))
+
+        # キャンペーン称号バッジ（AccSaber ラベルの右隣）
+        self._update_acc_rl_badge(
+            getattr(snap, "accsaber_reloaded_title_name", None),
+            getattr(snap, "accsaber_reloaded_title_icon_url", None),
+        )
+
+        # AccSaber Play Count バー用割合
+        _rl_play_ratios = {
+            1: _play_ratio(snap.accsaber_reloaded_overall_ranked_plays,  _rl_map_counts.get("overall")),
+            2: _play_ratio(snap.accsaber_reloaded_true_ranked_plays,     _rl_map_counts.get("true")),
+            3: _play_ratio(snap.accsaber_reloaded_standard_ranked_plays, _rl_map_counts.get("standard")),
+            4: _play_ratio(snap.accsaber_reloaded_tech_ranked_plays,     _rl_map_counts.get("tech")),
+        }
+        _rl_avg_acc_vals = {
+            0: getattr(snap, "accsaber_reloaded_overall_avg_acc", None),
+            1: getattr(snap, "accsaber_reloaded_true_avg_acc", None),
+            2: getattr(snap, "accsaber_reloaded_standard_avg_acc", None),
+            3: getattr(snap, "accsaber_reloaded_tech_avg_acc", None),
+        }
+        _rl_skill_vals = {
+            0: getattr(snap, "accsaber_reloaded_overall_skill_level", None),
+            1: getattr(snap, "accsaber_reloaded_true_skill_level", None),
+            2: getattr(snap, "accsaber_reloaded_standard_skill_level", None),
+            3: getattr(snap, "accsaber_reloaded_tech_skill_level", None),
+        }
+
+        # 行=Overall/True/Standard/Tech, 列=Metric/AP/Rank/Play Count/Avg Acc
+        _rl_cat_labels = ["Overall", "True", "Standard", "Tech"]
+        _rl_cat_colors = [
+            ACC_PLAY_COLORS["overall"], ACC_PLAY_COLORS["true"],
+            ACC_PLAY_COLORS["standard"], ACC_PLAY_COLORS["tech"],
+        ]
+        for row, cat_label in enumerate(_rl_cat_labels):
+            self.acc_rl_table.insertRow(row)
+            metric_item = QTableWidgetItem(cat_label)
+            metric_item.setBackground(label_cell_color())
+            metric_item.setForeground(label_cell_text_color())
+            self.acc_rl_table.setItem(row, 0, metric_item)
+            for col_i, src_row_i in enumerate([0, 1, 2], start=1):
+                _val = acc_rl_rows[src_row_i][row + 1]
+                _txt = "—" if _val in (None, "") else str(_val)
+                _item = QTableWidgetItem(_txt)
+                if col_i in (1, 2):
+                    _item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                if col_i == 3:
+                    _r = _rl_play_ratios.get(row + 1)
+                    if _r is not None:
+                        if _r >= 1.0:
+                            _item.setText(_txt + " 🏆")
+                        _item.setData(Qt.ItemDataRole.UserRole, _r)
+                        _item.setData(Qt.ItemDataRole.UserRole + 1, _rl_cat_colors[row])
+                self.acc_rl_table.setItem(row, col_i, _item)
+            # col 4: Avg Acc（バーあり）
+            _avg_rl = _rl_avg_acc_vals.get(row)
+            _avg_rl_txt = f"{fmt(_avg_rl, 2)}%" if _avg_rl is not None else "—"
+            _avg_rl_item = QTableWidgetItem(_avg_rl_txt)
+            if _avg_rl is not None:
+                _avg_rl_item.setData(Qt.ItemDataRole.UserRole, _avg_rl)
+            self.acc_rl_table.setItem(row, 4, _avg_rl_item)
+            # col 5: Skill Level（Play Count と同じカテゴリ色バー、MAX 100）
+            _skill_rl = _rl_skill_vals.get(row)
+            _skill_rl_txt = f"{fmt(_skill_rl, 2)}" if _skill_rl is not None else "—"
+            _skill_rl_item = QTableWidgetItem(_skill_rl_txt)
+            _skill_rl_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+            if _skill_rl is not None:
+                _skill_rl_item.setData(Qt.ItemDataRole.UserRole, max(0.0, min(1.0, _skill_rl / 100.0)))
+                _skill_rl_item.setData(Qt.ItemDataRole.UserRole + 1, _rl_cat_colors[row])
+            self.acc_rl_table.setItem(row, 5, _skill_rl_item)
+        self.acc_rl_table.resizeColumnsToContents()
+
+        # ★別統計（ScoreSaber ベース）と Total 行
+        total_maps = 0
+        total_clears = 0
+        total_nf = 0
+        total_ss = 0
+        total_na = 0
+        total_fc = 0
+        total_clear_rate = 0.0
+
+        for row, s in enumerate(stats):
+            self.star_table.insertRow(row)
+            star_item = QTableWidgetItem(str(s.star))
+            star_item.setBackground(label_cell_color())
+            star_item.setForeground(label_cell_text_color())
+            # 右寄せ
+            star_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+
+            self.star_table.setItem(row, 0, star_item)
+            self.star_table.setItem(row, 1, QTableWidgetItem(f"{s.map_count:,}"))
+            # 右寄せ
+            item1 = self.star_table.item(row, 1)
+            if item1 is not None:
+                item1.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            self.star_table.setItem(row, 2, QTableWidgetItem(f"{s.clear_count:,}"))
+            item2 = self.star_table.item(row, 2)
+            if item2 is not None:
+                item2.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+
+            percent_text = f"{fmt(s.clear_rate * 100, 1)}" if s.map_count > 0 else ""
+            self.star_table.setItem(row, 3, QTableWidgetItem(percent_text))
+
+            fc_item = QTableWidgetItem(f"{getattr(s, 'fc_count', None) or 0:,}")
+            fc_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            self.star_table.setItem(row, 4, fc_item)
+
+            fc_count_val = getattr(s, "fc_count", None) or 0
+            if s.clear_count > 0:
+                fc_rate = fc_count_val / s.clear_count * 100
+                fc_rate_text = f"{fmt(fc_rate, 1)}"
+                is_fc_full = fc_rate >= 100.0 - 1e-6
+                is_clear_full = s.map_count > 0 and s.clear_count >= s.map_count
+                fc_rate_medal = is_fc_full and not is_clear_full
+            else:
+                fc_rate_text = "0.0" if s.map_count > 0 else ""
+                fc_rate_medal = False
+            fc_rate_item = QTableWidgetItem(fc_rate_text)
+            fc_rate_item.setData(Qt.ItemDataRole.UserRole + 1, fc_rate_medal)
+            self.star_table.setItem(row, 5, fc_rate_item)
+
+            avg_acc_text = f"{fmt(s.average_acc, 2)}" if getattr(s, "average_acc", None) is not None else ("0.00" if s.map_count > 0 else "")
+            self.star_table.setItem(row, 6, QTableWidgetItem(avg_acc_text))
+
+            self.star_table.setItem(row, 7, QTableWidgetItem(f"{s.nf_count:,}"))
+            item7 = self.star_table.item(row, 7)
+            if item7 is not None:
+                item7.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            self.star_table.setItem(row, 8, QTableWidgetItem(f"{s.ss_count:,}"))
+            item8 = self.star_table.item(row, 8)
+            if item8 is not None:
+                item8.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            na_val = getattr(s, "na_count", 0)
+            self.star_table.setItem(row, 9, QTableWidgetItem(f"{na_val:,}"))
+            item9 = self.star_table.item(row, 9)
+            if item9 is not None:
+                item9.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+
+            pp_val = getattr(s, "pp_contribution", None)
+            pp_text = f"{fmt(pp_val, 0, comma=True)}" if pp_val is not None else "0"
+            pp_item = QTableWidgetItem(pp_text)
+            pp_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+            self.star_table.setItem(row, 10, pp_item)
+
+            pp_solo_val = getattr(s, "pp_solo", None)
+            pp_solo_text = f"{fmt(pp_solo_val, 0, comma=True)}" if pp_solo_val is not None else "0"
+            pp_solo_item = QTableWidgetItem(pp_solo_text)
+            pp_solo_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            self.star_table.setItem(row, 11, pp_solo_item)
+
+            total_maps += s.map_count
+            total_clears += s.clear_count
+            total_nf += s.nf_count
+            total_ss += s.ss_count
+            total_na += getattr(s, "na_count", 0)
+            total_fc += getattr(s, "fc_count", None) or 0
+
+        if stats:
+            total_row = self.star_table.rowCount()
+            self.star_table.insertRow(total_row)
+            total_item = QTableWidgetItem("Total")
+            total_item.setBackground(label_cell_color())
+            total_item.setForeground(label_cell_text_color())
+            self.star_table.setItem(total_row, 0, total_item)
+            self.star_table.setItem(total_row, 1, QTableWidgetItem(f"{total_maps:,}"))
+            self.star_table.setItem(total_row, 2, QTableWidgetItem(f"{total_clears:,}"))
+            if total_maps > 0:
+                total_clear_rate = total_clears / total_maps
+                percent_text = f"{fmt(total_clear_rate * 100, 1)}"
+            else:
+                percent_text = ""
+            self.star_table.setItem(total_row, 3, QTableWidgetItem(percent_text))
+            fc_total_item = QTableWidgetItem(f"{total_fc:,}")
+            fc_total_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            self.star_table.setItem(total_row, 4, fc_total_item)
+
+            total_fc_rate_val = total_fc / total_clears * 100 if total_clears > 0 else 0.0
+            fc_rate_total_item = QTableWidgetItem(f"{fmt(total_fc_rate_val, 1)}" if total_clears > 0 else "0.0")
+            is_fc_full = total_fc_rate_val >= 100.0 - 1e-6
+            is_clear_full = total_maps > 0 and total_clears >= total_maps
+            fc_rate_total_item.setData(Qt.ItemDataRole.UserRole + 1, is_fc_full and not is_clear_full)
+            self.star_table.setItem(total_row, 5, fc_rate_total_item)
+
+            # Total 行の平均精度は Snapshot 上段で取得している overall の平均精度を表示する
+            if snap.scoresaber_average_ranked_acc is not None:
+                total_avg_text = f"{fmt(snap.scoresaber_average_ranked_acc, 2)}"
+            else:
+                total_avg_text = ""
+            self.star_table.setItem(total_row, 6, QTableWidgetItem(total_avg_text))
+
+            nf_total_item = QTableWidgetItem(f"{total_nf:,}")
+            nf_total_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            self.star_table.setItem(total_row, 7, nf_total_item)
+            ss_total_item = QTableWidgetItem(f"{total_ss:,}")
+            ss_total_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            self.star_table.setItem(total_row, 8, ss_total_item)
+            na_total_item = QTableWidgetItem(f"{total_na:,}")
+            na_total_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            self.star_table.setItem(total_row, 9, na_total_item)
+
+            total_pp: float = sum(s.pp_contribution or 0.0 for s in stats)
+            pp_total_item = QTableWidgetItem(f"{fmt(total_pp, 0, comma=True)}")
+            pp_total_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+            self.star_table.setItem(total_row, 10, pp_total_item)
+
+            total_solo_pp: float = sum(s.pp_solo or 0.0 for s in stats)
+            pp_solo_total_item = QTableWidgetItem(f"{fmt(total_solo_pp, 0, comma=True)}")
+            pp_solo_total_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            self.star_table.setItem(total_row, 11, pp_solo_total_item)
+
+        self.star_table.resizeColumnsToContents()
+
+        # BeatLeader ★別統計と Total 行
+        # BeatLeader 側は BeatLeader の★統計そのものを全て表示する（ScoreSaber に存在しない★15 なども含む）。
+        bl_total_maps = 0
+        bl_total_clears = 0
+        bl_total_nf = 0
+        bl_total_ss = 0
+        bl_total_fc = 0
+        bl_total_clear_rate = 0.0
+
+        for row, s in enumerate(bl_stats):
+            self.bl_star_table.insertRow(row)
+            star_item = QTableWidgetItem(str(s.star))
+            star_item.setBackground(label_cell_color())
+            star_item.setForeground(label_cell_text_color())
+            # 右寄せ
+            star_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+
+            self.bl_star_table.setItem(row, 0, star_item)
+            self.bl_star_table.setItem(row, 1, QTableWidgetItem(f"{s.map_count:,}"))
+            item1 = self.bl_star_table.item(row, 1)
+            if item1 is not None:
+                item1.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            self.bl_star_table.setItem(row, 2, QTableWidgetItem(f"{s.clear_count:,}"))
+            item2 = self.bl_star_table.item(row, 2)
+            if item2 is not None:
+                item2.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+
+            percent_text = f"{fmt(s.clear_rate * 100, 1)}" if s.map_count > 0 else ""
+            self.bl_star_table.setItem(row, 3, QTableWidgetItem(percent_text))
+
+            bl_fc_item = QTableWidgetItem(f"{getattr(s, 'fc_count', None) or 0:,}")
+            bl_fc_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            self.bl_star_table.setItem(row, 4, bl_fc_item)
+
+            bl_fc_count_val = getattr(s, "fc_count", None) or 0
+            if s.clear_count > 0:
+                bl_fc_rate = bl_fc_count_val / s.clear_count * 100
+                bl_fc_rate_text = f"{fmt(bl_fc_rate, 1)}"
+                bl_is_fc_full = bl_fc_rate >= 100.0 - 1e-6
+                bl_is_clear_full = s.map_count > 0 and s.clear_count >= s.map_count
+                bl_fc_rate_medal = bl_is_fc_full and not bl_is_clear_full
+            else:
+                bl_fc_rate_text = "0.0" if s.map_count > 0 else ""
+                bl_fc_rate_medal = False
+            bl_fc_rate_item = QTableWidgetItem(bl_fc_rate_text)
+            bl_fc_rate_item.setData(Qt.ItemDataRole.UserRole + 1, bl_fc_rate_medal)
+            self.bl_star_table.setItem(row, 5, bl_fc_rate_item)
+
+            avg_acc_val = getattr(s, "average_acc", None)
+            avg_acc_text = f"{fmt(avg_acc_val, 2)}" if avg_acc_val is not None else ("0.00" if s.map_count > 0 else "")
+            acc_item = QTableWidgetItem(avg_acc_text)
+            if avg_acc_val is not None:
+                acc_item.setData(Qt.ItemDataRole.UserRole, float(avg_acc_val))
+            self.bl_star_table.setItem(row, 6, acc_item)
+
+            self.bl_star_table.setItem(row, 7, QTableWidgetItem(f"{s.nf_count:,}"))
+            item7_bl = self.bl_star_table.item(row, 7)
+            if item7_bl is not None:
+                item7_bl.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            self.bl_star_table.setItem(row, 8, QTableWidgetItem(f"{s.ss_count:,}"))
+            item8_bl = self.bl_star_table.item(row, 8)
+            if item8_bl is not None:
+                item8_bl.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            bl_na_val = getattr(s, "na_count", 0)
+            self.bl_star_table.setItem(row, 9, QTableWidgetItem(f"{bl_na_val:,}"))
+            item9_bl = self.bl_star_table.item(row, 9)
+            if item9_bl is not None:
+                item9_bl.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+
+            bl_pp_val = getattr(s, "pp_contribution", None)
+            bl_pp_text = f"{fmt(bl_pp_val, 0, comma=True)}" if bl_pp_val is not None else "0"
+            bl_pp_item = QTableWidgetItem(bl_pp_text)
+            bl_pp_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+            self.bl_star_table.setItem(row, 10, bl_pp_item)
+
+            bl_pp_solo_val = getattr(s, "pp_solo", None)
+            bl_pp_solo_text = f"{fmt(bl_pp_solo_val, 0, comma=True)}" if bl_pp_solo_val is not None else "0"
+            bl_pp_solo_item = QTableWidgetItem(bl_pp_solo_text)
+            bl_pp_solo_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            self.bl_star_table.setItem(row, 11, bl_pp_solo_item)
+
+        # Total 行は bl_stats 全体から集計
+        bl_total_na = 0
+        if bl_stats:
+            bl_total_maps = sum(s.map_count for s in bl_stats)
+            bl_total_clears = sum(s.clear_count for s in bl_stats)
+            bl_total_nf = sum(s.nf_count for s in bl_stats)
+            bl_total_ss = sum(s.ss_count for s in bl_stats)
+            bl_total_na = sum(getattr(s, "na_count", 0) for s in bl_stats)
+            bl_total_fc = sum(getattr(s, "fc_count", None) or 0 for s in bl_stats)
+
+        if bl_total_maps > 0:
+            bl_total_row = self.bl_star_table.rowCount()
+            self.bl_star_table.insertRow(bl_total_row)
+            total_item = QTableWidgetItem("Total")
+            total_item.setBackground(label_cell_color())
+            total_item.setForeground(label_cell_text_color())
+            self.bl_star_table.setItem(bl_total_row, 0, total_item)
+            self.bl_star_table.setItem(bl_total_row, 1, QTableWidgetItem(f"{bl_total_maps:,}"))
+            self.bl_star_table.setItem(bl_total_row, 2, QTableWidgetItem(f"{bl_total_clears:,}"))
+            bl_total_clear_rate = bl_total_clears / bl_total_maps
+            percent_text = f"{fmt(bl_total_clear_rate * 100, 1)}"
+            self.bl_star_table.setItem(bl_total_row, 3, QTableWidgetItem(percent_text))
+            bl_fc_total_item = QTableWidgetItem(f"{bl_total_fc:,}")
+            bl_fc_total_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            self.bl_star_table.setItem(bl_total_row, 4, bl_fc_total_item)
+
+            bl_total_fc_rate_val = bl_total_fc / bl_total_clears * 100 if bl_total_clears > 0 else 0.0
+            bl_fc_rate_total_item = QTableWidgetItem(f"{fmt(bl_total_fc_rate_val, 1)}" if bl_total_clears > 0 else "0.0")
+            bl_is_fc_full = bl_total_fc_rate_val >= 100.0 - 1e-6
+            bl_is_clear_full = bl_total_maps > 0 and bl_total_clears >= bl_total_maps
+            bl_fc_rate_total_item.setData(Qt.ItemDataRole.UserRole + 1, bl_is_fc_full and not bl_is_clear_full)
+            self.bl_star_table.setItem(bl_total_row, 5, bl_fc_rate_total_item)
+
+            if snap.beatleader_average_ranked_acc is not None:
+                bl_total_avg_text = f"{fmt(snap.beatleader_average_ranked_acc, 2)}"
+            else:
+                bl_total_avg_text = ""
+            bl_total_acc_item = QTableWidgetItem(bl_total_avg_text)
+            if snap.beatleader_average_ranked_acc is not None:
+                bl_total_acc_item.setData(Qt.ItemDataRole.UserRole, float(snap.beatleader_average_ranked_acc))
+            self.bl_star_table.setItem(bl_total_row, 6, bl_total_acc_item)
+
+            bl_nf_total_item = QTableWidgetItem(f"{bl_total_nf:,}")
+            bl_nf_total_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            self.bl_star_table.setItem(bl_total_row, 7, bl_nf_total_item)
+            bl_ss_total_item = QTableWidgetItem(f"{bl_total_ss:,}")
+            bl_ss_total_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            self.bl_star_table.setItem(bl_total_row, 8, bl_ss_total_item)
+            bl_na_total_item = QTableWidgetItem(f"{bl_total_na:,}")
+            bl_na_total_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            self.bl_star_table.setItem(bl_total_row, 9, bl_na_total_item)
+
+            bl_total_pp: float = sum(s.pp_contribution or 0.0 for s in bl_stats)
+            bl_pp_total_item = QTableWidgetItem(f"{fmt(bl_total_pp, 0, comma=True)}")
+            bl_pp_total_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+            self.bl_star_table.setItem(bl_total_row, 10, bl_pp_total_item)
+
+            bl_total_solo_pp: float = sum(s.pp_solo or 0.0 for s in bl_stats)
+            bl_pp_solo_total_item = QTableWidgetItem(f"{fmt(bl_total_solo_pp, 0, comma=True)}")
+            bl_pp_solo_total_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            self.bl_star_table.setItem(bl_total_row, 11, bl_pp_solo_total_item)
+
+        self.bl_star_table.resizeColumnsToContents()
+
+        # L/R トグル状態を保存してヘッダを更新する
+        self._current_bl_stats = list(bl_stats)
+        self._refresh_bl_avg_acc()
+
+    def _on_bl_acc_cell_clicked(self, row: int, col: int) -> None:
+        """BL ★テーブルの Avg ACC 列クリックで L/R 表示をトグルする。"""
+        if col != 6:
+            return
+        self._bl_acc_show_lr = not self._bl_acc_show_lr
+        self._refresh_bl_avg_acc()
+
+    def _refresh_bl_avg_acc(self) -> None:
+        """現在の _bl_acc_show_lr に合わせて BL Avg ACC 列の表示を更新する。"""
+        show_lr = self._bl_acc_show_lr
+        stats = self._current_bl_stats
+
+        # ヘッダを更新
+        header_item = self.bl_star_table.horizontalHeaderItem(6)
+        if header_item is None:
+            header_item = QTableWidgetItem()
+            self.bl_star_table.setHorizontalHeaderItem(6, header_item)
+        if show_lr:
+            header_item.setText("Avg LR ACC(%)")
+            header_item.setToolTip("クリックして通常表示に戻す")
+        else:
+            header_item.setText("Avg ACC(%)🔄")
+            header_item.setToolTip("クリックして左右精度(L/R)表示に切り替え")
+
+        _lr_color = QColor("#3388FF") if is_dark() else QColor("#111199")
+
+        for row, s in enumerate(stats):
+            item = self.bl_star_table.item(row, 6)
+            if item is None:
+                continue
+            avg_acc_val = getattr(s, "average_acc", None)
+            if show_lr:
+                al = getattr(s, "avg_acc_left", None)
+                ar = getattr(s, "avg_acc_right", None)
+                if al is not None or ar is not None:
+                    al_str = f"{fmt(al, 1)}" if al is not None else "—"
+                    ar_str = f"{fmt(ar, 1)}" if ar is not None else "—"
+                    item.setText(f"{al_str} / {ar_str}")
+                    item.setForeground(QBrush())
+                else:
+                    item.setText("L / R")
+                    item.setForeground(_lr_color)
+            else:
+                # 通常表示に戻す: foreground ロールをクリアしてデリゲートに色付けを委ねる
+                item.setForeground(QBrush())
+                avg_text = f"{fmt(avg_acc_val, 2)}" if avg_acc_val is not None else ("0.00" if s.map_count > 0 else "")
+                item.setText(avg_text)
+
+        # Total 行
+        total_item = self.bl_star_table.item(len(stats), 6)
+        if total_item is not None:
+            if show_lr:
+                left_pairs = [
+                    (getattr(s, "avg_acc_left", None), s.clear_count)
+                    for s in stats
+                    if getattr(s, "avg_acc_left", None) is not None and s.clear_count > 0
+                ]
+                right_pairs = [
+                    (getattr(s, "avg_acc_right", None), s.clear_count)
+                    for s in stats
+                    if getattr(s, "avg_acc_right", None) is not None and s.clear_count > 0
+                ]
+                al_str = f"{fmt(sum(v * c for v, c in left_pairs) / sum(c for _, c in left_pairs), 1)}" if left_pairs else "—"
+                ar_str = f"{fmt(sum(v * c for v, c in right_pairs) / sum(c for _, c in right_pairs), 1)}" if right_pairs else "—"
+                total_item.setText(f"{al_str} / {ar_str}")
+                total_item.setForeground(QBrush())
+            else:
+                total_item.setForeground(QBrush())
+                avg_val = total_item.data(Qt.ItemDataRole.UserRole)
+                if isinstance(avg_val, float):
+                    total_item.setText(f"{fmt(avg_val, 2)}")
+
+    def open_compare(self) -> None:
+        """スナップショット比較ダイアログを開く。"""
+
+        try:
+            steam_id = self._current_player_id()
+            dlg = SnapshotCompareDialog(self, initial_steam_id=steam_id)
+            dlg.exec()
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "Snapshot Compare", f"Failed to open snapshot comparer:\n{exc}")
+
+    def open_graph(self) -> None:
+        """スナップショットの推移グラフダイアログを開く。"""
+
+        steam_id = self._current_player_id()
+        if not steam_id:
+            QMessageBox.information(self, "Snapshot Graph", "No player selected.")
+            return
+
+        snaps = self._snapshots_by_player.get(steam_id) or []
+        if not snaps:
+            QMessageBox.information(self, "Snapshot Graph", "No snapshots for this player.")
+            return
+
+        try:
+            dlg = SnapshotGraphDialog(self, snaps)
+            dlg.exec()
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "Snapshot Graph", f"Failed to open snapshot graph:\n{exc}")
+
+    def _show_playlist_open_progress(self, label: str, parent: Optional[QWidget] = None) -> QProgressDialog:
+        """Playlist / Maps 画面を表示する前後の待機ダイアログを作成する。"""
+        dialog_parent = parent
+        progress = QProgressDialog(label, "", 0, 0, dialog_parent)
+        progress.setWindowTitle("Opening Playlist / Maps")
+        progress.setWindowModality(Qt.WindowModality.ApplicationModal)
+        progress.setAutoClose(False)
+        progress.setAutoReset(False)
+        progress.setCancelButton(None)
+        progress.setMinimumWidth(360)
+        progress.setMinimumDuration(0)
+        progress.show()
+        QApplication.processEvents()
+        return progress
+
+    def _show_playlist_window(
+        self,
+        initial_source_tab: str = "snapshot",
+        *,
+        show_window: bool = True,
+        show_progress: bool = True,
+        skip_maps_restore: bool = False,
+    ) -> None:
+        steam_id = self._current_player_id()
+        progress = self._show_playlist_open_progress("Opening Playlist / Maps...") if show_progress else None
+        try:
+            if not hasattr(self, "_playlist_window") or self._playlist_window is None:
+                self._playlist_window = PlaylistWindow(
+                    steam_id=steam_id,
+                    initial_source_tab=initial_source_tab,
+                    parent=None,
+                )
+                # Maps ボタンから開く場合は保存済み一覧の復元をスキップして即表示する。
+                self._playlist_window._skip_maps_restore = skip_maps_restore
+            else:
+                if progress is not None:
+                    progress.setLabelText("Preparing Playlist / Maps...")
+                    QApplication.processEvents()
+                # プレイヤーが変わっていたら steam_id を更新
+                self._playlist_window._steam_id = steam_id
+                self._playlist_window._export_dir = _load_playlist_export_dir()
+                self._playlist_window.select_source_tab(initial_source_tab)
+        finally:
+            if progress is not None:
+                progress.close()
+        if show_window:
+            self._playlist_window.show()
+            self._playlist_window.raise_()
+            self._playlist_window.activateWindow()
+            QApplication.processEvents()
+
+    def open_playlist(self) -> None:
+        """Playlist 画面を開く（現在プレイヤーのクリア情報を渡す）。"""
+        self._show_playlist_window("snapshot")
+
+    def open_maps(self) -> None:
+        """Playlist 画面を Maps タブ選択状態で開く。
+
+        Maps を開くのは新しい譜面を落とすために直後に Search する用途がほとんどで、
+        保存済み一覧の復元に時間がかかるため、その復元は行わず空の状態で開く。
+        """
+        self._show_playlist_window("maps", skip_maps_restore=True)
+
+    def open_settings(self) -> None:
+        try:
+            dlg = SettingsDialog(self)
+            dlg.exec()
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "Settings", f"Failed to open settings:\n{exc}")
+
+    def open_playlist_with_filter(
+        self,
+        source: str,
+        star_min: float = 0.0,
+        star_max: float = 20.0,
+        categories: Optional[List[str]] = None,
+        show_cleared: bool = True,
+        show_nf: bool = True,
+        show_unplayed: bool = True,
+        sort_mode: str = "status_desc",
+    ) -> None:
+        """Stats 画面からの連携用。Playlist 画面を開いてフィルタプリセットを適用する。"""
+        progress = self._show_playlist_open_progress("Opening Playlist / Maps...")
+        try:
+            self._show_playlist_window("snapshot", show_window=False, show_progress=False)
+            if self._playlist_window is None:
+                return
+            if not self._playlist_window.isVisible() and not self._playlist_window._initial_restore_started:
+                self._playlist_window._skip_initial_snapshot_restore = True
+            progress.close()
+            self._playlist_window.show()
+            self._playlist_window.raise_()
+            self._playlist_window.activateWindow()
+            QApplication.processEvents()
+            progress = self._show_playlist_open_progress("Applying Playlist filter...")
+            QApplication.processEvents()
+            self._playlist_window.apply_filter_preset(
+                source=source,
+                star_min=star_min,
+                star_max=star_max,
+                categories=categories,
+                show_cleared=show_cleared,
+                show_nf=show_nf,
+                show_unplayed=show_unplayed,
+                sort_mode=sort_mode,
+            )
+        finally:
+            progress.close()
+        self._playlist_window.raise_()
+        self._playlist_window.activateWindow()
+        QApplication.processEvents()
+
+    def _star_range_from_row(self, table: QTableWidget, row: int) -> tuple[float, float]:
+        star_item = table.item(row, 0)
+        if star_item is None:
+            return 0.0, 20.0
+        try:
+            star = int(star_item.text())
+        except ValueError:
+            return 0.0, 20.0
+        return float(star), float(star) + 1.0
+
+    def _open_star_playlist_preset(
+        self,
+        table: QTableWidget,
+        row: int,
+        source: str,
+        *,
+        show_cleared: bool,
+        show_nf: bool,
+        show_unplayed: bool,
+        sort_mode: str,
+    ) -> None:
+        star_min, star_max = self._star_range_from_row(table, row)
+        self.open_playlist_with_filter(
+            source,
+            star_min=star_min,
+            star_max=star_max,
+            show_cleared=show_cleared,
+            show_nf=show_nf,
+            show_unplayed=show_unplayed,
+            sort_mode=sort_mode,
+        )
+
+    def _on_ss_maps_clicked(self, row: int, col: int) -> None:
+        """SS ★テーブルの Maps 列クリックで Playlist 画面を Split by ★ で開く。"""
+        if col != 1:
+            return
+        self._open_star_playlist_preset(
+            self.star_table,
+            row,
+            "ss",
+            show_cleared=True,
+            show_nf=True,
+            show_unplayed=True,
+            sort_mode="status_desc",
+        )
+
+    def _on_ss_clears_clicked(self, row: int, col: int) -> None:
+        """SS ★テーブルの Clears 列クリックで Playlist 画面をクリア降順で開く。"""
+        if col != 2:
+            return
+        self._open_star_playlist_preset(
+            self.star_table,
+            row,
+            "ss",
+            show_cleared=True,
+            show_nf=False,
+            show_unplayed=False,
+            sort_mode="status_desc",
+        )
+
+    def _on_ss_clear_rate_clicked(self, row: int, col: int) -> None:
+        """SS ★テーブルの Clear Rate 列クリックで Playlist 画面をステータス昇順で開く。"""
+        if col != 3:
+            return
+        self._open_star_playlist_preset(
+            self.star_table,
+            row,
+            "ss",
+            show_cleared=True,
+            show_nf=True,
+            show_unplayed=True,
+            sort_mode="status_asc",
+        )
+
+    def _on_ss_fc_clicked(self, row: int, col: int) -> None:
+        """SS ★テーブルの FC 列クリックで Playlist 画面を FC 降順で開く。"""
+        if col != 4:
+            return
+        self._open_star_playlist_preset(
+            self.star_table,
+            row,
+            "ss",
+            show_cleared=True,
+            show_nf=False,
+            show_unplayed=False,
+            sort_mode="fc_desc",
+        )
+
+    def _on_ss_pp_clicked(self, row: int, col: int) -> None:
+        """SS ★テーブルの PP 列クリックで Playlist 画面を PP 高順で開く。"""
+        if col != 10:
+            return
+        self._open_star_playlist_preset(
+            self.star_table,
+            row,
+            "ss",
+            show_cleared=True,
+            show_nf=True,
+            show_unplayed=True,
+            sort_mode="pp_high",
+        )
+
+    def _on_ss_fc_rate_clicked(self, row: int, col: int) -> None:
+        """SS ★テーブルの FC Rate 列クリックで Playlist 画面を FC 昇順で開く。"""
+        if col != 5:
+            return
+        self._open_star_playlist_preset(
+            self.star_table,
+            row,
+            "ss",
+            show_cleared=True,
+            show_nf=True,
+            show_unplayed=True,
+            sort_mode="fc_asc",
+        )
+
+    def _on_ss_nf_clicked(self, row: int, col: int) -> None:
+        """SS ★テーブルの NF 列クリックで NF のみを Split by ★ で開く。"""
+        if col != 7:
+            return
+        self._open_star_playlist_preset(
+            self.star_table,
+            row,
+            "ss",
+            show_cleared=False,
+            show_nf=True,
+            show_unplayed=False,
+            sort_mode="status_desc",
+        )
+
+    def _on_bl_clears_clicked(self, row: int, col: int) -> None:
+        """BL ★テーブルの Clears 列クリックで Playlist 画面をクリア降順で開く。"""
+        if col != 2:
+            return
+        self._open_star_playlist_preset(
+            self.bl_star_table,
+            row,
+            "bl",
+            show_cleared=True,
+            show_nf=False,
+            show_unplayed=False,
+            sort_mode="status_desc",
+        )
+
+    def _on_bl_maps_clicked(self, row: int, col: int) -> None:
+        """BL ★テーブルの Maps 列クリックで Playlist 画面を Split by ★ で開く。"""
+        if col != 1:
+            return
+        self._open_star_playlist_preset(
+            self.bl_star_table,
+            row,
+            "bl",
+            show_cleared=True,
+            show_nf=True,
+            show_unplayed=True,
+            sort_mode="status_desc",
+        )
+
+    def _on_bl_clear_rate_clicked(self, row: int, col: int) -> None:
+        """BL ★テーブルの Clear Rate 列クリックで Playlist 画面をステータス昇順で開く。"""
+        if col != 3:
+            return
+        self._open_star_playlist_preset(
+            self.bl_star_table,
+            row,
+            "bl",
+            show_cleared=True,
+            show_nf=True,
+            show_unplayed=True,
+            sort_mode="status_asc",
+        )
+
+    def _on_bl_fc_clicked(self, row: int, col: int) -> None:
+        """BL ★テーブルの FC 列クリックで Playlist 画面を FC 降順で開く。"""
+        if col != 4:
+            return
+        self._open_star_playlist_preset(
+            self.bl_star_table,
+            row,
+            "bl",
+            show_cleared=True,
+            show_nf=False,
+            show_unplayed=False,
+            sort_mode="fc_desc",
+        )
+
+    def _on_bl_pp_clicked(self, row: int, col: int) -> None:
+        """BL ★テーブルの PP 列クリックで Playlist 画面を PP 高順で開く。"""
+        if col != 10:
+            return
+        self._open_star_playlist_preset(
+            self.bl_star_table,
+            row,
+            "bl",
+            show_cleared=True,
+            show_nf=True,
+            show_unplayed=True,
+            sort_mode="pp_high",
+        )
+
+    def _on_bl_fc_rate_clicked(self, row: int, col: int) -> None:
+        """BL ★テーブルの FC Rate 列クリックで Playlist 画面を FC 昇順で開く。"""
+        if col != 5:
+            return
+        self._open_star_playlist_preset(
+            self.bl_star_table,
+            row,
+            "bl",
+            show_cleared=True,
+            show_nf=True,
+            show_unplayed=True,
+            sort_mode="fc_asc",
+        )
+
+    def _on_bl_nf_clicked(self, row: int, col: int) -> None:
+        """BL ★テーブルの NF 列クリックで NF のみを Split by ★ で開く。"""
+        if col != 7:
+            return
+        self._open_star_playlist_preset(
+            self.bl_star_table,
+            row,
+            "bl",
+            show_cleared=False,
+            show_nf=True,
+            show_unplayed=False,
+            sort_mode="status_desc",
+        )
+
+    def _on_acc_rl_play_count_clicked(self, row: int, col: int) -> None:
+        """AccSaber テーブルの Play Count 列クリックで Playlist 画面を開く。"""
+        if col != 3:
+            return
+        _row_categories: Dict[int, Optional[List[str]]] = {
+            0: None,          # Overall
+            1: ["true"],
+            2: ["standard"],
+            3: ["tech"],
+        }
+        self.open_playlist_with_filter("acc_rl", categories=_row_categories.get(row), sort_mode="status_asc")
+
+    def _on_acc_rl_ap_clicked(self, row: int, col: int) -> None:
+        """AccSaber テーブルの AP 列クリックで Playlist 画面を AP 高順で開く。"""
+        if col != 1:
+            return
+        _row_categories: Dict[int, Optional[List[str]]] = {
+            0: None,
+            1: ["true"],
+            2: ["standard"],
+            3: ["tech"],
+        }
+        self.open_playlist_with_filter("acc_rl", categories=_row_categories.get(row), sort_mode="ap_high")
+
+
+def run() -> None:
+    from .crash_guard import install_crash_guard
+    install_crash_guard()
+    app: QApplication = QApplication.instance() or QApplication([])  # type: ignore[assignment]
+    _init_theme(app)  # 保存済み設定 or Windows システム設定でテーマを初期化
+    # アプリ共通アイコンを設定（全ウィンドウのタイトルバー・タスクバーに反映）
+    _icon_path = resource_path("app_icon.ico")
+    if _icon_path.exists():
+        app.setWindowIcon(QIcon(str(_icon_path)))
+    window = PlayerWindow()
+    # ウィンドウサイズは PlayerWindow.__init__ 内で復元される
+    window.show()
+
+    # 起動直後に必要な設定/初回ダイアログを表示する。
+    QTimer.singleShot(0, window._prompt_startup_dialogs_if_needed)
+
+    app.exec()

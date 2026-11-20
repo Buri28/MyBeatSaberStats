@@ -1,0 +1,15 @@
+{
+  "fetch_ss_ranked_maps": true,
+  "fetch_bl_ranked_maps": true,
+  "fetch_scoresaber": true,
+  "fetch_beatleader": true,
+  "fetch_accsaber": true,
+  "fetch_accsaber_rl": true,
+  "ss_fetch_all": false,
+  "ss_fetch_from_enabled": false,
+  "ss_fetch_from_datetime": "2026-04-19T11:10:43",
+  "bl_fetch_all": false,
+  "bl_fetch_from_enabled": false,
+  "bl_fetch_from_datetime": "2026-04-19T11:10:43",
+  "export_all_after_snapshot": false
+}

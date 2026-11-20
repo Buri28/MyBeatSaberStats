@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QPushButton,
     QSplitter,
+    QSizePolicy,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -951,6 +952,7 @@ class PercentageBarDelegate(QStyledItemDelegate):
         dark_text_off_bar: Optional[str] = "#4499FF",
         light_text_on_bar: Optional[str] = "#2222FF",
         light_text_off_bar: Optional[str] = "#111199",
+        trophy: bool = True,
     ) -> None:
         """ コンストラクタ。
         :param parent: 親ウィジェット
@@ -960,8 +962,10 @@ class PercentageBarDelegate(QStyledItemDelegate):
         :param dark_text_off_bar: ダークモード・バーなし/暗いバー時のテキスト色（None=デフォルト）
         :param light_text_on_bar: ライトモード・明るいバー重なり時のテキスト色（None=デフォルト）
         :param light_text_off_bar: ライトモード・バーなし/暗いバー時のテキスト色（None=デフォルト）
+        :param trophy: max_value に届いたとき太字と 🏆 / 🏅 を付けるか（表示用の目安の上限では False）
         """
         super().__init__(parent)
+        self._trophy = trophy
         self._max_value = max_value
         self._min_value = gradient_min
         self._dark_text_on_bar = dark_text_on_bar
@@ -988,7 +992,7 @@ class PercentageBarDelegate(QStyledItemDelegate):
     def initStyleOption(self, option, index) -> None:  # type: ignore[override]
         super().initStyleOption(option, index)
         value = self._bar_value(index)
-        if value is not None and value >= self._max_value - 1e-9:
+        if self._trophy and value is not None and value >= self._max_value - 1e-9:
             option.font.setBold(True)
             # UserRole+1 が True のときは FC 100% だが Clear Rate が 100% 未満 → 🏅
             use_medal = index.data(Qt.ItemDataRole.UserRole + 1)
@@ -1983,6 +1987,8 @@ class PlayerWindow(QMainWindow):
         bl_col_layout.setSpacing(0)
         bl_col_layout.addWidget(_bl_hdr_widget)         # アイコン + SteamID
         bl_col_layout.addWidget(self.bl_info_table)     # スクロールしない情報行
+        from .player_pp import PlayerPPPanel
+        self.bl_pp_table = PlayerPPPanel(self, PercentageBarDelegate)
         bl_col_layout.addWidget(self.bl_star_table, 1)  # stretch=1 → 残りを占有
 
         # 全体: 2列横スプリッタ [SS パネル (左) | BL パネル (右)]
@@ -2018,13 +2024,13 @@ class PlayerWindow(QMainWindow):
         self._acc_rl_xp_label = QLabel("", self)
         self._acc_rl_xp_label.setStyleSheet("font-size: 11px; font-weight: 600; color: #DF8511; padding: 0px 2px;")
         self._acc_rl_xp_label.setTextFormat(Qt.TextFormat.RichText)
+        self._acc_rl_xp_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         _acc_rl_header_layout.addWidget(self._acc_rl_title)
         _acc_rl_header_layout.addWidget(self._acc_rl_badge)
         _acc_rl_header_layout.addWidget(self._acc_rl_badge_text)
-        _acc_rl_header_layout.addWidget(self._acc_rl_xp_label)
-        _acc_rl_header_layout.addStretch()
+        _acc_rl_header_layout.addWidget(self._acc_rl_xp_label, 1)
         _acc_rl_header.setFixedHeight(20)
-        left_acc_layout.addWidget(_acc_rl_header)
+        left_acc_layout.addSpacing(20)
 
         # 本体: AccSaber テーブルのみ（ScoreSaber 枠と幅を揃える左ペイン）
         left_acc_layout.addWidget(self.acc_rl_table, 1)
@@ -2060,7 +2066,7 @@ class PlayerWindow(QMainWindow):
         self._apply_events_frame()
 
         _events_container = QWidget(self)
-        _events_container.setFixedWidth(320)  # 幅は固定し、右端に寄せる
+        _events_container.setMinimumWidth(self.bl_pp_table.minimumWidth())
         _events_vbox = QVBoxLayout(_events_container)
         _events_vbox.setContentsMargins(0, 0, 0, 0)
         _events_vbox.setSpacing(2)
@@ -2071,26 +2077,61 @@ class PlayerWindow(QMainWindow):
         _events_vbox.addWidget(self._events_scroll, 1)  # 本体は枠内
 
         _right_bottom_widget = QWidget(self)
-        _right_bottom_layout = QHBoxLayout(_right_bottom_widget)
+        _right_bottom_layout = QVBoxLayout(_right_bottom_widget)
         _right_bottom_layout.setContentsMargins(0, 0, 0, 0)
         _right_bottom_layout.setSpacing(6)
-        _right_bottom_layout.addLayout(_acc_btn_col)
-        _right_bottom_layout.addStretch(1)  # ボタンと Events の間を伸縮させ、Events を右端に固定
-        _right_bottom_layout.addWidget(_events_container)
+        _pp_container = QWidget(self)
+        _pp_layout = QVBoxLayout(_pp_container)
+        _pp_layout.setContentsMargins(0, 0, 0, 0)
+        _pp_layout.setSpacing(2)
+        _pp_header = QLabel("BeatLeader Skill", self)
+        _pp_header.setStyleSheet("font-weight: bold; font-size: 11px; padding: 0px 2px;")
+        _pp_header.setFixedHeight(20)
+        # Align the first button with the first PP row below the header and frame.
+        _acc_btn_col.setContentsMargins(0, _pp_header.height() + _pp_layout.spacing()
+                                        + self.bl_pp_table.frameWidth(), 0, 0)
+        _pp_layout.addWidget(_pp_header)
+        _pp_layout.addWidget(self.bl_pp_table)
+        _pp_layout.addStretch(1)
+        _bottom_actions = QHBoxLayout()
+        _bottom_actions.setSpacing(6)
+        _bottom_actions.addLayout(_acc_btn_col)
+        _bottom_actions.addSpacing(4)
+        _bottom_actions.addWidget(_pp_container, 1)
+        _bottom_actions.addWidget(_events_container, 1)
+        _right_bottom_layout.addLayout(_bottom_actions, 1)
 
         # 下部: 横スプリッタ [AccSaber テーブル | ボタン＋Events]
         # ScoreSaber/BeatLeader の _main_splitter と同じ分割比にし、左端を揃える
         self._bottom_h_splitter = QSplitter(Qt.Orientation.Horizontal, self)
         self._bottom_h_splitter.addWidget(left_acc_widget)
         self._bottom_h_splitter.addWidget(_right_bottom_widget)
+        # The header spans the table and the vacant space above the buttons.
+        self._acc_header = _acc_rl_header
+        self._bottom_container = QWidget(self)
+        _bottom_container_layout = QVBoxLayout(self._bottom_container)
+        _bottom_container_layout.setContentsMargins(0, 0, 0, 0)
+        _bottom_container_layout.addWidget(self._bottom_h_splitter)
+        self._acc_header.setParent(self._bottom_container)
+        self._acc_header.show()
+        self._acc_header.raise_()
+        self._acc_header_left = left_acc_widget
+        self._acc_header_limit = _pp_header
+        for widget in (self._bottom_h_splitter, left_acc_widget, _pp_header):
+            widget.installEventFilter(self)
+        self._bottom_h_splitter.splitterMoved.connect(lambda *_: self._position_acc_header())
         self._bottom_h_splitter.setStretchFactor(0, 1)
         self._bottom_h_splitter.setStretchFactor(1, 1)
         self._bottom_h_splitter.setSizes([578, 610])  # _main_splitter と同じ初期比で SS 枠と揃える
+        self._main_splitter.splitterMoved.connect(
+            lambda *_: self._bottom_h_splitter.setSizes(self._main_splitter.sizes()))
+        self._bottom_h_splitter.splitterMoved.connect(
+            lambda *_: self._main_splitter.setSizes(self._bottom_h_splitter.sizes()))
 
         # 中央エリア (★テーブル) と下部エリアの間に縦スプリッタを設置
         self._mid_bottom_splitter = QSplitter(Qt.Orientation.Vertical, self)
         self._mid_bottom_splitter.addWidget(self._main_splitter)
-        self._mid_bottom_splitter.addWidget(self._bottom_h_splitter)
+        self._mid_bottom_splitter.addWidget(self._bottom_container)
         self._mid_bottom_splitter.setStretchFactor(0, 1)
         self._mid_bottom_splitter.setStretchFactor(1, 0)
         self._mid_bottom_splitter.setSizes([528, 165])  # 初期サイズ配分の目安
@@ -2134,6 +2175,22 @@ class PlayerWindow(QMainWindow):
         QTimer.singleShot(100, self._update_checker.start)
 
     # ---------------- internal helpers ----------------
+
+    def eventFilter(self, obj, event) -> bool:  # type: ignore[override]
+        if event.type() in (QEvent.Type.Resize, QEvent.Type.Move, QEvent.Type.Show):
+            if obj in (getattr(self, "_bottom_h_splitter", None),
+                       getattr(self, "_acc_header_left", None),
+                       getattr(self, "_acc_header_limit", None)):
+                QTimer.singleShot(0, self._position_acc_header)
+        return super().eventFilter(obj, event)
+
+    def _position_acc_header(self) -> None:
+        container = self._bottom_container
+        left = self._acc_header_left.mapTo(container, self._acc_header_left.rect().topLeft())
+        limit = self._acc_header_limit.mapTo(container, self._acc_header_limit.rect().topLeft())
+        x = left.x() + 2
+        self._acc_header.setGeometry(x, left.y() + 2, max(0, limit.x() - x - 4), 20)
+        self._acc_header.raise_()
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
         """ウィンドウクローズ時に UI 状態を確実に保存する。"""
@@ -3094,6 +3151,7 @@ class PlayerWindow(QMainWindow):
         self._apply_events_frame()
         self.ss_info_table.clearContents()
         self.bl_info_table.clearContents()
+        self.bl_pp_table.set_snapshots(None)
         self._ss_id_label.setText("")
         self._bl_id_label.setText("")
         self._bl_prestige_text_label.setText("")
@@ -3129,6 +3187,9 @@ class PlayerWindow(QMainWindow):
         if snap is None:
             snap = max(snaps, key=lambda s: s.taken_at)
 
+        self.bl_pp_table.set_snapshots(snap)
+        from .accsaber_status import status_text
+        self._acc_rl_title.setToolTip("\n".join(getattr(snap, "accsaber_fetch_errors", []) or []))
         # --- キャッシュ情報ラベル更新 ---
         ss_id = snap.scoresaber_id
         bl_id = snap.beatleader_id or steam_id
@@ -3151,6 +3212,8 @@ class PlayerWindow(QMainWindow):
             )
         else:
             self._acc_rl_title.setText("AccSaber")
+
+        self._acc_rl_title.setText(self._acc_rl_title.text() + " ／ " + status_text(snap))
 
         # プレイヤーアバターを非同期で取得
         _preferred_avatar = self._load_avatar_showing()
@@ -3436,6 +3499,7 @@ class PlayerWindow(QMainWindow):
             _ms_html = f'<span style="font-size:12px;">{_ms_done}/{_ms_total}</span>'
             _xp_parts.append(f"Milestones：{_ms_html}")
         self._acc_rl_xp_label.setText(" ／ ".join(_xp_parts))
+        self._acc_rl_xp_label.setToolTip(re.sub(r"<[^>]+>", "", " ／ ".join(_xp_parts)))
 
         # キャンペーン称号バッジ（AccSaber ラベルの右隣）
         self._update_acc_rl_badge(
@@ -3477,7 +3541,7 @@ class PlayerWindow(QMainWindow):
             self.acc_rl_table.setItem(row, 0, metric_item)
             for col_i, src_row_i in enumerate([0, 1, 2], start=1):
                 _val = acc_rl_rows[src_row_i][row + 1]
-                _txt = "" if _val is None else str(_val)
+                _txt = "—" if _val in (None, "") else str(_val)
                 _item = QTableWidgetItem(_txt)
                 if col_i in (1, 2):
                     _item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
@@ -3491,14 +3555,14 @@ class PlayerWindow(QMainWindow):
                 self.acc_rl_table.setItem(row, col_i, _item)
             # col 4: Avg Acc（バーあり）
             _avg_rl = _rl_avg_acc_vals.get(row)
-            _avg_rl_txt = f"{fmt(_avg_rl, 2)}%" if _avg_rl is not None else ""
+            _avg_rl_txt = f"{fmt(_avg_rl, 2)}%" if _avg_rl is not None else "—"
             _avg_rl_item = QTableWidgetItem(_avg_rl_txt)
             if _avg_rl is not None:
                 _avg_rl_item.setData(Qt.ItemDataRole.UserRole, _avg_rl)
             self.acc_rl_table.setItem(row, 4, _avg_rl_item)
             # col 5: Skill Level（Play Count と同じカテゴリ色バー、MAX 100）
             _skill_rl = _rl_skill_vals.get(row)
-            _skill_rl_txt = f"{fmt(_skill_rl, 2)}" if _skill_rl is not None else ""
+            _skill_rl_txt = f"{fmt(_skill_rl, 2)}" if _skill_rl is not None else "—"
             _skill_rl_item = QTableWidgetItem(_skill_rl_txt)
             _skill_rl_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
             if _skill_rl is not None:
@@ -3831,8 +3895,8 @@ class PlayerWindow(QMainWindow):
                 al = getattr(s, "avg_acc_left", None)
                 ar = getattr(s, "avg_acc_right", None)
                 if al is not None or ar is not None:
-                    al_str = f"{fmt(al, 1)}" if al is not None else "?"
-                    ar_str = f"{fmt(ar, 1)}" if ar is not None else "?"
+                    al_str = f"{fmt(al, 1)}" if al is not None else "—"
+                    ar_str = f"{fmt(ar, 1)}" if ar is not None else "—"
                     item.setText(f"{al_str} / {ar_str}")
                     item.setForeground(QBrush())
                 else:
@@ -3858,8 +3922,8 @@ class PlayerWindow(QMainWindow):
                     for s in stats
                     if getattr(s, "avg_acc_right", None) is not None and s.clear_count > 0
                 ]
-                al_str = f"{fmt(sum(v * c for v, c in left_pairs) / sum(c for _, c in left_pairs), 1)}" if left_pairs else "?"
-                ar_str = f"{fmt(sum(v * c for v, c in right_pairs) / sum(c for _, c in right_pairs), 1)}" if right_pairs else "?"
+                al_str = f"{fmt(sum(v * c for v, c in left_pairs) / sum(c for _, c in left_pairs), 1)}" if left_pairs else "—"
+                ar_str = f"{fmt(sum(v * c for v, c in right_pairs) / sum(c for _, c in right_pairs), 1)}" if right_pairs else "—"
                 total_item.setText(f"{al_str} / {ar_str}")
                 total_item.setForeground(QBrush())
             else:

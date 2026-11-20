@@ -910,6 +910,17 @@ _SEARCH_MAX_PAGES = 3
 #: /users/{id} を何度も叩かないようにする（名前・称号・XP で参照するため）。
 _USER_PROFILE_CACHE: "WeakKeyDictionary[requests.Session, Dict[str, Optional[Dict]]]" = WeakKeyDictionary()
 _USER_PROFILE_LOCK = threading.Lock()
+#: /users/{id} が 404（AccSaber に登録していないプレイヤー）だった ID。API の失敗と分けるために覚える。
+_USER_NOT_FOUND: "WeakKeyDictionary[requests.Session, set]" = WeakKeyDictionary()
+
+
+def user_not_registered(player_id: str, session: requests.Session) -> bool:
+    """このセッションで /users/{id} が 404 だった（AccSaber に登録していない）か。"""
+    with _USER_PROFILE_LOCK:
+        try:
+            return str(player_id) in _USER_NOT_FOUND.get(session, set())
+        except TypeError:
+            return False
 
 
 def fetch_user_profile(
@@ -937,6 +948,14 @@ def fetch_user_profile(
     try:
         resp = session.get(f"{BASE_URL}/users/{player_id}", timeout=30)
         if _is_rate_limited(resp, "fetch_user_profile", f"player_id={player_id}"):
+            return None
+        if resp.status_code == 404:
+            # 登録していないプレイヤー。API の失敗ではないので失敗の記録には残さない
+            try:
+                with _USER_PROFILE_LOCK:
+                    _USER_NOT_FOUND.setdefault(session, set()).add(str(player_id))
+            except TypeError:
+                pass
             return None
         resp.raise_for_status()
         data = resp.json()
@@ -1046,6 +1065,7 @@ def _search_in_leaderboard(
     country: Optional[str],
     session: requests.Session,
     player_name: Optional[str] = None,
+    *, raise_errors: bool = False,
 ) -> Optional[AccSaberReloadedPlayer]:
     """指定カテゴリのリーダーボードからプレイヤーを検索する。
 
@@ -1081,11 +1101,15 @@ def _search_in_leaderboard(
                 "_search_in_leaderboard",
                 f"category_uuid={category_uuid} player_id={player_id} page={page}",
             ):
+                if raise_errors:
+                    resp.raise_for_status()
                 break
             resp.raise_for_status()
             data = resp.json()
         except Exception as exc:  # noqa: BLE001
             log_api_failure("accsaber_reloaded", "_search_in_leaderboard", f"request failed url={url} category_uuid={category_uuid} player_id={player_id} country={country} page={page}", exc)
+            if raise_errors:
+                raise
             break
 
         content = data.get("content")
@@ -1113,11 +1137,14 @@ def fetch_player_all_categories(
     player_id: str,
     country: Optional[str] = None,
     session: Optional[requests.Session] = None,
+    *, on_warning=None,
+    failed: Optional[set] = None,
 ) -> Dict[str, Optional[AccSaberReloadedPlayer]]:
     """指定プレイヤーの AccSaber Reloaded 全カテゴリのランク情報を取得する。
 
     戻り値: {"overall": ..., "true": ..., "standard": ..., "tech": ...}
     各カテゴリで見つからない / API エラーの場合は None。
+    failed に set を渡すと、API エラーだったカテゴリを入れる（None でも failed に無ければ、そのカテゴリに未登録）。
     """
     if not player_id:
         return {cat: None for cat in CATEGORY_IDS}
@@ -1134,9 +1161,16 @@ def fetch_player_all_categories(
     for category, uuid in CATEGORY_IDS.items():
         try:
             result[category] = _search_in_leaderboard(
-                uuid, player_id, country, session, player_name=player_name
+                uuid, player_id, country, session, player_name=player_name,
+                raise_errors=on_warning is not None,
             )
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            if str(exc) == "SNAPSHOT_CANCELLED":
+                raise
+            if on_warning is not None:
+                on_warning(f"AccSaber {category}: {exc}")
+            if failed is not None:
+                failed.add(category)
             result[category] = None
 
     return result

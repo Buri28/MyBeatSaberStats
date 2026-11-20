@@ -1,0 +1,24 @@
+real scoresaber_complete: 2026-11-18T12:26:37Z
+--- as-is: status=done calls=2
+{'slug': '2026/November-2026', 'date': '2026-11-15', 'reflected': 0, 'refetched': 0, 'flagged': 0, 'pending': 0, 'skipped': 'before_full_traversal'}
+SS reweight: 2026/November-2026: 反映済み 18 / 取り直し 0 / 印 0 / SS 未反映 0
+--- complete=2026-11-01: status=done calls=2
+{'slug': '2026/November-2026', 'date': '2026-11-15', 'reflected': 18, 'refetched': 0, 'flagged': 0, 'pending': 0}
+  reflected 702820  Anomaly | Expert+ | VoltageO & Bitz | 14.25 -> 14.2
+  reflected 1819224  ⨍iиorzᾶ | Expert+ | Aquaflee | 14.15 -> 14.2
+  reflected 2248885  Achromatic City -Lost Palette- | Expert+ | atlatiko & tecmonke | 12.94 -> 13.59
+  reflected 2051028  Archive of Youth | Expert+ | Uadyet & zeon | 12.82 -> 12.7
+  reflected 2249406  Xaleid◆scopiX | Expert+ | MaGneTism | 12.81 -> 13.07
+  reflected 703566  Grandspell (-Microdose-) | Expert+ | MaGneTism | 12.13 -> 11.94
+  reflected 2242550  Noncount Vibes | Expert+ | Potassium 737 | 12.04 -> 12.17
+  reflected 2249828  Cirno's Perfect Math Class | Expert+ | Cosmo | 10.22 -> 11.11
+  reflected 2248884  Achromatic City -Lost Palette- | Expert | atlatiko & tecmonke | 10.0 -> 10.23
+  reflected 2249405  Xaleid◆scopiX | Expert | MaGneTism | 9.99 -> 10.37
+  reflected 2249827  Cirno's Perfect Math Class | Expert | Cosmo | 9.12 -> 9.13
+  reflected 2248923  STAXX | Expert | Fvrwvrd | 7.97 -> 8.22
+  reflected 2249911  Affection Addiction | Expert+ | Rusty & Bitz | 6.34 -> 6.65
+  reflected 2249826  Cirno's Perfect Math Class | Hard | Cosmo | 5.62 -> 6.94
+  reflected 2249910  Affection Addiction | Expert | Rusty & Bitz | 5.1 -> 5.34
+  reflected 2249909  Affection Addiction | Hard | Rusty & Bitz | 4.33 -> 4.82
+  reflected 2249824  Cirno's Perfect Math Class | Easy | Cosmo | 4.08 -> 5.23
+  reflected 2249825  Cirno's Perfect Math Class | Normal | Cosmo | 4.05 -> 5.85

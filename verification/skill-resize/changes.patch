@@ -1,0 +1,162 @@
+--- player_app.before.py
++++ src/mybeatsaberstats/player_app.py
+@@ -2081,7 +2081,7 @@
+         _pp_layout = QVBoxLayout(_pp_container)
+         _pp_layout.setContentsMargins(0, 0, 0, 0)
+         _pp_layout.setSpacing(2)
+-        _pp_header = QLabel("BeatLeader PP", self)
++        _pp_header = QLabel("BeatLeader Skill", self)
+         _pp_header.setStyleSheet("font-weight: bold; font-size: 11px; padding: 0px 2px;")
+         _pp_header.setFixedHeight(20)
+         _pp_layout.addWidget(_pp_header)
+--- player_pp.before.py
++++ src/mybeatsaberstats/player_pp.py
+@@ -6,9 +6,9 @@
+ from .theme import (table_stylesheet, diff_positive_bg, diff_negative_bg,
+                     diff_neutral_bg, diff_text_color, label_cell_color, label_cell_text_color)
+ 
+-PP_FIELDS = (("Pass PP", "beatleader_pass_pp"),
++PP_FIELDS = (("Acc PP", "beatleader_acc_pp"),
+              ("Tech PP", "beatleader_tech_pp"),
+-             ("Acc PP", "beatleader_acc_pp"))
++             ("Pass PP", "beatleader_pass_pp"))
+ 
+ 
+ def pp_limits(snapshot):
+@@ -30,6 +30,12 @@
+     return (3000, 1200, 14500)
+ 
+ 
++def pp_limits_by_field(snapshot):
++    """Keep component scales independent of the display order."""
++    return dict(zip(("beatleader_pass_pp", "beatleader_tech_pp", "beatleader_acc_pp"),
++                    pp_limits(snapshot)))
++
++
+ class PlayerPPPanel(QTableWidget):
+     """Three always-visible player PP rows for the bottom action area."""
+     def __init__(self, parent, delegate_type):
+@@ -44,8 +50,8 @@
+         self.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+         self.verticalHeader().setDefaultSectionSize(24)
+         self.setFixedHeight(3 * 24 + 2 * self.frameWidth())
+-        self._bars = [delegate_type(self, max_value=limit)
+-                      for limit in pp_limits(None)]
++        limits = pp_limits_by_field(None)
++        self._bars = [delegate_type(self, max_value=limits[field]) for _, field in PP_FIELDS]
+         for row, delegate in enumerate(self._bars):
+             self.setItemDelegateForRow(row, delegate)
+         # Reserve enough space for the full values at the existing font size.
+@@ -56,7 +62,9 @@
+ 
+     def set_snapshots(self, snapshot):
+         self.setStyleSheet(table_stylesheet())
+-        for row, ((label, field), limit) in enumerate(zip(PP_FIELDS, pp_limits(snapshot))):
++        limits = pp_limits_by_field(snapshot)
++        for row, (label, field) in enumerate(PP_FIELDS):
++            limit = limits[field]
+             self._bars[row]._max_value = limit
+             name = QTableWidgetItem(label)
+             name.setBackground(label_cell_color())
+--- snapshot_view.before.py
++++ src/mybeatsaberstats/snapshot_view.py
+@@ -6,7 +6,7 @@
+ from datetime import datetime, timezone
+ import json
+ import re
+-from PySide6.QtCore import Qt, QTimer, QSize
++from PySide6.QtCore import Qt, QTimer, QSize, QEvent
+ from PySide6.QtGui import QColor, QIcon, QPalette
+ from .numfmt import fmt, trunc, trunc_int
+ from .theme import (
+@@ -913,6 +913,12 @@
+         self._star_hsplitter.splitterMoved.connect(lambda *_: self._save_last_selection())
+         self._metric_vsplitter.splitterMoved.connect(lambda *_: self._save_last_selection())
+ 
++        self._fit_timer = QTimer(self)
++        self._fit_timer.setSingleShot(True)
++        self._fit_timer.timeout.connect(self._fit_comparison_tables)
++        for widget in (self._metric_vsplitter, self.table.viewport(), self.table_acc.viewport(),
++                       self.table.parentWidget(), self._acc_metric_container):
++            widget.installEventFilter(self)
+         self._apply_row_height()
+         self._update_view2()
+         if not self._ui_state_restored:
+@@ -1378,32 +1384,51 @@
+ 
+     def resizeEvent(self, event) -> None:
+         super().resizeEvent(event)
+-        if hasattr(self, "table_acc"):
+-            QTimer.singleShot(0, self._fit_comparison_tables)
++        self._schedule_comparison_fit()
++
++    def eventFilter(self, obj, event) -> bool:
++        if event.type() in (QEvent.Type.Resize, QEvent.Type.Show, QEvent.Type.Hide,
++                            QEvent.Type.LayoutRequest):
++            self._schedule_comparison_fit()
++        return super().eventFilter(obj, event)
++
++    def _schedule_comparison_fit(self) -> None:
++        # Coalesce geometry changes and measure after Qt has updated the layouts.
++        timer = getattr(self, "_fit_timer", None)
++        if timer is not None and not timer.isActive():
++            timer.start(0)
+ 
+     def _fit_comparison_tables(self) -> None:
+         # Fit the existing metrics and PP rows together at normal window sizes.
+         # At small sizes retain readable text and let each table scroll.
+-        if not self.table.rowCount():
++        if not self.table.rowCount() or not self._metric_cmp_container.isVisible():
+             return
+         tables = [self.table]
+         if self._acc_metric_container.isVisible():
+             tables.append(self.table_acc)
+-        space = self._metric_vsplitter.height() - self._metric_vsplitter.handleWidth()
+-        overhead = sum(t.horizontalHeader().height() + t.frameWidth() * 2 +
+-                       (t.parentWidget().height() - t.height()) +
+-                       (t.horizontalScrollBar().height() if t.horizontalScrollBar().isVisible() else 0)
+-                       for t in tables)
++        space = (self._metric_vsplitter.contentsRect().height() -
++                 self._metric_vsplitter.handleWidth() * (len(tables) - 1))
++
++        def overhead(t):
++            # Use layout requirements, never the previous parent/table geometry:
++            # that difference can still contain surplus height from a larger window.
++            layout = t.parentWidget().layout()
++            margins = layout.contentsMargins()
++            items = [layout.itemAt(i) for i in range(layout.count())
++                     if not layout.itemAt(i).isEmpty()]
++            chrome = margins.top() + margins.bottom() + max(0, len(items) - 1) * layout.spacing()
++            chrome += sum(item.sizeHint().height() for item in items if item.widget() is not t)
++            return (chrome + t.horizontalHeader().height() + t.frameWidth() * 2 +
++                    (t.horizontalScrollBar().height() if t.horizontalScrollBar().isVisible() else 0))
++
++        overheads = [overhead(t) for t in tables]
+         rows = sum(t.rowCount() for t in tables)
+         readable = max(18, self.fontMetrics().height() + 2)
+         h = (self._row_height if getattr(self, "_manual_row_height", False) else
+-             max(readable, min(self._row_height, (space - overhead) // max(1, rows))))
++             max(readable, min(self._row_height, (space - sum(overheads)) // max(1, rows))))
+         for t in (self.table, self.table_acc):
+             t.verticalHeader().setDefaultSectionSize(h)
+-        heights = [t.rowCount() * h + t.horizontalHeader().height() + t.frameWidth() * 2
+-                   + t.parentWidget().height() - t.height()
+-                   + (t.horizontalScrollBar().height() if t.horizontalScrollBar().isVisible() else 0)
+-                   for t in tables]
++        heights = [t.rowCount() * h + extra for t, extra in zip(tables, overheads)]
+         self._metric_vsplitter.setSizes(heights)
+ 
+     def _on_row_height_up(self) -> None:
+@@ -2131,8 +2156,10 @@
+         _set_ratio_bars(row_main, (snap_a.beatleader_ranked_play_count, snap_b.beatleader_ranked_play_count),
+                         (_bl_ranked_total_a, _bl_ranked_total_b))
+         row_main += 1
+-        from .player_pp import PP_FIELDS
+-        for (label, field), limit in zip(PP_FIELDS, (3000, 1200, 14500)):
++        from .player_pp import PP_FIELDS, pp_limits_by_field
++        limits = pp_limits_by_field(None)
++        for label, field in PP_FIELDS:
++            limit = limits[field]
+             av, bv = getattr(snap_a, field, None), getattr(snap_b, field, None)
+             self._set_row(self.table, row_main, "[BL] " + label,
+                           (trunc(av, 2), fmt(av, 2, comma=True)) if av is not None else None,

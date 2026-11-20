@@ -1,0 +1,4 @@
+RUN1 calls 40 secs 18 maps 3972
+C:\work\tool\MyBeatSaberStats\artifacts\real_check.py:57: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+  res2 = bl._get_beatleader_leaderboards_ranked(session, fetch_until=datetime.utcnow() - timedelta(days=61))
+RUN2(窓のみ) calls 1 maps 3972

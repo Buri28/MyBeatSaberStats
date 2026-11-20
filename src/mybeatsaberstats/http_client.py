@@ -465,32 +465,49 @@ class PoliteSession(requests.Session):
         return last_resp if last_resp is not None else resp
 
 
-_GET_MEMO: "weakref.WeakKeyDictionary[requests.Session, Dict[str, Tuple[float, requests.Response]]]" = weakref.WeakKeyDictionary()
+_GET_MEMO: "weakref.WeakKeyDictionary[requests.Session, Dict[str, requests.Response]]" = weakref.WeakKeyDictionary()
 _GET_MEMO_LOCK = threading.Lock()
 
 
-def get_memoized(session: requests.Session, url: str, ttl: float = 120.0, **kwargs) -> requests.Response:
-    """同じセッション・同じ URL の成功した GET 応答を ttl 秒だけ使い回す。
+def get_memoized(session: requests.Session, url: str, **kwargs) -> requests.Response:
+    """同じセッション・同じ URL の成功した GET 応答を、そのセッションが生きている間ずっと使い回す。
 
     スナップショット 1 回の中で、プレイヤー情報（/player/{id} など）を基本情報・統計・スコア取得の
     それぞれが取りに行き、同じ URL を 2〜3 回叩いていた。その重複を無くすためのもの。
+
+    期限は設けない。以前は 120 秒（根拠なし）で切れていたため、初回・全件取得などでスコア取得が
+    長引くと、同じ Snapshot の中で同じ URL をもう一度取っていた。
+    覚えた応答はセッションに紐づく（WeakKeyDictionary）ので、セッションと一緒に消える。
+    get_memoized を通る呼び出しは、スナップショット 1 回ごとに作って捨てるセッション
+    （collector の make_session()）だけで使うため、Snapshot をまたいで古い応答は返らない。
+    呼び出し元から渡されたセッションで Snapshot を作る場合は、終わりに forget_memoized() で消す。
     200 以外の応答は覚えない（一時的な失敗を固定しないため）。
     """
-    now = time.monotonic()
     with _GET_MEMO_LOCK:
         per_session = _GET_MEMO.get(session)
         hit = per_session.get(url) if per_session else None
-    if hit is not None and now - hit[0] < ttl:
-        return hit[1]
+    if hit is not None:
+        return hit
     resp = session.get(url, **kwargs)
     if resp.status_code == 200:
         try:
             with _GET_MEMO_LOCK:
-                _GET_MEMO.setdefault(session, {})[url] = (now, resp)
+                _GET_MEMO.setdefault(session, {})[url] = resp
         except TypeError:
             # weakref を張れないセッション実装（テストのフェイクなど）は覚えない
             pass
     return resp
+
+
+def forget_memoized(session: Optional[requests.Session]) -> None:
+    """get_memoized がこのセッションで覚えた応答を全部消す（次の Snapshot に持ち越さないため）。"""
+    if session is None:
+        return
+    try:
+        with _GET_MEMO_LOCK:
+            _GET_MEMO.pop(session, None)
+    except TypeError:
+        pass
 
 
 def make_session(extra_headers: Optional[Dict[str, str]] = None) -> PoliteSession:

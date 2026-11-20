@@ -1,0 +1,23 @@
+﻿[
+    {
+        "ProcessId":  29540,
+        "ParentProcessId":  34444,
+        "CreationDate":  "\/Date(1795013057928)\/",
+        "ExecutablePath":  "C:\\work\\tool\\MyBeatSaberStats\\.venv\\Scripts\\python.exe",
+        "CommandLine":  "\"C:\\work\\tool\\MyBeatSaberStats\\.venv\\Scripts\\python.exe\" -X utf8 check_top_compare_ui.py "
+    },
+    {
+        "ProcessId":  40488,
+        "ParentProcessId":  29540,
+        "CreationDate":  "\/Date(1795013057939)\/",
+        "ExecutablePath":  "C:\\WINDOWS\\system32\\conhost.exe",
+        "CommandLine":  "\\??\\C:\\WINDOWS\\system32\\conhost.exe 0x4"
+    },
+    {
+        "ProcessId":  43208,
+        "ParentProcessId":  29540,
+        "CreationDate":  "\/Date(1795013057994)\/",
+        "ExecutablePath":  "C:\\Users\\tat28\\AppData\\Local\\Python\\pythoncore-3.14-64\\python.exe",
+        "CommandLine":  "\"C:\\work\\tool\\MyBeatSaberStats\\.venv\\Scripts\\python.exe\" -X utf8 check_top_compare_ui.py "
+    }
+]

@@ -1,0 +1,112 @@
+{
+  "normal": {
+    "table": {
+      "row": 19,
+      "font": "Yu Gothic UI,9,-1,5,400,0,0,0,0,0,0,0,0,0,0,1",
+      "scroll": 0
+    },
+    "table_acc": {
+      "row": 19,
+      "font": "Yu Gothic UI,9,-1,5,400,0,0,0,0,0,0,0,0,0,0,1",
+      "scroll": 0
+    },
+    "ss_star_table": {
+      "row": 21,
+      "font": "Yu Gothic UI,9,-1,5,400,0,0,0,0,0,0,0,0,0,0,1",
+      "scroll": 0
+    },
+    "bl_star_table": {
+      "row": 21,
+      "font": "Yu Gothic UI,9,-1,5,400,0,0,0,0,0,0,0,0,0,0,1",
+      "scroll": 0
+    }
+  },
+  "before-right-restoration": {
+    "table": {
+      "row": 19,
+      "font": "Yu Gothic UI,9,-1,5,400,0,0,0,0,0,0,0,0,0,0,1",
+      "scroll": 0
+    },
+    "table_acc": {
+      "row": 19,
+      "font": "Yu Gothic UI,9,-1,5,400,0,0,0,0,0,0,0,0,0,0,1",
+      "scroll": 0
+    },
+    "ss_star_table": {
+      "row": 19,
+      "font": "Yu Gothic UI,9,-1,5,400,0,0,0,0,0,0,0,0,0,0,1",
+      "scroll": 0
+    },
+    "bl_star_table": {
+      "row": 19,
+      "font": "Yu Gothic UI,9,-1,5,400,0,0,0,0,0,0,0,0,0,0,1",
+      "scroll": 0
+    }
+  },
+  "details": {
+    "table": {
+      "row": 19,
+      "font": "Yu Gothic UI,9,-1,5,400,0,0,0,0,0,0,0,0,0,0,1",
+      "scroll": 0
+    },
+    "table_acc": {
+      "row": 19,
+      "font": "Yu Gothic UI,9,-1,5,400,0,0,0,0,0,0,0,0,0,0,1",
+      "scroll": 0
+    },
+    "ss_star_table": {
+      "row": 21,
+      "font": "Yu Gothic UI,9,-1,5,400,0,0,0,0,0,0,0,0,0,0,1",
+      "scroll": 0
+    },
+    "bl_star_table": {
+      "row": 21,
+      "font": "Yu Gothic UI,9,-1,5,400,0,0,0,0,0,0,0,0,0,0,1",
+      "scroll": 0
+    }
+  },
+  "small-bottom": {
+    "table": {
+      "row": 18,
+      "font": "Yu Gothic UI,9,-1,5,400,0,0,0,0,0,0,0,0,0,0,1",
+      "scroll": 5
+    },
+    "table_acc": {
+      "row": 18,
+      "font": "Yu Gothic UI,9,-1,5,400,0,0,0,0,0,0,0,0,0,0,1",
+      "scroll": 7
+    },
+    "ss_star_table": {
+      "row": 21,
+      "font": "Yu Gothic UI,9,-1,5,400,0,0,0,0,0,0,0,0,0,0,1",
+      "scroll": 6
+    },
+    "bl_star_table": {
+      "row": 21,
+      "font": "Yu Gothic UI,9,-1,5,400,0,0,0,0,0,0,0,0,0,0,1",
+      "scroll": 4
+    }
+  },
+  "default": {
+    "table": {
+      "row": 19,
+      "font": "Yu Gothic UI,9,-1,5,400,0,0,0,0,0,0,0,0,0,0,1",
+      "scroll": 0
+    },
+    "table_acc": {
+      "row": 19,
+      "font": "Yu Gothic UI,9,-1,5,400,0,0,0,0,0,0,0,0,0,0,1",
+      "scroll": 0
+    },
+    "ss_star_table": {
+      "row": 21,
+      "font": "Yu Gothic UI,9,-1,5,400,0,0,0,0,0,0,0,0,0,0,1",
+      "scroll": 0
+    },
+    "bl_star_table": {
+      "row": 21,
+      "font": "Yu Gothic UI,9,-1,5,400,0,0,0,0,0,0,0,0,0,0,1",
+      "scroll": 0
+    }
+  }
+}

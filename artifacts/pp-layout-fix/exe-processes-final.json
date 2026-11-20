@@ -1,0 +1,14 @@
+﻿[
+    {
+        "ProcessId":  36112,
+        "ParentProcessId":  27128,
+        "CreationDate":  "\/Date(1795004064771)\/",
+        "ExecutablePath":  "C:\\work\\tool\\MyBeatSaberStats\\artifacts\\pp-layout-fix\\dist\\MyBeatSaberStats\\MyBeatSaberStats.exe"
+    },
+    {
+        "ProcessId":  27924,
+        "ParentProcessId":  36100,
+        "CreationDate":  "\/Date(1795004386477)\/",
+        "ExecutablePath":  "C:\\work\\tool\\mybeatsaberstats\\artifacts\\pp-layout-fix\\dist\\mybeatsaberstats\\mybeatsaberstats.exe"
+    }
+]

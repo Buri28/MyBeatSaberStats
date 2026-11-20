@@ -1,0 +1,1 @@
+﻿LAUNCH PID=40612 start=11/19/2026 08:17:37 exe=C:\work\tool\MyBeatSaberStats\.venv\Scripts\python.exe before=11572,12308,36648,40732

@@ -1,0 +1,63 @@
+{
+  "tests": {
+    "offline_suite": 66,
+    "after_fixture_review": 6,
+    "reviewer_independent": 27,
+    "result": "passed"
+  },
+  "source_sha256": {
+    "src/mybeatsaberstats/player_app.py": "975750c3f0fc9d2a765f22938b60ba33f8e59de2348cfc42fb8e50de3a6e3a80",
+    "src/mybeatsaberstats/player_pp.py": "fd97790e11609f6043d574b3c7e0c01d8eb4d3f44468206a1fd8a8ecd7d5774e",
+    "src/mybeatsaberstats/snapshot_view.py": "6937748ec36c9d196d1e32a42b1df2458a725679b54c0641de933b31c2bd8f6f"
+  },
+  "scale_source": {
+    "url": "https://github.com/BeatLeader/beatleader-website/blob/master/src/components/Player/Charts/SkillTriangleChart.svelte",
+    "saved_research_session": "01a1dc66-4574-7b23-94c9-c12a726f7db0",
+    "retrieved_at": "2026-11-15",
+    "Pass": 3000,
+    "Tech": 1200,
+    "Acc": 14500,
+    "meaning": "official triangle display scales, not mathematical PP caps"
+  },
+  "ui": {
+    "source_launcher": "check_top_compare_ui.py",
+    "python_executable": "C:\\work\\tool\\MyBeatSaberStats\\.venv\\Scripts\\python.exe",
+    "top_client_size": [
+      1211,
+      770
+    ],
+    "compare_client_size": [
+      1540,
+      887
+    ],
+    "dpr": 1.5,
+    "acc_column_width_compact": 54,
+    "acc_column_width_detail": 120,
+    "ss_bl_star_top_y": 210,
+    "ss_bl_star_height": 444,
+    "screenshots": [
+      "top-dark.png",
+      "top-light.png",
+      "top-legacy.png",
+      "compare-compact.png",
+      "compare-details.png"
+    ],
+    "owned_pids": [
+      29540,
+      43208,
+      40488
+    ],
+    "all_owned_processes_exited": true
+  },
+  "diagnosis": {
+    "snapshot_20261118_120800": "PP components all null on disk; absent AccSaber acquisition status",
+    "snapshot_20261118_121840_and_122702": "PP components 1188.7877 / 783.7285 / 10700.806 present; AccSaber ok",
+    "current_source": "saved response -> real parser -> collector -> temporary JSON -> reload -> top display verified",
+    "historical_limit": "API response and loaded module identity at 12:08 UTC were not recorded; later saved API response cannot identify that historical cause"
+  },
+  "paused_tasks_unchanged": [
+    333,
+    334
+  ],
+  "network_requests_for_verification": 0
+}

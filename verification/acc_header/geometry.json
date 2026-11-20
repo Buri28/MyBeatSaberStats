@@ -1,0 +1,47 @@
+{
+  "window": [
+    248,
+    71,
+    1211,
+    770
+  ],
+  "header": [
+    259,
+    669,
+    699,
+    20
+  ],
+  "xp": [
+    444,
+    669,
+    514,
+    20
+  ],
+  "xp_ideal_width": 116.703125,
+  "xp_text": "<span style=\"font-size:13px; color:#e6e4ee;\">Lv.88 </span><span style=\"font-size:11px; color:#22d3ee; font-weight:bold;\">TRANSCENDENT </span><span style=\"font-size:11px; color:#8c87a3;\">(459,459 XP)</span> ／ XP Rank：<span style=\"font-size:12px;\">31 (🇯🇵 6)</span> ／ Milestones：<span style=\"font-size:12px;\">145/267</span>",
+  "skill": [
+    962,
+    667,
+    241,
+    20
+  ],
+  "button": [
+    840,
+    691,
+    112,
+    21
+  ],
+  "table": [
+    259,
+    689,
+    574,
+    141
+  ],
+  "pp": [
+    962,
+    689,
+    241,
+    76
+  ],
+  "dpr": 1.5
+}

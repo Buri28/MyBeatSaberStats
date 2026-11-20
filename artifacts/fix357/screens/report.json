@@ -1,0 +1,337 @@
+{
+  "pid": 33132,
+  "started": "2026-11-21T01:17:08",
+  "python": "C:\\work\\tool\\MyBeatSaberStats\\.venv\\Scripts\\python.exe",
+  "screens": [
+    {
+      "file": "C:\\work\\tool\\MyBeatSaberStats\\artifacts\\fix357\\screens\\top_default.png",
+      "label": "トップ画面（既定サイズ）",
+      "rect": [
+        248,
+        71,
+        1211,
+        770
+      ],
+      "printwindow_ok": true,
+      "physical_size": [
+        1839,
+        1211
+      ]
+    },
+    {
+      "file": "C:\\work\\tool\\MyBeatSaberStats\\artifacts\\fix357\\screens\\top_small.png",
+      "label": "トップ画面（小さめ）",
+      "rect": [
+        248,
+        71,
+        1148,
+        650
+      ],
+      "printwindow_ok": true,
+      "physical_size": [
+        1744,
+        1031
+      ]
+    },
+    {
+      "file": "C:\\work\\tool\\MyBeatSaberStats\\artifacts\\fix357\\screens\\compare_default.png",
+      "label": "比較画面（既定サイズ）",
+      "rect": [
+        73,
+        30,
+        1540,
+        887
+      ],
+      "printwindow_ok": true,
+      "physical_size": [
+        2332,
+        1387
+      ]
+    },
+    {
+      "file": "C:\\work\\tool\\MyBeatSaberStats\\artifacts\\fix357\\screens\\compare_small.png",
+      "label": "比較画面（小さめ）",
+      "rect": [
+        73,
+        30,
+        1097,
+        650
+      ],
+      "printwindow_ok": true,
+      "physical_size": [
+        1668,
+        1031
+      ]
+    },
+    {
+      "file": "C:\\work\\tool\\MyBeatSaberStats\\artifacts\\fix357\\screens\\compare_rowheight21_before_reopen.png",
+      "label": "比較画面（行の高さ 21 にした直後）",
+      "rect": [
+        73,
+        30,
+        1540,
+        887
+      ],
+      "printwindow_ok": true,
+      "physical_size": [
+        2332,
+        1387
+      ]
+    },
+    {
+      "file": "C:\\work\\tool\\MyBeatSaberStats\\artifacts\\fix357\\screens\\compare_rowheight21_after_reopen.png",
+      "label": "比較画面（開き直した後も 21）",
+      "rect": [
+        73,
+        30,
+        1540,
+        887
+      ],
+      "printwindow_ok": true,
+      "physical_size": [
+        2332,
+        1387
+      ]
+    }
+  ],
+  "default_size": [
+    1211,
+    770
+  ],
+  "top": [
+    {
+      "tag": "default",
+      "window": [
+        248,
+        71,
+        1211,
+        770
+      ],
+      "rows": [
+        {
+          "label": "Acc PP",
+          "text": "10,700.80",
+          "text_px": 50,
+          "cell_px": 189,
+          "drawn_text": "10,700.80",
+          "bold": false,
+          "max": 14500,
+          "tooltip": "BeatLeader 全体の加重 Acc PP。バーの長さは公式 Skill Triangle の基準値（14,500）に対する割合（取れる PP の上限ではありません）"
+        },
+        {
+          "label": "Tech PP",
+          "text": "783.72",
+          "text_px": 35,
+          "cell_px": 189,
+          "drawn_text": "783.72",
+          "bold": false,
+          "max": 1200,
+          "tooltip": "BeatLeader 全体の加重 Tech PP。バーの長さは公式 Skill Triangle の基準値（1,200）に対する割合（取れる PP の上限ではありません）"
+        },
+        {
+          "label": "Pass PP",
+          "text": "1,188.78",
+          "text_px": 44,
+          "cell_px": 189,
+          "drawn_text": "1,188.78",
+          "bold": false,
+          "max": 3000,
+          "tooltip": "BeatLeader 全体の加重 Pass PP。バーの長さは公式 Skill Triangle の基準値（3,000）に対する割合（取れる PP の上限ではありません）"
+        }
+      ],
+      "pp_header": [
+        "BeatLeader Skill",
+        [
+          962,
+          667,
+          241,
+          20
+        ]
+      ],
+      "pp_table": [
+        962,
+        689,
+        241,
+        76
+      ],
+      "acc_header": [
+        259,
+        669,
+        699,
+        20
+      ],
+      "acc_header_overlaps_pp_header": false,
+      "acc_header_overlaps_pp_table": false,
+      "buttons": [],
+      "button_rects": [
+        [
+          840,
+          691,
+          112,
+          21
+        ],
+        [
+          840,
+          715,
+          112,
+          21
+        ],
+        [
+          840,
+          739,
+          112,
+          21
+        ]
+      ],
+      "buttons_overlap_pp": [],
+      "xp_text": "Lv.88 TRANSCENDENT (459,459 XP) ／ XP Rank：31 (🇯🇵 6) ／ Milestones：145/267",
+      "xp_text_px": 427.421875,
+      "xp_label_px": 514,
+      "xp_fits": true
+    },
+    {
+      "tag": "small",
+      "window": [
+        248,
+        71,
+        1148,
+        650
+      ],
+      "rows": [
+        {
+          "label": "Acc PP",
+          "text": "10,700.80",
+          "text_px": 50,
+          "cell_px": 173,
+          "drawn_text": "10,700.80",
+          "bold": false,
+          "max": 14500,
+          "tooltip": "BeatLeader 全体の加重 Acc PP。バーの長さは公式 Skill Triangle の基準値（14,500）に対する割合（取れる PP の上限ではありません）"
+        },
+        {
+          "label": "Tech PP",
+          "text": "783.72",
+          "text_px": 35,
+          "cell_px": 173,
+          "drawn_text": "783.72",
+          "bold": false,
+          "max": 1200,
+          "tooltip": "BeatLeader 全体の加重 Tech PP。バーの長さは公式 Skill Triangle の基準値（1,200）に対する割合（取れる PP の上限ではありません）"
+        },
+        {
+          "label": "Pass PP",
+          "text": "1,188.78",
+          "text_px": 44,
+          "cell_px": 173,
+          "drawn_text": "1,188.78",
+          "bold": false,
+          "max": 3000,
+          "tooltip": "BeatLeader 全体の加重 Pass PP。バーの長さは公式 Skill Triangle の基準値（3,000）に対する割合（取れる PP の上限ではありません）"
+        }
+      ],
+      "pp_header": [
+        "BeatLeader Skill",
+        [
+          931,
+          547,
+          225,
+          20
+        ]
+      ],
+      "pp_table": [
+        931,
+        569,
+        225,
+        76
+      ],
+      "acc_header": [
+        259,
+        549,
+        668,
+        20
+      ],
+      "acc_header_overlaps_pp_header": false,
+      "acc_header_overlaps_pp_table": false,
+      "buttons": [],
+      "button_rects": [
+        [
+          809,
+          571,
+          112,
+          21
+        ],
+        [
+          809,
+          595,
+          112,
+          21
+        ],
+        [
+          809,
+          619,
+          112,
+          21
+        ]
+      ],
+      "buttons_overlap_pp": [],
+      "xp_text": "Lv.88 TRANSCENDENT (459,459 XP) ／ XP Rank：31 (🇯🇵 6) ／ Milestones：145/267",
+      "xp_text_px": 427.421875,
+      "xp_label_px": 483,
+      "xp_fits": true
+    }
+  ],
+  "compare_pp_rows": {
+    "Acc PP": [
+      [
+        "10,700.80",
+        0.7379866206896553
+      ],
+      [
+        "10,700.80",
+        0.7379866206896553
+      ]
+    ],
+    "Tech PP": [
+      [
+        "783.72",
+        0.6531070833333333
+      ],
+      [
+        "783.72",
+        0.6531070833333333
+      ]
+    ],
+    "Pass PP": [
+      [
+        "1,188.78",
+        0.3962625666666667
+      ],
+      [
+        "1,188.78",
+        0.3962625666666667
+      ]
+    ]
+  },
+  "compare_default_size": [
+    1540,
+    887
+  ],
+  "compare_row_height_before": 19,
+  "compare_row_height_set": [
+    21,
+    true,
+    2
+  ],
+  "compare_saved": {
+    "ui_row_height": 21,
+    "ui_manual_row_height": true,
+    "ui_right_row_height": 23
+  },
+  "compare_row_height_after_reopen": [
+    21,
+    true,
+    21,
+    23
+  ],
+  "finished": "2026-11-21T01:17:20"
+}

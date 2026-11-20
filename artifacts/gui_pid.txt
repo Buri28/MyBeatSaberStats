@@ -1,0 +1,1 @@
+﻿PID=13744 start=11/18/2026 20:51:11 exe=C:\work\tool\MyBeatSaberStats\.venv\Scripts\python.exe

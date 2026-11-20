@@ -1,0 +1,45 @@
+{
+  "top": {
+    "pp_width": 241,
+    "events_width": 241,
+    "gap": 10,
+    "window": [
+      1211,
+      770
+    ]
+  },
+  "rows": [
+    {
+      "label": "Ranked Play Count",
+      "a": "\u2014",
+      "b": "5,626",
+      "diff": "\u2014"
+    },
+    {
+      "label": "Ranked Play Count",
+      "a": "2,914",
+      "b": "0",
+      "diff": "-2,914"
+    },
+    {
+      "label": "Pass PP",
+      "a": "0.00",
+      "b": "1,500.00",
+      "diff": "+1,500.00"
+    },
+    {
+      "label": "Tech PP",
+      "a": "600.00",
+      "b": "1,200.00",
+      "diff": "+600.00"
+    },
+    {
+      "label": "Acc PP",
+      "a": "14,500.00",
+      "b": "\u2014",
+      "diff": "\u2014"
+    }
+  ],
+  "left_height": 19,
+  "ok": true
+}
