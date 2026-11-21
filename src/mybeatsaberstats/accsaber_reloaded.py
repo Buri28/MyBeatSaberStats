@@ -164,13 +164,19 @@ def _save_map_counts_file_cache(per_cat: Dict[str, Dict]) -> None:
         pass
 
 
-def _save_map_counts_from_all_maps(all_maps: List[Dict]) -> None:
-    """全マップ一覧から総譜面数キャッシュを同期更新する。"""
+def _save_map_counts_from_all_maps(all_maps: List[Dict], *, never_lower: bool = False) -> None:
+    """全マップ一覧から総譜面数キャッシュを同期更新する。
+
+    never_lower: True なら、カテゴリごとに前回の値より下げない（途中までしか読めなかった全件取得の保存用）。
+    """
     raw_counts = {
         k: v
         for k, v in _count_non_pending_map_counts(all_maps).items()
         if k != "overall"
     }
+    if never_lower:
+        for cat, entry in _load_map_counts_file_cache().items():
+            raw_counts[cat] = max(raw_counts.get(cat, 0), int(entry["count"]))
     per_cat: Dict[str, Dict] = {
         cat: {"count": cnt}
         for cat, cnt in raw_counts.items()
@@ -193,26 +199,130 @@ def _load_all_maps_cache_payload() -> Dict:
 
 def _save_all_maps_cache(
     all_maps: List[Dict], fetched_at: Optional[str] = None, batches_merged_at: Optional[str] = None,
+    *, mark_fetched: bool = True, counts_never_lower: bool = False,
 ) -> None:
     """全マップキャッシュを保存し、総譜面数キャッシュも同期する。
 
+    fetched_at: 全件取得を最後に終えた時刻。省略すると今の時刻（全件取得を終えたとき用）。
     batches_merged_at: recent batch をここまで取り込んだ時刻（次はこれ以降の batch だけ見る）。
+    mark_fetched: False で fetched_at も無いときは、fetched_at を書かない
+        （全件取得を一度も終えていないまま、途中まで読めた分だけを残すとき用）。
+    counts_never_lower: 総譜面数キャッシュをカテゴリごとに前回の値より下げない（同上）。
     """
-    now_z = fetched_at or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    data = {"fetched_at": now_z, "maps": all_maps}
+    data: Dict = {}
+    now_z = fetched_at or (datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") if mark_fetched else None)
+    if now_z:
+        data["fetched_at"] = now_z
+    data["maps"] = all_maps
     if batches_merged_at:
         data["batches_merged_at"] = batches_merged_at
     _ALL_MAPS_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(_ALL_MAPS_CACHE_FILE, 
         json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
     )
-    _save_map_counts_from_all_maps(all_maps)
+    _save_map_counts_from_all_maps(all_maps, never_lower=counts_never_lower)
 
 
 #: 全マップキャッシュを「新しい」とみなす時間。
 #: AccSaber の譜面追加は batch 単位（数日〜週次）で、かつ batch 差分の取り込みで
 #: 前進できるため、全件取得はこの間隔で十分。
 _ALL_MAPS_CACHE_TTL_HOURS = 24
+
+
+#: 全件取得の歯止めの記録（全マップキャッシュとは別のファイル。キャッシュが無いときも残せるように）。
+_FULL_FETCH_STATE_FILE: Path = BASE_DIR / "cache" / "accsaber_reloaded_full_fetch_state.json"
+
+#: 全件取得が totalElements に届かなかった（途中で止まった・ガードで打ち切った）後、次の全件取得まで待つ時間。
+#: ranked_sync.py の MISMATCH_RETRY_HOURS（総数が食い違った 1 回目の後 24 時間）と同じ考え方で 24 時間。
+#: AccSaber の全件取得は /maps/difficulties/all 1 回＋ /maps/difficulties 4 ページの約 5 リクエスト
+#: （logs/api_requests.log、2026-11 の Snapshot）で、24 時間ごとの通常の全件取得と同じ間隔・同じ負荷になる。
+#: ranked_sync.py の「同じ総数で 2 回続いたら 14 日」は入れない。AccSaber では全件取得が
+#: ランクから外れた譜面や status の変化を拾う唯一の経路で、14 日止めると通常（24 時間）より古くなるため。
+_FULL_FETCH_INCOMPLETE_BACKOFF_HOURS = 24
+#: 全件取得が例外で失敗した後、次の全件取得まで待つ時間。
+#: ranked_sync.py の ATTEMPT_BACKOFF_HOURS（失敗直後 1 時間）と同じ。Snapshot を続けて取るたびに
+#: 失敗する全件取得を繰り返さないため（待つ間は batch の取り込みだけ行う）。
+_FULL_FETCH_FAILURE_BACKOFF_HOURS = 1
+
+
+def _load_full_fetch_state() -> Dict:
+    try:
+        data = json.loads(_FULL_FETCH_STATE_FILE.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            return data
+    except Exception:  # noqa: BLE001
+        pass
+    return {}
+
+
+def _save_full_fetch_state(data: Dict) -> None:
+    try:
+        _FULL_FETCH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_text(
+            _FULL_FETCH_STATE_FILE, json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _record_full_fetch_result(
+    status: str, expected_total: Optional[int] = None, read_count: Optional[int] = None,
+) -> None:
+    """全件取得の結果を記録する。status = "complete" / "incomplete" / "failed"。"""
+    if status == "complete":
+        if _load_full_fetch_state():
+            _save_full_fetch_state({})
+        return
+    data: Dict = {
+        "status": status,
+        "attempted_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    if expected_total is not None:
+        data["expected_total"] = expected_total
+    if read_count is not None:
+        data["read_count"] = read_count
+    _save_full_fetch_state(data)
+
+
+def _is_full_fetch_backed_off() -> bool:
+    """直前の全件取得が未完了・失敗で、まだ待つ時間の中か。"""
+    data = _load_full_fetch_state()
+    status = data.get("status")
+    if status == "incomplete":
+        wait_hours = _FULL_FETCH_INCOMPLETE_BACKOFF_HOURS
+    elif status == "failed":
+        wait_hours = _FULL_FETCH_FAILURE_BACKOFF_HOURS
+    else:
+        return False
+    attempted_at = _parse_utc_timestamp(data.get("attempted_at"))
+    if attempted_at is None:
+        return False
+    age_hours = (datetime.now(timezone.utc) - attempted_at).total_seconds() / 3600.0
+    return 0 <= age_hours < wait_hours
+
+
+def _merge_partial_full_fetch(partial_maps: List[Dict]) -> List[Dict]:
+    """途中まで読めた全件取得の結果を、前回のキャッシュに足す。
+
+    読めた譜面は新しい内容で置き換え、読めなかった譜面は前回のまま残す
+    （途中で止まった取得では、ランクから外れたかどうかを判断できないので消さない）。
+    """
+    payload = _load_all_maps_cache_payload()
+    cached_maps = payload.get("maps") if isinstance(payload, dict) else None
+    if not isinstance(cached_maps, list):
+        cached_maps = []
+    merged: Dict[str, Dict] = {}
+    ordered: List[str] = []
+    for song in list(cached_maps) + list(partial_maps):
+        if not isinstance(song, dict):
+            continue
+        key = str(song.get("id") or song.get("mapId") or song.get("beatsaverCode") or "").strip()
+        if not key:
+            continue
+        if key not in merged:
+            ordered.append(key)
+        merged[key] = song
+    return [merged[key] for key in ordered]
 
 
 def _is_all_maps_cache_fresh(ttl_hours: int = _ALL_MAPS_CACHE_TTL_HOURS) -> bool:
@@ -442,7 +552,23 @@ def _merge_all_maps_with_recent_batches(
     changed = False
     all_fetched = True
     for code in recent_codes:
-        full_map = _fetch_map_by_code(code, session)
+        try:
+            full_map = _fetch_map_by_code(code, session)
+        except Exception as exc:  # noqa: BLE001
+            # 1 件の失敗で、取れた分まで捨てない。取れなかった譜面は batches_merged_at を進めずに
+            # 次の回に読み直させる（下の保存を参照）。
+            all_fetched = False
+            log_api_failure(
+                "accsaber_reloaded",
+                "_merge_all_maps_with_recent_batches",
+                f"failed to fetch map by code beatsaverCode={code}",
+                exc,
+            )
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            if status in (429, 503):
+                # レート制限中・サービス停止中（リトライを使い切った後）に残りを続けて叩かない
+                break
+            continue
         if not isinstance(full_map, dict):
             all_fetched = False
             continue
@@ -456,15 +582,27 @@ def _merge_all_maps_with_recent_batches(
             changed = True
 
     merged_maps = [merged_by_map_id[key] for key in ordered_keys if key in merged_by_map_id]
-    if changed:
-        _save_all_maps_cache(merged_maps)
-    elif all_fetched:
-        # 中身は同じでも、batch を取り込んだ時刻だけは記録する。記録しないと、同じ batch の譜面を
-        # 次も by-code で取り直してしまう。fetched_at（24 時間ごとの全件取得の判定）は進めない。
+    # fetched_at は「全件取得を最後に終えた時刻」で、24 時間ごとの全件取得の判定に使う。
+    # batch の取り込みでは、中身が変わっても進めない（進めると全件取得が延び続ける。
+    # 2026-11-09 11:39 の batch 取り込みで進み、翌 06:59 の Snapshot が全件取得を飛ばしていた）。
+    prev_fetched_at = str(payload.get("fetched_at"))
+    prev_merged_at = payload.get("batches_merged_at")
+    prev_merged_at = str(prev_merged_at) if isinstance(prev_merged_at, str) and prev_merged_at else None
+    if all_fetched:
+        # 全部取り直せたときだけ、batch を取り込んだ時刻を進める。記録しないと、同じ batch の譜面を
+        # 次も by-code で取り直してしまう。
         _save_all_maps_cache(
             merged_maps,
-            fetched_at=str(payload.get("fetched_at")),
+            fetched_at=prev_fetched_at,
             batches_merged_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        )
+    elif changed:
+        # 一部失敗：取れた分の中身だけ保存し、batches_merged_at は前の値のままにする
+        # （次の回に同じ batch を読み直し、失敗した譜面を取り直す）。
+        _save_all_maps_cache(
+            merged_maps,
+            fetched_at=prev_fetched_at,
+            batches_merged_at=prev_merged_at,
         )
     return merged_maps
 
@@ -565,6 +703,40 @@ _MAP_LEVEL_FIELDS = (
 )
 
 
+class _AllMapsResult(list):
+    """_fetch_all_maps_via_difficulties の戻り値。中身は map のリストで、全件を読み切れたかを持つ。
+
+    list のまま返すので、従来どおり list として使える。
+    """
+
+    #: 1 ページ目の totalElements（無ければ None）
+    expected_total: Optional[int] = None
+    #: 実際に読んだ難易度の件数（id で重複を除く。status は問わない）
+    read_count: int = 0
+    #: last=true のページまで読んだか（ガードや空ページで止まったら False）
+    reached_last: bool = True
+
+    @property
+    def complete(self) -> bool:
+        """全件を読み切れたか。totalElements が無い応答では、last まで読めたかだけで決める。"""
+        if not self.reached_last:
+            return False
+        if self.expected_total is None:
+            return True
+        return self.read_count >= self.expected_total
+
+
+def _is_full_fetch_complete(all_maps: object) -> bool:
+    """全件取得の結果が完了しているか。
+
+    _AllMapsResult でない list（テストの差し替えなど、完了の情報を持たないもの）は、
+    従来どおり完了として扱う。
+    """
+    if isinstance(all_maps, _AllMapsResult):
+        return all_maps.complete
+    return True
+
+
 #: セッション単位の difficulties フォールバック結果キャッシュ。
 #: /v1/maps が 500 のとき「譜面数の集計」と「全マップ取得」の 2 系統が
 #: それぞれ全件クロールを走らせてしまうため、1 回分に畳む。
@@ -596,6 +768,11 @@ def _fetch_all_maps_via_difficulties(
     ordered_ids: List[str] = []
     page = 0
     total_pages: Optional[int] = None
+    # 全件を読み切れたかの確認用（_AllMapsResult を参照）
+    expected_total: Optional[int] = None
+    read_keys: set = set()
+    read_without_id = 0
+    reached_last = False
 
     while True:
         resp = session.get(
@@ -606,9 +783,29 @@ def _fetch_all_maps_via_difficulties(
         resp.raise_for_status()
         data = resp.json()
 
-        for diff in data.get("content", []):
+        if page == 0:
+            raw_total = data.get("totalElements")
+            if isinstance(raw_total, (int, float)) and not isinstance(raw_total, bool):
+                expected_total = int(raw_total)
+
+        content = data.get("content", [])
+        if not isinstance(content, list):
+            content = []
+        for diff in content:
             if not isinstance(diff, dict):
                 continue
+            # totalElements と比べる件数。status で絞らずに呼んでいる（AccSaber のフロントエンドは
+            # getDifficulties に status:"RANKED" を渡して絞るが、ここでは渡していない）ので、
+            # totalElements には応答に来る全 status が入る。実キャッシュ（2026-11-20）で見えた status は
+            # RANKED 611 / QUEUE 15 / QUALIFIED 7。どれも content に来るので、全部数える。
+            # mapId の無い難易度は保存できないが、応答には来ているので「読んだ」に数える
+            # （数えないと、取り直しても増えないのに毎回未完了になる）。
+            # ページの境目で同じ難易度が2回来ることがあるので、id で重複を除いて数える。
+            diff_key = str(diff.get("id") or "").strip()
+            if diff_key:
+                read_keys.add(diff_key)
+            else:
+                read_without_id += 1
             map_id = str(diff.get("mapId") or "").strip()
             if not map_id:
                 continue
@@ -633,15 +830,25 @@ def _fetch_all_maps_via_difficulties(
             on_progress(page + 1, total_pages)
 
         if data.get("last", True):
+            reached_last = True
+            break
+        if not content:
+            # last が false なのに空のページ。この先を読んでも空が続くだけなので止める（未完了扱い）。
             break
         if page >= _MAX_PAGES_GUARD:
-            # 応答が終端を示さない場合でも暴走しないよう打ち切る
+            # 応答が終端を示さない場合でも暴走しないよう打ち切る（未完了扱い）
             break
         page += 1
 
     _backfill_missing_song_hashes(maps_by_id.values(), session)
 
-    result = [maps_by_id[map_id] for map_id in ordered_ids]
+    result = _AllMapsResult(maps_by_id[map_id] for map_id in ordered_ids)
+    result.expected_total = expected_total
+    result.read_count = len(read_keys) + read_without_id
+    result.reached_last = reached_last
+    if not result.complete:
+        # 途中までの結果は同じセッションで使い回さない（次の呼び出しでもう一度取らせる）
+        return result
     if result:
         try:
             with _ALL_MAPS_VIA_DIFF_LOCK:
@@ -838,9 +1045,23 @@ def fetch_reloaded_map_counts(
             return _count_non_pending_map_counts(cached_maps)
 
     try:
+        if _is_full_fetch_backed_off():
+            # 直前の全件取得が未完了・失敗で待つ時間の中。下の batch フォールバックで前回値から前進させる。
+            raise RuntimeError("全件取得の待ち時間中のため、batch 差分で前進します")
         # /v1/maps は 500 を返し続けているため、難易度一覧から組み立てる。
         # （同一セッション内では fetch_all_maps_full と結果を共有する）
         all_maps = _fetch_all_maps_via_difficulties(session)
+        if all_maps and not _is_full_fetch_complete(all_maps):
+            # 途中までの件数で分母を下げない。下の batch フォールバックで前回値から前進させる。
+            _record_full_fetch_result(
+                "incomplete",
+                getattr(all_maps, "expected_total", None),
+                getattr(all_maps, "read_count", None),
+            )
+            raise RuntimeError(
+                f"difficulties の全件取得が未完了です read={getattr(all_maps, 'read_count', None)} "
+                f"totalElements={getattr(all_maps, 'expected_total', None)}"
+            )
         if all_maps:
             _save_map_counts_from_all_maps(all_maps)
             return _count_non_pending_map_counts(all_maps)
@@ -1666,8 +1887,8 @@ def fetch_and_save_all_maps_cache(
     キャッシュが十分新しい場合は API を叩かず、recent batch での前進だけを行う。
     AccSaber の譜面追加は batch 単位（数日〜週次）なので、毎回の全件取得は不要。
     """
-    if _is_all_maps_cache_fresh():
-        # 新しいキャッシュがあるので全件取得はしない。
+    if _is_all_maps_cache_fresh() or _is_full_fetch_backed_off():
+        # 新しいキャッシュがある、または直前の全件取得が未完了・失敗で待つ時間の中なので、全件取得はしない。
         # 直近の batch 差分だけ取り込んで前進させる（数リクエストで済む）。
         try:
             if session is None:
@@ -1685,9 +1906,50 @@ def fetch_and_save_all_maps_cache(
         return
 
     try:
+        if session is None:
+            session = make_session()
         all_maps = fetch_all_maps_full(session=session, on_progress=on_progress)
-        _save_all_maps_cache(all_maps)
+        if _is_full_fetch_complete(all_maps):
+            _save_all_maps_cache(all_maps)
+            _record_full_fetch_result("complete")
+            return
+        # totalElements に届かなかった：取得の完了として扱わない。読めた分は前回のキャッシュに足して
+        # 保存するが、fetched_at・batches_merged_at は前の値のまま（次の回にもう一度全件を取らせる）。
+        expected_total = getattr(all_maps, "expected_total", None)
+        read_count = getattr(all_maps, "read_count", None)
+        reached_last = getattr(all_maps, "reached_last", None)
+        log_api_failure(
+            "accsaber_reloaded",
+            "fetch_and_save_all_maps_cache",
+            f"full map fetch incomplete: read {read_count} of totalElements={expected_total} "
+            f"reached_last={reached_last}; fetched_at is kept",
+        )
+        payload = _load_all_maps_cache_payload()
+        prev_fetched_at = payload.get("fetched_at") if isinstance(payload, dict) else None
+        prev_merged_at = payload.get("batches_merged_at") if isinstance(payload, dict) else None
+        merged_maps = _merge_partial_full_fetch(list(all_maps))
+        if merged_maps:
+            _save_all_maps_cache(
+                merged_maps,
+                fetched_at=prev_fetched_at if isinstance(prev_fetched_at, str) and prev_fetched_at else None,
+                batches_merged_at=prev_merged_at if isinstance(prev_merged_at, str) and prev_merged_at else None,
+                mark_fetched=False,
+                counts_never_lower=True,
+            )
+        # 保存の後に記録する（保存で例外が出たら failed として 1 時間後に取り直す）
+        _record_full_fetch_result("incomplete", expected_total, read_count)
+        # 読めなかった分は batch 差分で前進させる（失敗時と同じ）
+        try:
+            _merge_all_maps_with_recent_batches(session)
+        except Exception as batch_exc:  # noqa: BLE001
+            log_api_failure(
+                "accsaber_reloaded",
+                "fetch_and_save_all_maps_cache",
+                "recent batch fallback failed after incomplete full map fetch",
+                batch_exc,
+            )
     except Exception as exc:  # noqa: BLE001
+        _record_full_fetch_result("failed")
         log_api_failure("accsaber_reloaded", "fetch_and_save_all_maps_cache", f"cache refresh failed path={_ALL_MAPS_CACHE_FILE}", exc)
         try:
             if session is None:
