@@ -38,6 +38,7 @@ from .beatleader import (
 from ..beatleader import BeatLeaderPlayer, fetch_player as fetch_bl_player
 from .map_store import MapStore
 from ..ss_reweights import apply_scoresaber_reweights
+from ..ranked_seed import import_ranked_seed
 
 from ..accsaber_reloaded import fetch_player_all_categories as _fetch_accsaber_reloaded
 from ..accsaber_reloaded import fetch_player_xp as _fetch_accsaber_reloaded_xp
@@ -929,6 +930,14 @@ def _create_snapshot_for_steam_id(
     # 初回は全件取得、2回目以降は差分（ScoreSaber）またはメタデータの増分検知（BeatLeader）のみ。
     # BeatLeader 側は ScoreSaber 側と完全に独立（別ホスト・別キャッシュファイル）なので、
     # バックグラウンドで並行取得して所要時間を短縮する。
+    # 配布物に同梱したランク譜面一覧を先に取り込む（新しく使い始めた人・アップデートした人が全件取得しないように）。
+    # BL の裏の取得・SS のリウェイト・SS の一覧の取得より前に行う。失敗しても続ける（キャンセルだけは出す）。
+    try:
+        import_ranked_seed(CACHE_DIR)
+    except Exception as exc:  # noqa: BLE001
+        _rethrow_if_cancelled(exc)
+        print(f"Ranked seed: 取り込みに失敗しました（{exc}）")
+
     bl_ranked_bg: Optional[_BackgroundFetch] = None
     _bl_ranked_cache_path = CACHE_DIR / "beatleader_ranked_maps.json"
     _bl_ranked_before_ids: set[str] = set()

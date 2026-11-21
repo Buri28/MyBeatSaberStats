@@ -7,6 +7,16 @@ build/
 
 # python cache
 *.pyc
+__pycache__/
+.pytest_cache/
+
+# 作業中の確認用ファイル（スクショ・確認スクリプト・ログ）。アプリにもビルドにも使わない
+artifacts/
+verification/
+logs/
+# サイトから取ってきた調査用の JS・HTML
+tmp_accsaber_*
+__bl_main.js
 
 # User logs
 *.log
@@ -23,3 +33,6 @@ _internal/
 build_log.txt
 MyBeatSaberStats.exe
 Update.exe
+
+# 配布物に同梱するランク譜面一覧（build.ps1 が cache から release に入れる。36MB あるので git に入れない）
+resources/ranked_seed/

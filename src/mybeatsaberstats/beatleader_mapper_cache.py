@@ -11,6 +11,7 @@ from .collector.beatleader import _get_beatleader_leaderboards_ranked, _get_beat
 from .snapshot import BASE_DIR
 from .http_client import make_session
 from .fileio import atomic_write_text
+from .ranked_seed import import_ranked_seed
 
 
 _CACHE_DIR = BASE_DIR / "cache"
@@ -187,6 +188,8 @@ def refresh_bl_mapper_played_cache(
     refresh_mode: str,
     progress: Optional[Callable[[int, int, str], None]] = None,
 ) -> dict:
+    # ランク譜面一覧が無い人も全件取得しないよう、配布物に同梱した一覧を先に取り込む（失敗しても続ける）
+    import_ranked_seed(_CACHE_DIR)
     cache_data = load_bl_mapper_played_cache(steam_id)
     fetch_until: Optional[datetime] = None
     if refresh_mode == "since" and cache_data is not None:

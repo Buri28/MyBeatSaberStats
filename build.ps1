@@ -15,6 +15,9 @@
 .PARAMETER Clean
     ビルド前に build/ dist/ __pycache__ を削除する。
 
+.PARAMETER RankedSeedSourceDir
+    同梱するランク譜面一覧（ranked_seed）のコピー元。省略すると cache\ を使う。
+
 .EXAMPLE
     .\.build.ps1                          # ビルド (バージョン変更なし)
     .\.build.ps1 -Version 1.0.1           # version.json を 1.0.1 に更新してビルド
@@ -24,7 +27,10 @@
 param(
     [string]$Version = "",
 
-    [switch]$Clean
+    [switch]$Clean,
+
+    # 同梱するランク譜面一覧のコピー元（既定は cache\。歯止めを試すときに一時フォルダを渡す）
+    [string]$RankedSeedSourceDir = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -37,6 +43,64 @@ $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Python    = Join-Path $ScriptDir ".venv\Scripts\python.exe"
 $ReleaseDir = Join-Path $ScriptDir "release"
 $UpdateTargetsPath = Join-Path $ScriptDir "resources\update_targets.json"
+
+# 同梱するランク譜面一覧（ranked_seed）。全件取得を最後まで終えていない一覧を配らないよう、ビルドの前に確かめる。
+$RankedSeedFiles = @(
+    "scoresaber_ranked_maps.json",
+    "beatleader_ranked_maps.json",
+    "ranked_full_traversal.json",
+    "scoresaber_reweights.json"
+)
+if ($RankedSeedSourceDir -eq "") {
+    $RankedSeedSourceDir = Join-Path $ScriptDir "cache"
+}
+# 相対パスは呼び出した場所を基準に、ここで絶対パスにする（後で Set-Location $ScriptDir するため）
+if (-not [System.IO.Path]::IsPathRooted($RankedSeedSourceDir)) {
+    $RankedSeedSourceDir = Join-Path (Get-Location).Path $RankedSeedSourceDir
+}
+$RankedSeedSourceDir = [System.IO.Path]::GetFullPath($RankedSeedSourceDir)
+# ビルド中（PyInstaller の数分）に cache が Snapshot で書き換わっても、一覧と記録がずれないよう、
+# 確かめる前に一時フォルダへ写し、確かめたものをそのまま配布物に入れる。-Clean で消える build\ には置かない。
+$RankedSeedStagingDir = Join-Path $env:TEMP "MyBeatSaberStats_ranked_seed_staging"
+
+function Assert-RankedSeedSource {
+    foreach ($file in $RankedSeedFiles) {
+        if (-not (Test-Path (Join-Path $RankedSeedSourceDir $file))) {
+            Write-Error "同梱するランク譜面の資材がありません: $RankedSeedSourceDir\$file（Snapshot でランク譜面一覧を最後まで取得してからビルドしてください）"
+            exit 1
+        }
+    }
+    if (Test-Path $RankedSeedStagingDir) {
+        Remove-Item $RankedSeedStagingDir -Recurse -Force
+    }
+    New-Item $RankedSeedStagingDir -ItemType Directory -Force | Out-Null
+    foreach ($file in $RankedSeedFiles) {
+        Copy-Item (Join-Path $RankedSeedSourceDir $file) $RankedSeedStagingDir -Force
+    }
+    # 一覧が JSON として読めて fetched_at と中身があるか（読めない同梱分は、アプリ側で取り込まれず全件取得になる）
+    $checkCode = 'import json,sys,pathlib; d=pathlib.Path(sys.argv[1]); ss=json.loads((d/''scoresaber_ranked_maps.json'').read_text(encoding=''utf-8'')); bl=json.loads((d/''beatleader_ranked_maps.json'').read_text(encoding=''utf-8'')); json.loads((d/''scoresaber_reweights.json'').read_text(encoding=''utf-8'')); ok=isinstance(ss.get(''fetched_at''),str) and isinstance(bl.get(''fetched_at''),str) and bool(ss.get(''leaderboards'')) and bool(bl.get(''pages'')); print(''SS'',len(ss.get(''leaderboards'') or {}),ss.get(''fetched_at''),''/ BL pages'',len(bl.get(''pages'') or []),bl.get(''fetched_at'')); sys.exit(0 if ok else 3)'
+    & $Python -I -c $checkCode $RankedSeedStagingDir
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "同梱するランク譜面一覧を読めないか、fetched_at・中身がありません（exit code $LASTEXITCODE）"
+        exit 1
+    }
+    $traversal = Get-Content (Join-Path $RankedSeedStagingDir "ranked_full_traversal.json") -Raw -Encoding UTF8 | ConvertFrom-Json
+    foreach ($service in @("scoresaber", "beatleader")) {
+        if (-not $traversal."${service}_complete") {
+            Write-Error "ranked_full_traversal.json に ${service}_complete がありません（全件取得を最後まで終えていない一覧は配りません）"
+            exit 1
+        }
+        if ($traversal."${service}_last_ok" -eq $false) {
+            Write-Error "ranked_full_traversal.json の ${service}_last_ok が false です（直前の全件取得が失敗しています。取り直してからビルドしてください）"
+            exit 1
+        }
+        if ($traversal."${service}_stars_drift" -eq $true) {
+            Write-Error "ranked_full_traversal.json の ${service}_stars_drift が true です（★のずれを直してからビルドしてください）"
+            exit 1
+        }
+    }
+    Write-Host "Ranked seed: $RankedSeedSourceDir（SS $($traversal.scoresaber_complete) / BL $($traversal.beatleader_complete)）"
+}
 
 function Get-CSharpCompiler {
     foreach ($candidate in @(
@@ -123,6 +187,8 @@ if (-not (Test-Path $Python)) {
     Write-Error ".venv が見つかりません。先に venv を作成して requirements.txt をインストールしてください。"
     exit 1
 }
+
+Assert-RankedSeedSource
 
 Write-Host ""
 Write-Host "===  MyBeatSaberStats Build  ===" -ForegroundColor Cyan
@@ -313,12 +379,21 @@ function Copy-CommonFiles {
         Write-Host "  LICENSE → $dest"
     }
 
+    # ランク譜面一覧（SS・BL）は _internal\resources\ranked_seed\ に入れる（同梱分）。
+    # _internal\resources はアップデートでもフル版でも入れ替わるので、アップデートした人にも届く。
+    # 起動後の Snapshot で利用者の cache\ に取り込み（ranked_seed.py）、その後は差分取得だけにする。
+    # 中身（_complete・★ずれの印・ファイルの有無）は、ビルドの前に Assert-RankedSeedSource で確かめてある。
+    $seedDir = Join-Path $internalDir "resources\ranked_seed"
+    New-Item $seedDir -ItemType Directory -Force | Out-Null
+    foreach ($file in $RankedSeedFiles) {
+        Copy-Item (Join-Path $RankedSeedStagingDir $file) $seedDir -Force
+        Write-Host "  $file → $seedDir"
+    }
+
     # ユーザーに紐づかないキャッシュファイルを release/<ExeName>/cache/ にコピーする
-    # （譜面数など。プレイヤースコアや設定ファイルは除外）
+    # （プレイヤースコアや設定ファイルは除外。ランク譜面一覧は上の ranked_seed に入れるので、ここには入れない）
     $CacheSharedFiles = @(
-        "beatleader_ranked_maps.json",
-        "players_index.json",
-        "scoresaber_ranked_maps.json"
+        "players_index.json"
     )
     $srcCacheDir  = Join-Path $ScriptDir "cache"
     $destCacheDir = Join-Path $ReleaseDir "$ExeName\cache"
