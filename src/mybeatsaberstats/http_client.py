@@ -117,7 +117,8 @@ _POLICIES: Dict[str, _HostPolicy] = {
     "api.accsaberreloaded.com": _HostPolicy(min_interval=0.50, max_concurrency=1, max_retries=4),
     "accsaber.com": _HostPolicy(min_interval=0.50, max_concurrency=1, max_retries=4),
     # BeatLeader は Retry-After を返してくれるので、それに従いつつ控えめに。
-    "api.beatleader.xyz": _HostPolicy(min_interval=0.12, max_concurrency=4, max_retries=3),
+    # api.beatleader.xyz はドメインがパーキングページに変わり使えなくなったため api.beatleader.com を使う（2026-11-25）。
+    "api.beatleader.com": _HostPolicy(min_interval=0.12, max_concurrency=4, max_retries=3),
     "beatleader.com": _HostPolicy(min_interval=0.12, max_concurrency=4, max_retries=3),
     # BeatSaver はまとめ取得 API があるため、そもそもリクエスト数自体が少ない。
     "beatsaver.com": _HostPolicy(min_interval=0.20, max_concurrency=2, max_retries=3),
@@ -152,6 +153,14 @@ def _policy_for(url: str) -> _HostPolicy:
         return policy
 
 
+def retry_backoff_seconds(attempt: int) -> float:
+    """Retry-After の無い再試行の待ち時間（attempt 回目の失敗の後。指数バックオフ、上限 30 秒）。
+
+    PoliteSession の 429 / 503 の待ち方と同じ。呼び出し側で 5xx・タイムアウトを再試行するときにも使う。
+    """
+    return min(30.0, 2.0 ** attempt)
+
+
 def _retry_after_seconds(resp: requests.Response, attempt: int) -> float:
     """Retry-After ヘッダを解釈する。無い場合は指数バックオフ。"""
     header = resp.headers.get("Retry-After")
@@ -162,7 +171,7 @@ def _retry_after_seconds(resp: requests.Response, attempt: int) -> float:
             return max(0.0, min(value, 60.0))
         except (TypeError, ValueError):
             pass
-    return min(30.0, 2.0 ** attempt)
+    return retry_backoff_seconds(attempt)
 
 
 #: レート制限を検知した回数（デバッグ・ログ用）。

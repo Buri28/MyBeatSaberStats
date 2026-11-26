@@ -301,11 +301,41 @@ def _is_full_fetch_backed_off() -> bool:
     return 0 <= age_hours < wait_hours
 
 
-def _merge_partial_full_fetch(partial_maps: List[Dict]) -> List[Dict]:
+def _song_key(song: Dict) -> str:
+    return str(song.get("id") or song.get("mapId") or song.get("beatsaverCode") or "").strip()
+
+
+def _merge_difficulties(cached: object, fresh: object) -> List[Dict]:
+    """前回の難易度に今回読めた難易度を重ねる（id が同じものは今回の内容。今回読めなかった難易度は前回のまま）。"""
+    out: List[Dict] = []
+    index: Dict[str, int] = {}
+    for diff in list(cached if isinstance(cached, list) else []) + list(fresh if isinstance(fresh, list) else []):
+        if not isinstance(diff, dict):
+            continue
+        diff_key = str(diff.get("id") or "").strip()
+        if diff_key and diff_key in index:
+            out[index[diff_key]] = diff
+            continue
+        if diff_key:
+            index[diff_key] = len(out)
+        out.append(diff)
+    return out
+
+
+def _merge_partial_full_fetch(partial_maps: List[Dict], keep_new_songs: bool = True) -> List[Dict]:
     """途中まで読めた全件取得の結果を、前回のキャッシュに足す。
 
     読めた譜面は新しい内容で置き換え、読めなかった譜面は前回のまま残す
     （途中で止まった取得では、ランクから外れたかどうかを判断できないので消さない）。
+    全件取得は難易度単位のページングなので、途中で止まると 1 つの曲の難易度が一部しか読めていないことがある。
+    - 前回のキャッシュにある曲：難易度は id ごとに重ね、今回読めなかった難易度は前回のまま残す
+      （一部の難易度だけの曲で上書きしない）。
+    - 前回のキャッシュに無い曲：
+      - 途中で止まった回（last まで読めなかった。keep_new_songs=False）は保存しない（次の全件取得・batch の
+        取り込みで入る）。難易度の一覧は曲ごとに並んでいるとは限らず（sort を指定していない）、1 つの曲の難易度が
+        離れたページにあることがあるので、最後に読めたページの曲だけを除いても、難易度の欠けた曲が残る。
+      - last まで読めたが件数が totalElements に届かなかった回（keep_new_songs=True）は、今までどおり足す
+        （全ページは読んでいる。欠けた難易度があっても、次の全件取得で id ごとに重ねて埋まる）。
     """
     payload = _load_all_maps_cache_payload()
     cached_maps = payload.get("maps") if isinstance(payload, dict) else None
@@ -313,15 +343,35 @@ def _merge_partial_full_fetch(partial_maps: List[Dict]) -> List[Dict]:
         cached_maps = []
     merged: Dict[str, Dict] = {}
     ordered: List[str] = []
-    for song in list(cached_maps) + list(partial_maps):
+    for song in cached_maps:
         if not isinstance(song, dict):
             continue
-        key = str(song.get("id") or song.get("mapId") or song.get("beatsaverCode") or "").strip()
+        key = _song_key(song)
         if not key:
             continue
         if key not in merged:
             ordered.append(key)
         merged[key] = song
+    skipped: List[str] = []
+    for song in partial_maps:
+        if not isinstance(song, dict):
+            continue
+        key = _song_key(song)
+        if not key:
+            continue
+        previous = merged.get(key)
+        if previous is None:
+            if not keep_new_songs:
+                skipped.append(key)
+                continue
+            ordered.append(key)
+            merged[key] = song
+            continue
+        combined = dict(song)
+        combined["difficulties"] = _merge_difficulties(previous.get("difficulties"), song.get("difficulties"))
+        merged[key] = combined
+    if skipped:
+        print(f"AccSaber 全件取得: 途中で止まったため、前回のキャッシュに無い譜面 {len(skipped)} 件は、難易度が揃っていないかもしれないので保存しません")
     return [merged[key] for key in ordered]
 
 
@@ -715,7 +765,6 @@ class _AllMapsResult(list):
     read_count: int = 0
     #: last=true のページまで読んだか（ガードや空ページで止まったら False）
     reached_last: bool = True
-
     @property
     def complete(self) -> bool:
         """全件を読み切れたか。totalElements が無い応答では、last まで読めたかだけで決める。"""
@@ -1927,7 +1976,7 @@ def fetch_and_save_all_maps_cache(
         payload = _load_all_maps_cache_payload()
         prev_fetched_at = payload.get("fetched_at") if isinstance(payload, dict) else None
         prev_merged_at = payload.get("batches_merged_at") if isinstance(payload, dict) else None
-        merged_maps = _merge_partial_full_fetch(list(all_maps))
+        merged_maps = _merge_partial_full_fetch(list(all_maps), keep_new_songs=reached_last is not False)
         if merged_maps:
             _save_all_maps_cache(
                 merged_maps,
@@ -2022,7 +2071,59 @@ def fetch_and_save_player_scores_cache(
         path.parent.mkdir(parents=True, exist_ok=True)
         atomic_write_text(path, json.dumps(cache_data, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception:  # noqa: BLE001
-        pass
+        return
+    try:
+        sync_map_complexity_from_scores(all_scores)
+    except Exception as exc:  # noqa: BLE001
+        print(f"AccSaber complexity 同期: 失敗しました（{exc}）")
+
+
+def sync_map_complexity_from_scores(scores: List[Dict]) -> int:
+    """取ったばかりのスコアの complexity で、全マップキャッシュの complexity を書き換える（API は使わない）。
+
+    全マップキャッシュの全件取得は 24 時間に 1 回（_ALL_MAPS_CACHE_TTL_HOURS）なので、その間のリウェイトは
+    一覧に入らない。スコアは Snapshot のたびに全部取り直していて、complexity は取った時点の値になっている
+    （2026-11-25 に確認：11/24 に取ったスコア 611 件は全マップキャッシュと全部一致、7 月に取った他のプレイヤーの
+    スコアは 9 割以上が今の値と違う）。そこで、自分がプレイした譜面だけ先に直す。fetched_at などは変えない。
+    戻り値は書き換えた難易度の数。
+    """
+    by_diff: Dict[str, float] = {}
+    for score in scores or []:
+        if not isinstance(score, dict):
+            continue
+        diff_id = score.get("mapDifficultyId")
+        value = score.get("complexity")
+        if diff_id and isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
+            by_diff[str(diff_id)] = float(value)
+    if not by_diff:
+        return 0
+    payload = _load_all_maps_cache_payload()
+    maps = payload.get("maps") if isinstance(payload, dict) else None
+    if not isinstance(maps, list):
+        return 0
+    changed = 0
+    for song in maps:
+        for diff in (song.get("difficulties") or []) if isinstance(song, dict) else []:
+            if not isinstance(diff, dict):
+                continue
+            new_value = by_diff.get(str(diff.get("id")))
+            if new_value is None:
+                continue
+            try:
+                old_value = float(diff.get("complexity"))
+            except (TypeError, ValueError):
+                old_value = None
+            if old_value is None or abs(old_value - new_value) > 1e-9:
+                print(
+                    f"AccSaber complexity 同期: {song.get('songName')} {diff.get('difficulty')} "
+                    f"{diff.get('complexity')} -> {new_value}"
+                )
+                diff["complexity"] = new_value
+                changed += 1
+    if changed:
+        atomic_write_text(_ALL_MAPS_CACHE_FILE, json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"AccSaber complexity 同期: 全マップキャッシュの complexity を {changed} 難易度書き換えました")
+    return changed
 
 
 def load_player_scores_from_cache(player_id: str) -> Optional[List[Dict]]:

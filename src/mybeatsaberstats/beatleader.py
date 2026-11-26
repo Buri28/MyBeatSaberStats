@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import List, Optional, Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import math
+import re
 import traceback
 
 import requests
@@ -16,10 +17,25 @@ from .http_client import get_memoized
 from .http_client import make_session
 
 
-BASE_URL = "https://api.beatleader.xyz"
+# BeatLeader の API。以前使っていた api.beatleader.xyz はドメインがパーキングページに変わり、
+# TLS の接続が切られる（2026-11-25 に requests / curl とも SSL handshake 失敗、api.beatleader.com は 200）。
+BASE_URL = "https://api.beatleader.com"
 LOG_DIR = BASE_DIR / "logs"
 LOG_PATH = LOG_DIR / "beatleader_api.log"
 _PRESTIGE_LEVELS_CACHE: list[dict] | None = None
+
+_LEGACY_BL_HOST_RE = re.compile(r"^(https?://(?:[A-Za-z0-9-]+\.)*beatleader)\.xyz(?=[/:?#]|$)", re.IGNORECASE)
+
+
+def normalize_beatleader_url(url: Optional[str]) -> Optional[str]:
+    """保存済みデータに残る旧ドメイン（*.beatleader.xyz）の URL を *.beatleader.com に読み替える。
+
+    以前のスナップショットには cdn.assets.beatleader.xyz のアイコン URL などが入っていて、
+    そのままでは読めない。
+    """
+    if not url:
+        return url
+    return _LEGACY_BL_HOST_RE.sub(r"\1.com", url)
 
 
 def _log_api_failure(api_name: str, message: str, exc: Optional[BaseException] = None) -> None:
@@ -122,8 +138,8 @@ def fetch_player(player_id: str, session: Optional[requests.Session] = None) -> 
     if session is None:
         session = make_session()
 
-    # xyz の /player/{id} にも passPp・techPp・accPp がある（2026-11-20 に確認）。統計・スコア取得と同じ URL にして
-    # get_memoized で 1 回にまとめ、http_client のレート制御（api.beatleader.xyz）も効かせる。
+    # /player/{id} にも passPp・techPp・accPp がある（2026-11-20 に確認）。統計・スコア取得と同じ URL にして
+    # get_memoized で 1 回にまとめ、http_client のレート制御（api.beatleader.com）も効かせる。
     url = f"{BASE_URL}/player/{player_id}"
     timeouts = (3, 5, 8)
     resp = None

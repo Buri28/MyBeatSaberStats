@@ -461,3 +461,38 @@ def test_incomplete_result_is_not_reused_in_same_session(iso) -> None:
     n = _count_full_fetch_calls(complete)
     mod._fetch_all_maps_via_difficulties(complete)  # type: ignore[arg-type]
     assert _count_full_fetch_calls(complete) == n  # 完了した結果はセッション内で使い回す
+
+
+# ── aitask #412：全件取得が途中で止まったときの曲の難易度 ─────────────────
+
+
+def test_full_fetch_stopped_midway_does_not_save_partial_songs(iso) -> None:
+    """難易度単位のページングが途中で止まっても、曲の難易度を一部だけにして保存しない。
+
+    - 前回のキャッシュにある曲：読めた難易度だけ新しい内容にし、読めなかった難易度は前回のまま残す。
+    - 前回のキャッシュに無い曲：止まった所のページの曲も、それより前のページの曲も保存しない。難易度の一覧は曲ごとに
+      並んでいるとは限らず、止まった所より前のページで読めた曲も、続きの難易度が読めなかったページにあるかもしれない
+      （aitask #413 のレビュー）。
+    """
+    now = datetime.now(timezone.utc)
+    old_fetched = _z(now - timedelta(hours=30))  # 期限切れ → 全件取得に行く
+    cached = _song("m1", [_diff("d1", "m1", STD), _diff("d2", "m1", TECH), _diff("d3", "m1", TRUE)])
+    _write_cache(mod._ALL_MAPS_CACHE_FILE, [cached], old_fetched)
+
+    d1_new = dict(_diff("d1", "m1", STD), complexity=9.9)
+    d2_new = dict(_diff("d2", "m1", TECH), complexity=8.8)
+    # page 0: [m1.d1, q.q1] / page 1: [m1.d2, n.n1] / page 2: 空（last=false のまま）→ 途中で止まる
+    # （m1.d3 と n.n2 は読めていない）
+    diffs = [d1_new, _diff("q1", "q", STD), d2_new, _diff("n1", "n", STD)]
+    session = _FakeSession(difficulties=diffs, total_elements=6, page_size=2, always_not_last=True)
+    mod.fetch_and_save_all_maps_cache(session=session)  # type: ignore[arg-type]
+
+    saved = _read(mod._ALL_MAPS_CACHE_FILE)
+    assert saved["fetched_at"] == old_fetched  # 完了扱いにしない（今までどおり）
+    songs = {m["id"]: m for m in saved["maps"]}
+    m1 = {d["id"]: d for d in songs["m1"]["difficulties"]}
+    assert set(m1) == {"d1", "d2", "d3"}  # 読めなかった d3 を落とさない
+    assert m1["d1"].get("complexity") == 9.9 and m1["d2"].get("complexity") == 8.8  # 読めた分は新しい内容
+    assert "q" not in songs  # 止まった所より前で読めた新しい曲も、難易度が揃っているか分からないので保存しない
+    assert "n" not in songs  # 止まった所の新しい曲は、難易度が揃っていないかもしれないので保存しない
+    assert _read(mod._FULL_FETCH_STATE_FILE)["status"] == "incomplete"

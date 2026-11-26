@@ -110,11 +110,11 @@ def test_bl_player_fetched_once_per_snapshot_session():
     stats = c._get_beatleader_player_stats("7", session)
     assert (player.pass_pp, player.tech_pp, player.acc_pp) == (1.5, 2.5, 3.5)
     assert stats == {"rankedPlayCount": 5}
-    assert session.calls == {"https://api.beatleader.xyz/player/7": 1}, session.calls
+    assert session.calls == {"https://api.beatleader.com/player/7": 1}, session.calls
 
 
 def test_bl_player_host_has_rate_policy():
-    assert http_client._policy_for("https://api.beatleader.xyz/player/7") is http_client._POLICIES["api.beatleader.xyz"]
+    assert http_client._policy_for("https://api.beatleader.com/player/7") is http_client._POLICIES["api.beatleader.com"]
 
 
 # ---------------- 項目 5：rankedPlayCount と合わないときは外さない ----------------

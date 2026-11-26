@@ -757,6 +757,17 @@ def _refresh_snapshot_entries_service_columns(entries: List[MapEntry], steam_id:
             entry.bl_player_rank = bl_match[4]
             entry.bl_played_at_ts = bl_match[6]
 
+        # 行そのものの★・pp（★の範囲フィルタ・★別の書き出し・並べ替えに使う）も、行の取得元のキャッシュの今の値にする。
+        # 列（ss_* / bl_*）だけ新しくしていたので、保存した行を復元するとリウェイト前の★で絞り込まれていた。
+        own_service_entry = service_indices.get(entry.source, {}).get(key) if entry.source in ("scoresaber", "beatleader") else None
+        if own_service_entry is not None and own_service_entry.stars > 0:
+            entry.stars = own_service_entry.stars
+            if own_service_entry.max_pp > 0:
+                entry.max_pp = own_service_entry.max_pp
+        own_match = ss_match if entry.source == "scoresaber" else bl_match if entry.source == "beatleader" else None
+        if own_match is not None:
+            entry.player_pp = own_match[0]
+
         if not entry.bl_leaderboard_id:
             entry.bl_leaderboard_id = bl_leaderboard_idx.get(key, "")
         if entry.bl_leaderboard_id and not entry.beatleader_page_url:

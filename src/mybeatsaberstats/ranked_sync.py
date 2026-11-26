@@ -133,6 +133,57 @@ def mismatch_traversal_allowed(path: Path | str, service: str, api_total: int) -
     return unresolved is not None and unresolved != api_total
 
 
+#: ★同期（sync_changed_ranked_scores）で、検索しても目当ての譜面が返らなかったときの印の区切り。
+#: 印は「食い違いの理由|not_found:回数@日時」。取り直して食い違いが残った（確認済み）印は理由だけ。
+_NOT_FOUND_SEP = "|not_found:"
+
+
+def _parse_not_found(mark: Optional[str], why: str) -> tuple[int, Optional[datetime]]:
+    """mark が why の「見つからなかった」印なら (回数, 日時)。違えば (0, None)。"""
+    prefix = why + _NOT_FOUND_SEP
+    if not isinstance(mark, str) or not mark.startswith(prefix):
+        return 0, None
+    count_text, _, when_text = mark[len(prefix):].partition("@")
+    try:
+        count = max(1, int(count_text))
+    except ValueError:
+        count = 1
+    try:
+        when = datetime.fromisoformat(when_text.replace("Z", "+00:00")) if when_text else None
+    except ValueError:
+        when = None
+    if when is not None and when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return count, when
+
+
+def star_sync_skip(mark: Optional[str], why: str, now: Optional[datetime] = None) -> bool:
+    """★同期で、食い違い why の譜面を今回は取り直さないか（印 mark を見る）。
+
+    - 取り直しても同じ食い違いが残った（mark == why）：取り直さない。
+    - 検索しても返らなかった（not_found の印）：全件取り直しの総数の食い違いと同じ待ち時間だけ探し直さない。
+      1 回目は MISMATCH_RETRY_HOURS 時間、続けて 2 回以上なら MISMATCH_STUCK_DAYS 日。過ぎたらもう一度探す。
+    - 食い違いが変わった（why が違う）・印が無い：取り直す。
+    """
+    if mark is None:
+        return False
+    if mark == why:
+        return True
+    count, when = _parse_not_found(mark, why)
+    if count == 0 or when is None:
+        return False
+    wait_hours = MISMATCH_STUCK_DAYS * 24 if count >= 2 else MISMATCH_RETRY_HOURS
+    age = ((now or datetime.now(timezone.utc)) - when).total_seconds() / 3600.0
+    return 0 <= age < wait_hours
+
+
+def star_sync_not_found_mark(previous: Optional[str], why: str, now: Optional[datetime] = None) -> str:
+    """★同期で検索しても返らなかった譜面の印（star_sync_skip が読む）。続けて返らなければ回数を増やす。"""
+    count, _ = _parse_not_found(previous, why)
+    when = (now or datetime.now(timezone.utc)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return f"{why}{_NOT_FOUND_SEP}{count + 1}@{when}"
+
+
 def load_newly_ranked_checked(path: Path | str, service: str, player_id: str) -> dict[str, str]:
     """「新しくランクになった譜面」の検知で、取り直してもランクのスコアにならなかった譜面の印を読む。
 

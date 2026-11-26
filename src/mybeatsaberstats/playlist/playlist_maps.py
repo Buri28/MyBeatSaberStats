@@ -85,7 +85,7 @@ def _fetch_bl_leaderboards_by_hash(session: requests.Session, song_hash: str) ->
     if not song_hash:
         return {}
     try:
-        resp = session.get(f"https://api.beatleader.xyz/leaderboards/hash/{song_hash}", timeout=15)
+        resp = session.get(f"https://api.beatleader.com/leaderboards/hash/{song_hash}", timeout=15)
         resp.raise_for_status()
         payload = resp.json()
     except Exception:
@@ -185,7 +185,7 @@ def _fetch_bl_top_replay_url(session: requests.Session, leaderboard_id: str, cou
     if countries:
         params["countries"] = countries
     try:
-        resp = session.get(f"https://api.beatleader.xyz/leaderboard/{leaderboard_id}", params=params, timeout=15)
+        resp = session.get(f"https://api.beatleader.com/leaderboard/{leaderboard_id}", params=params, timeout=15)
         resp.raise_for_status()
         payload = resp.json()
     except Exception:

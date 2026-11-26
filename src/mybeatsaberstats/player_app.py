@@ -48,6 +48,7 @@ from .snapshot import Snapshot, SNAPSHOT_DIR, BASE_DIR, RESOURCES_DIR, StarClear
 from .theme import table_stylesheet, toggle as _toggle_theme, is_dark, label_cell_color, label_cell_text_color, init_theme as _init_theme, button_label as _theme_button_label, current_theme_mode as _current_theme_mode, set_theme_mode as _set_theme_mode
 from .updater import StartupUpdateChecker, get_current_version
 from .http_client import get_shared_session as _get_shared_session
+from .beatleader import normalize_beatleader_url
 from .accsaber_reloaded import fetch_all_maps_full as _rl_fetch_all_maps
 from .accsaber_reloaded import build_unplayed_bplist as _rl_build_unplayed_bplist
 from .accsaber_reloaded import fetch_player_all_categories as _rl_fetch_player
@@ -68,6 +69,7 @@ from .collector.collector import (
     create_snapshot_for_steam_id,
     SnapshotOptions,
     _read_cache_fetched_at,
+    local_input_to_utc as _local_input_to_utc,
 )
 from mybeatsaberstats.collector.map_store import MapStore
 from .fileio import atomic_write_text
@@ -611,21 +613,22 @@ class TakeSnapshotDialog(QDialog):
         return self._playlist_export_dir_edit.text().strip()
 
     def snapshot_options(self) -> SnapshotOptions:
+        # 「Fetch from:」の日時は PC のローカル時刻で表示・入力する。取得処理はタイムゾーン無しの UTC で比べるので直して渡す
         ss_until: Optional[datetime] = None
         if self._cb_ss_until.isChecked():
             qdt = self._dt_ss_until.dateTime()
-            ss_until = datetime(
+            ss_until = _local_input_to_utc(datetime(
                 qdt.date().year(), qdt.date().month(), qdt.date().day(),
                 qdt.time().hour(), qdt.time().minute(), qdt.time().second(),
-            )
+            ))
 
         bl_until: Optional[datetime] = None
         if self._cb_bl_until.isChecked():
             qdt = self._dt_bl_until.dateTime()
-            bl_until = datetime(
+            bl_until = _local_input_to_utc(datetime(
                 qdt.date().year(), qdt.date().month(), qdt.date().day(),
                 qdt.time().hour(), qdt.time().minute(), qdt.time().second(),
-            )
+            ))
 
         return SnapshotOptions(
             fetch_ss_ranked_maps=self._cb_ss_ranked_maps.isChecked(),
@@ -1352,7 +1355,7 @@ class EventsPanel(QWidget):
         except Exception:  # noqa: BLE001
             pass
         try:
-            resp = _requests.get("https://api.beatleader.xyz/events?page=1&count=1", timeout=10)
+            resp = _requests.get("https://api.beatleader.com/events?page=1&count=1", timeout=10)
             resp.raise_for_status()
             data = resp.json().get("data") or []
             if data:
@@ -1494,7 +1497,7 @@ class PlayerAvatarWidget(QLabel):
                 r.raise_for_status()
                 img_url = r.json().get("profilePicture", "")
             else:
-                url = f"https://api.beatleader.xyz/player/{player_id}"
+                url = f"https://api.beatleader.com/player/{player_id}"
                 r = _requests.get(url, timeout=8)
                 r.raise_for_status()
                 img_url = r.json().get("avatar", "")
@@ -3384,7 +3387,8 @@ class PlayerWindow(QMainWindow):
         else:
             _bl_prestige_text = ""
         self._bl_prestige_text_label.setText(_bl_prestige_text)
-        self._bl_prestige_icon_label.set_image_url(snap.beatleader_prestige_icon_url)
+        # 以前のスナップショットには旧ドメイン（cdn.assets.beatleader.xyz）の URL が入っているので読み替える
+        self._bl_prestige_icon_label.set_image_url(normalize_beatleader_url(snap.beatleader_prestige_icon_url))
         _set_info_tbl(
             self.ss_info_table,
             snap.scoresaber_id or snap.steam_id or "", ss_pp_text, ss_rank_text,

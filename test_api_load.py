@@ -358,7 +358,7 @@ def test_request_scope_counts_per_host(monkeypatch: pytest.MonkeyPatch, tmp_path
     urls = [
         "https://scoresaber.com/api/players",
         "https://scoresaber.com/api/players",
-        "https://api.beatleader.xyz/player/1",
+        "https://api.beatleader.com/player/1",
     ]
 
     def _fake_request(self, method, url, **kwargs):  # noqa: ANN001, ANN202
@@ -373,9 +373,9 @@ def test_request_scope_counts_per_host(monkeypatch: pytest.MonkeyPatch, tmp_path
     logged = (tmp_path / "api_requests.log").read_text(encoding="utf-8")
     assert "テスト処理: 合計 3 リクエスト" in logged
     assert "scoresaber.com: 2 回" in logged
-    assert "api.beatleader.xyz: 1 回" in logged
+    assert "api.beatleader.com: 1 回" in logged
     # 多く叩いた API が先に並ぶ
-    assert logged.index("scoresaber.com") < logged.index("api.beatleader.xyz")
+    assert logged.index("scoresaber.com") < logged.index("api.beatleader.com")
     # エンドポイント内訳が出る（ID はプレースホルダに正規化される）
     assert "GET /api/players: 2 回" in logged
     assert "GET /player/{id}: 1 回" in logged
@@ -389,7 +389,7 @@ def test_request_scope_counts_per_host(monkeypatch: pytest.MonkeyPatch, tmp_path
          "GET /v1/users/{id}/milestones"),
         ("https://api.accsaberreloaded.com/v1/leaderboards/b0000000-0000-0000-0000-000000000005",
          "GET /v1/leaderboards/{uuid}"),
-        ("https://api.beatleader.xyz/leaderboards/hash/" + "A" * 40,
+        ("https://api.beatleader.com/leaderboards/hash/" + "A" * 40,
          "GET /leaderboards/hash/{hash}"),
         ("https://beatsaver.com/api/maps/hash/" + "A" * 40 + "," + "B" * 40,
          "GET /api/maps/hash/{hashes}"),

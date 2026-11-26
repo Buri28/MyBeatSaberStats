@@ -34,8 +34,8 @@ def test_api_top_level(value, expected):
     assert player.pass_pp == expected
     assert player.tech_pp == 25.678
     assert player.acc_pp == 0.0
-    # 指摘 3：統計・スコア取得と同じ xyz の URL（get_memoized で 1 回にまとまる）
-    assert get.call_args.args[1] == "https://api.beatleader.xyz/player/test"
+    # 指摘 3：統計・スコア取得と同じ URL（get_memoized で 1 回にまとまる）
+    assert get.call_args.args[1] == "https://api.beatleader.com/player/test"
     response.json.return_value = {"scoreStats": {"passPp": 999}}
     with patch.object(bl, "get_memoized", return_value=response):
         assert bl.fetch_player("test", session=Mock()).pass_pp is None

@@ -4,7 +4,7 @@ def _is_steam_id(value: str | None) -> bool:
     return isinstance(value, str) and value.isdigit() and len(value) == 17
 
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone, tzinfo
 import json
 import threading
 from pathlib import Path
@@ -21,6 +21,7 @@ from .scoresaber import _collect_star_stats_from_scoresaber
 from .scoresaber import collect_scoresaber_star_stats_from_cache as _ss_star_stats_from_cache
 from .scoresaber import refresh_scoresaber_ranked_scores as _ss_refresh_ranked_scores
 from .scoresaber import refresh_scores_of_newly_ranked_maps as _ss_refresh_newly_ranked_scores
+from .scoresaber import sync_changed_ranked_scores as _ss_sync_changed_ranked_scores
 from .scoresaber import _get_scoresaber_player_scores
 from .scoresaber import _get_scoresaber_leaderboards_ranked
 from .scoresaber import _get_scoresaber_player_stats
@@ -34,8 +35,10 @@ from .beatleader import (
     _load_cached_player_score_failed_pages as _bl_load_cached_player_score_failed_pages,
     refresh_beatleader_ranked_scores as _bl_refresh_ranked_scores,
     refresh_scores_of_newly_ranked_maps as _bl_refresh_newly_ranked_scores,
+    sync_changed_ranked_scores as _bl_sync_changed_ranked_scores,
 )
 from ..beatleader import BeatLeaderPlayer, fetch_player as fetch_bl_player
+from ..beatleader import BASE_URL as _BL_API_BASE_URL
 from .map_store import MapStore
 from ..ss_reweights import apply_scoresaber_reweights
 from ..ranked_seed import import_ranked_seed
@@ -71,6 +74,18 @@ _PP_RECONCILE_RETRY_HOURS = 24
 _PP_RECONCILE_MISMATCH_DAYS = 7
 
 
+def local_input_to_utc(value: datetime, tz: Optional[tzinfo] = None) -> datetime:
+    """画面で入れた日時（PC のローカル時刻）を、タイムゾーン無しの UTC にする。
+
+    取得処理（collector の fetch_until）はタイムゾーン無しの値を UTC として扱う。画面の「Fetch from:」に
+    入れた日本時間をそのまま渡すと 9 時間遅い日時として扱われ、遡りが 9 時間足りなくなる。
+    tz を渡すとその地域の時刻として扱う（テスト用）。省略すると PC のローカル時刻。
+    """
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=tz) if tz is not None else value.astimezone()
+    return value.astimezone(timezone.utc).replace(tzinfo=None)
+
+
 @dataclass
 class SnapshotOptions:
     """スナップショット取得時に各データソースの取得可否を制御するオプション。
@@ -80,6 +95,7 @@ class SnapshotOptions:
 
     ss_fetch_until / bl_fetch_until を指定すると、それより古い日時のスコアまで遡って取得する。
     None の場合はキャッシュの最新 timeSet に達した時点で差分取得を終了する（通常動作）。
+    日時はタイムゾーン無しの UTC で渡す（画面で入れたローカル時刻は local_input_to_utc で直す）。
     """
     fetch_ss_ranked_maps: bool = True    # ScoreSaber Ranked Maps
     fetch_bl_ranked_maps: bool = True    # BeatLeader Ranked Maps
@@ -100,8 +116,8 @@ class SnapshotOptions:
 # SCORESABER_PLAYER_SCORES_URL = "https://scoresaber.com/api/player/{player_id}/scores"
 # SCORESABER_PLAYER_FULL_URL = "https://scoresaber.com/api/player/{player_id}/full"
 
-BEATLEADER_LEADERBOARDS_URL = "https://api.beatleader.xyz/leaderboards"
-BL_BASE_URL = "https://api.beatleader.xyz"
+BL_BASE_URL = _BL_API_BASE_URL
+BEATLEADER_LEADERBOARDS_URL = f"{BL_BASE_URL}/leaderboards"
 
 
 def _read_cache_fetched_at(path: Path) -> Optional[datetime]:
@@ -408,6 +424,7 @@ def _get_beatleader_player_scores(
     fetch_until: Optional[datetime] = None,
     retry_failed_pages_only: bool = False,
     warning_callback: Optional[Callable[[str], None]] = None,
+    status: Optional[dict] = None,
 ) -> list[dict]:
     """BeatLeader のプレイヤースコア取得を beatleader.py 側の実装に委譲するラッパー。
 
@@ -426,6 +443,7 @@ def _get_beatleader_player_scores(
         fetch_until=fetch_until,
         retry_failed_pages_only=retry_failed_pages_only,
         warning_callback=warning_callback,
+        status=status,
     )
 
 
@@ -1172,14 +1190,25 @@ def _create_snapshot_for_steam_id(
                     _ss_score_label = "new"
                 _step(0.15, f"Fetching ScoreSaber player scores (last fetch: {_ss_score_label}, page 1/?)...")
 
+                _ss_scores_status: dict = {"complete": True}
+
                 def _ss_scores_task(task: _BackgroundFetch, _sid=scoresaber_id, _until=_ss_effective_until) -> None:
-                    _get_scoresaber_player_scores(_sid, task.session, progress=task.on_page, fetch_until=_until)
+                    _get_scoresaber_player_scores(
+                        _sid, task.session, progress=task.on_page, fetch_until=_until, status=_ss_scores_status,
+                    )
                     # 新しくランクになった譜面に自分の古いプレイがあれば、その pp も取り直す（差分取得では拾えない）
                     try:
                         _ss_refresh_newly_ranked_scores(_sid, task.session, progress=task.on_page)
                     except Exception as exc2:  # noqa: BLE001
                         _rethrow_if_cancelled(exc2)
                         print(f"ScoreSaber 新ランク譜面のスコア取り直しに失敗（続行）: {exc2}")
+                    # リウェイトで★が変わった譜面（ランク譜面キャッシュの★がスコアと違う）だけ、自分のスコアを取り直す。
+                    # 合計 PP がほとんど動かない小さいリウェイトは PP のずれの取り直しでは拾えないため
+                    try:
+                        _ss_sync_changed_ranked_scores(_sid, task.session, progress=task.on_page)
+                    except Exception as exc3:  # noqa: BLE001
+                        _rethrow_if_cancelled(exc3)
+                        print(f"ScoreSaber ★同期に失敗（続行）: {exc3}")
 
                 ss_scores_bg = _BackgroundFetch(_ss_scores_task)
             except Exception as exc:  # noqa: BLE001
@@ -1289,20 +1318,31 @@ def _create_snapshot_for_steam_id(
                     print("BeatLeaderプレイヤースコア: 初回取得")
                     _bl_score_label = "new"
                 _step(0.30, f"Fetching BeatLeader player scores (last fetch: {_bl_score_label}, page 1/?)...")
+                _bl_scores_status: dict = {"complete": True}
                 _get_beatleader_player_scores(
                     beatleader_id,
                     session,
                     progress=_bl_scores_progress,
                     fetch_until=_bl_effective_until,
                     warning_callback=_add_warning,
+                    status=_bl_scores_status,
                 )
+                # リウェイトで★・pp が変わった譜面だけ、自分のスコアを取り直す（accgraph 1 回＋曲の数）。
+                # 合計 PP がほとんど動かない小さいリウェイトは PP のずれの取り直しでは拾えないため。
+                # 新しくランクになった譜面の古いプレイもここで pp が付くので、下の全ページの取り直しが要らなくなる
+                try:
+                    _bl_sync_changed_ranked_scores(beatleader_id, session, progress=_bl_scores_progress)
+                except Exception as exc2:  # noqa: BLE001
+                    _rethrow_if_cancelled(exc2)
+                    print(f"BeatLeader ★/pp 同期に失敗（続行）: {exc2}")
                 # 新しくランクになった譜面に自分の古いプレイがあれば、その pp も取り直す（差分取得では拾えない）
                 try:
                     _bl_refresh_newly_ranked_scores(beatleader_id, session, progress=_bl_scores_progress)
                 except Exception as exc2:  # noqa: BLE001
                     _rethrow_if_cancelled(exc2)
                     print(f"BeatLeader 新ランク譜面のスコア取り直しに失敗（続行）: {exc2}")
-                if options.bl_fetch_all:
+                # 全件取得が最後まで取れたときだけ記録する（page 1 から取れなかった回などに「全件取得済み」としない）
+                if options.bl_fetch_all and _bl_scores_status.get("complete"):
                     _set_service_reconcile_state("beatleader", steam_id, full_scan_at=_dt_to_utc_z(datetime.utcnow()))
             except Exception as exc:  # noqa: BLE001
                 _rethrow_if_cancelled(exc)
@@ -1351,9 +1391,13 @@ def _create_snapshot_for_steam_id(
 
             print("5.1 ScoreSaber プレイヤースコア バックグラウンド取得の完了待ち...")
             ss_scores_bg.wait(_ss_scores_pump)
+            # 取得はバックグラウンドのスレッドなので、結果ダイアログに出す文はここ（呼び出し元のスレッド）で足す
+            for _ss_msg in _ss_scores_status.get("warnings") or []:
+                _add_warning(_ss_msg)
             if ss_scores_bg.exc is not None:
                 print(f"ScoreSaber プレイヤースコア取得エラー（続行）: {ss_scores_bg.exc}")
-            elif options.ss_fetch_all:
+            elif options.ss_fetch_all and _ss_scores_status.get("complete"):
+                # 全件取得が途中で止まった回（429・通信の失敗）は「全件取得済み」にしない
                 _set_service_reconcile_state("scoresaber", steam_id, full_scan_at=_dt_to_utc_z(datetime.utcnow()))
         except Exception as exc:  # noqa: BLE001
             _rethrow_if_cancelled(exc)

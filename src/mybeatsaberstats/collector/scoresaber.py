@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Optional, Callable
 
 import math
+import time
 import requests
 from ..scoresaber import ScoreSaberPlayer
 from ..snapshot import BASE_DIR, StarClearStat
@@ -16,10 +17,10 @@ from ..api_error_log import log_api_failure
 from ..fileio import atomic_write_text
 from ..ranked_sync import (
     flag_star_drift_if_any, load_newly_ranked_checked, full_traversal_due, mismatch_traversal_allowed,
-    record_full_traversal, save_newly_ranked_checked,
+    record_full_traversal, save_newly_ranked_checked, stars_differ, star_sync_not_found_mark, star_sync_skip,
 )
 from ..modifiers import classify_play
-from ..http_client import get_memoized
+from ..http_client import get_memoized, retry_backoff_seconds
 
 CACHE_DIR = BASE_DIR / "cache"
 
@@ -34,6 +35,22 @@ SCORESABER_PLAYER_FULL_URL = "https://scoresaber.com/api/player/{player_id}/full
 #: 1 ページ 100 件なので 1000 ページ = 10 万件相当。ranked 譜面（数千件）も
 #: 重量級プレイヤーのスコア数もこれを下回るため、到達するのは API 異常時だけ。
 _MAX_PAGES_GUARD = 1000
+
+#: スコアのページ取得で、5xx（500 / 502 / 504）・タイムアウト・接続の失敗のときに試す回数（BL と同じ 3 回）。
+#: 429 / 503 は PoliteSession が Retry-After に従って既にリトライしているので、ここでは重ねない。
+_PAGE_FETCH_ATTEMPTS = 3
+_RETRYABLE_STATUS = frozenset({500, 502, 504})
+
+
+def _until_str(value: datetime) -> str:
+    """fetch_until を API の timeSet と比べる UTC の文字列にする。
+
+    タイムゾーンの無い値は UTC として扱う（collector・画面から渡す値は UTC にそろえてある）。
+    タイムゾーン付きの値は UTC に直す（そのまま strftime するとその地域の時刻のまま "Z" が付く）。
+    """
+    if value.tzinfo is not None:
+        value = value.astimezone(timezone.utc)
+    return value.strftime("%Y-%m-%dT%H:%M:%S") + "Z"
 
 
 def _is_rate_limited(resp: requests.Response, api_name: str, detail: str) -> bool:
@@ -130,21 +147,33 @@ def _save_cached_ranked_maps(
 _RESUME_FROM_BEGINNING = "2000-01-01T00:00:00Z"
 
 
-def _save_cached_player_scores(path: Path, scores: dict, resume_stop_ts: Optional[str] = None) -> None:
+def _save_cached_player_scores(
+    path: Path, scores: dict, resume_stop_ts: Optional[str] = None, resume_ranges: Optional[list] = None,
+    fetched_at: Optional[str] = None,
+) -> None:
     """
-    ページリストをキャッシュファイル(JSON)として保存する。
+    スコアをキャッシュファイル(JSON)として保存する。
 
-    resume_stop_ts: 差分取得が途中で失敗したとき、次回はこの timeSet まで遡って取り直す。
+    fetched_at を渡すとその値を残す（1 ページも読めなかった回に、取りこぼしの印だけを書き足すとき用。
+    fetched_at は 60 日遡りの基準なので、何も読めていない回に進めない）。
+
+    resume_ranges: 途中で読めなかった timeSet の範囲（_load_resume_ranges の形）。次回はその範囲だけ取り直す。
+    resume_stop_ts: 古い形の印（次回はこの timeSet まで page 1 から遡る）。resume_ranges が無いときだけ書く。
+    resume_ranges を書くときも、古い版が読めるよう resume_stop_ts に一番古い範囲の下限を入れる。
     """
     print("Entering _save_cached_player_scores")
     # キーで降順ソート（leaderboard_id ベース）
     scores = dict(sorted(scores.items(), key=lambda item: str(item[0]), reverse=True))
     payload = {
-        "fetched_at": datetime.utcnow().isoformat() + "Z",
+        "fetched_at": fetched_at or (datetime.utcnow().isoformat() + "Z"),
         "total_play_count": len(scores),
         "scores": scores,
     }
-    if resume_stop_ts:
+    ranges = _merge_resume_ranges(resume_ranges) if resume_ranges else []
+    if ranges:
+        payload["resume_ranges"] = ranges
+        payload["resume_stop_ts"] = min(r["older_ts"] for r in ranges)
+    elif resume_stop_ts and resume_ranges is None:
         payload["resume_stop_ts"] = resume_stop_ts
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -436,7 +465,7 @@ def _get_scoresaber_leaderboards_ranked(
     # fetch_until が指定されている場合は ISO 文字列に変換して比較に使用する
     fetch_until_str: Optional[str] = None
     if fetch_until is not None:
-        fetch_until_str = fetch_until.strftime("%Y-%m-%dT%H:%M:%S") + "Z"
+        fetch_until_str = _until_str(fetch_until)
         print(f"ScoreSaber Ranked Maps fetch_until 指定: {fetch_until_str}")
         if fetch_until_str > "2001" and full_traversal_due(_RANKED_FULL_TRAVERSAL_STATE, "scoresaber"):
             # 窓の外で変わった★は日付の窓では拾えない。初回と★のずれを見つけたときだけ全件取り直す。
@@ -1007,6 +1036,134 @@ def add_leaderboards(leaderboards: dict, existing_lb_ids: dict, data_lbs: list):
 #     return scores
 
 
+def _ss_item_ts(item: object) -> Optional[str]:
+    """API の並び（sort=recent）の基準になる timeSet。"""
+    if not isinstance(item, dict):
+        return None
+    sc = item.get("score")
+    ts = sc.get("timeSet") if isinstance(sc, dict) else None
+    return ts if isinstance(ts, str) and ts else None
+
+
+def _ss_item_lb_id(item: object) -> Optional[str]:
+    if not isinstance(item, dict):
+        return None
+    lb = item.get("leaderboard")
+    lb_id_raw = lb.get("id") if isinstance(lb, dict) else None
+    if lb_id_raw is None:
+        # 旧形式（score_idキー）の場合もロードする
+        sc = item.get("score")
+        if isinstance(sc, dict):
+            lb_id_raw = sc.get("leaderboardId")
+    return None if lb_id_raw is None else str(lb_id_raw)
+
+
+def _normalize_resume_range(value: object) -> Optional[dict]:
+    if not isinstance(value, dict):
+        return None
+    older = value.get("older_ts")
+    newer = value.get("newer_ts")
+    if not isinstance(older, str) or not older:
+        return None
+    if newer is not None and (not isinstance(newer, str) or not newer):
+        newer = None
+    if newer is not None and newer <= older:
+        return None
+    return {"newer_ts": newer, "older_ts": older}
+
+
+# 範囲の比較で newer_ts=None（一覧の先頭）を表す値。timeSet の文字列（"20xx-..."）より必ず大きい。
+_TOP_TS = "~"
+
+
+def _merge_resume_ranges(ranges: list[dict]) -> list[dict]:
+    """重なる・接する範囲をまとめる（同じページを二度読みに行かないため）。新しい範囲から順に並べる。"""
+    items = sorted(
+        (r for r in (_normalize_resume_range(v) for v in ranges) if r is not None),
+        key=lambda r: r["older_ts"],
+    )
+    merged: list[dict] = []
+    for r in items:
+        newer = r["newer_ts"] or _TOP_TS
+        if merged and (merged[-1]["newer_ts"] or _TOP_TS) >= r["older_ts"]:
+            if newer > (merged[-1]["newer_ts"] or _TOP_TS):
+                merged[-1]["newer_ts"] = r["newer_ts"]
+            continue
+        merged.append(dict(r))
+    return sorted(merged, key=lambda r: r["newer_ts"] or _TOP_TS, reverse=True)
+
+
+def _load_resume_ranges(path: Path, scores: Optional[dict] = None) -> list[dict]:
+    """取りこぼした範囲（resume_ranges）を読む。
+
+    1 つの範囲は {"newer_ts": str|None, "older_ts": str}。timeSet が older_ts 以上で newer_ts より古いスコアが
+    まだ読めていない、という意味（newer_ts=None は一覧の先頭から）。
+    範囲を持たない古いキャッシュの resume_stop_ts は次のように直す。
+    - 初回取得の途中失敗の印（_RESUME_FROM_BEGINNING）：キャッシュには読めたところまでしか無いので、
+      キャッシュの一番古い timeSet から先を範囲にする（先頭から全部は読み直さない）。
+    - それ以外（差分取得の途中失敗）：止まった所が分からないので、一覧の先頭からその日時までを範囲にする。
+    """
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
+    except Exception:  # noqa: BLE001
+        return []
+    if not isinstance(raw, dict):
+        return []
+    ranges = raw.get("resume_ranges")
+    if isinstance(ranges, list):
+        return _merge_resume_ranges(ranges)
+    stop = raw.get("resume_stop_ts")
+    if not isinstance(stop, str) or not stop:
+        return []
+    if stop <= _RESUME_FROM_BEGINNING:
+        if scores is None:
+            scores = raw.get("scores") if isinstance(raw.get("scores"), dict) else {}
+        # ランク譜面の取り直し（sort=top）は pp の付いた古いスコアもキャッシュに入れるので、一番古い所は
+        # pp の付かないスコア（sort=recent の読みでしか入らない）で決める。無ければ page 1 から読む。
+        ts_list = [
+            t for t in (_ss_item_ts(v) for v in scores.values() if _ss_score_pp(v) <= 0) if t is not None
+        ]
+        if ts_list:
+            return _merge_resume_ranges([{"newer_ts": min(ts_list), "older_ts": stop}])
+    return [{"newer_ts": None, "older_ts": stop}]
+
+
+def _load_cached_fetched_at(path: Path) -> Optional[str]:
+    """スコアキャッシュの fetched_at（文字列のまま）。無ければ None。"""
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
+    except Exception:  # noqa: BLE001
+        return None
+    value = raw.get("fetched_at") if isinstance(raw, dict) else None
+    return value if isinstance(value, str) and value else None
+
+
+def _load_resume_fields(path: Path) -> dict:
+    """スコアキャッシュを保存し直すときに引き継ぐ、取りこぼしの印（resume_ranges / resume_stop_ts）。"""
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
+    except Exception:  # noqa: BLE001
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    if isinstance(raw.get("resume_ranges"), list):
+        return {"resume_ranges": raw["resume_ranges"]}
+    if isinstance(raw.get("resume_stop_ts"), str) and raw["resume_stop_ts"]:
+        return {"resume_stop_ts": raw["resume_stop_ts"]}
+    return {}
+
+
+def _compact_pages(pages: list[int]) -> str:
+    """[1, 2, 3, 57, 58] → "1-3, 57-58"（cp932 のコンソールにも出せるよう ASCII のハイフン）。"""
+    runs: list[list[int]] = []
+    for p in sorted(set(pages)):
+        if runs and p == runs[-1][1] + 1:
+            runs[-1][1] = p
+        else:
+            runs.append([p, p])
+    return ", ".join(f"{a}" if a == b else f"{a}-{b}" for a, b in runs)
+
+
 def _get_scoresaber_player_scores(
     scoresaber_id: str,
     session: requests.Session,
@@ -1014,248 +1171,361 @@ def _get_scoresaber_player_scores(
     fetch_until: Optional[datetime] = None,
     status: Optional[dict] = None,
 ) -> list[dict]:
-    """ScoreSaber のプレイヤースコアをキャッシュ付きで全件取得する。
+    """ScoreSaber のプレイヤースコアをキャッシュ付きで取得する。
 
-    progress が与えられた場合、現在のページ番号と推定最大ページ数を通知する。
+    `/api/player/{id}/scores?sort=recent` を 1 ページ 100 件で読む（プレイした日時 timeSet の新しい順。
+    新しいスコアや再プレイは先頭に入るので、古いスコアのページ番号は後ろにずれる）。
 
-    fetch_until が指定された場合、その日時まで遡ってスコアを取得する（ギャップ補完用）。
-    None の場合はキャッシュ最新 timeSet に達した時点で取得を打ち切る（通常動作）。
+    - fetch_until=None：差分取得。page 1 から、キャッシュの最新 timeSet より古いスコアに届くまで読む。
+    - fetch_until 指定：その日時より古いスコアに届くまで遡る（新ランク譜面の 60 日遡り・期間指定・Fetch ALL）。
+
+    途中で読めなかったら、読めなかった範囲（timeSet の範囲）を resume_ranges としてキャッシュに残し、
+    次の回は普段の差分取得のあとに、その範囲だけを取り直す（page 1 から全部は読み直さない）。
+    取り直すページは「いまのキャッシュで範囲より新しいスコアの件数」から見積もり、読んだページの先頭の
+    timeSet が範囲の始まりより新しいことを確かめる（古ければ前のページへ戻る）。
+    Fetch ALL が途中で止まったときは、読めなかった残りを次の回に自動で読み直さない（キャッシュに古い値が
+    あるので取りこぼしは無い。選び直してもらう）。ただし、まだ読んでいない新しいスコアの範囲は残す。
+    status があれば、complete（最後まで読めたか）・warnings（結果ダイアログに出す文）・pages_read を入れる。
     """
 
-    # cache_path = CACHE_DIR / f"scoresaber_player_scores_{scoresaber_id}.json"
     cache_path = CACHE_DIR / f"scoresaber_player_scores_{scoresaber_id}.json"
     # leaderboard_id をキーにしたDictionaryで管理（同一譜面の再プレイ時に最新スコアで上書きされるよう）
     scores_by_lb_id: dict[str, dict] = {}
 
     print(f"ScoreSaberのキャッシュ読み込み: {scoresaber_id}")
-    
-    cached_pages = None
-    cached_scores = None
-    resume_stop_ts: Optional[str] = None
-    if Path.exists(cache_path):
-        cached_scores = _load_cached_player_scores(cache_path)
-        try:
-            _raw_cache = json.loads(cache_path.read_text(encoding="utf-8"))
-            _resume = _raw_cache.get("resume_stop_ts") if isinstance(_raw_cache, dict) else None
-            resume_stop_ts = _resume if isinstance(_resume, str) and _resume else None
-        except Exception:  # noqa: BLE001
-            resume_stop_ts = None
-
-    # 途中で失敗したかどうか。失敗したら resume_stop_ts を残して、次回そこまで遡る。
-    run_complete = True
-
-    def _mark_incomplete() -> None:
-        nonlocal run_complete
-        run_complete = False
-        if status is not None:
-            status["complete"] = False
-
-    # キャッシュから最新のtimeSetを取得（差分取得用）
+    cached_scores = _load_cached_player_scores(cache_path) if cache_path.exists() else None
     latest_cached_timeset: Optional[str] = None
-    
     if cached_scores is not None:
         print(f"ScoreSaberのキャッシュ読み込み成功: {scoresaber_id} スコア件数: {len(cached_scores)}")
         for it in cached_scores.values():
-            lb = it.get("leaderboard") if isinstance(it, dict) else None
-            if isinstance(lb, dict):
-                lb_id_raw = lb.get("id")
-            else:
-                lb_id_raw = None
-            if lb_id_raw is None:
-                # 旧形式（score_idキー）の場合もロードする
-                scoreDict = it.get("score")
-                if isinstance(scoreDict, dict):
-                    lb_id_raw = scoreDict.get("leaderboardId")
-            if lb_id_raw is None:
+            lb_id = _ss_item_lb_id(it)
+            if lb_id is None:
                 continue
-            lb_id = str(lb_id_raw)
             scores_by_lb_id[lb_id] = it
-
-            scoreDict = it.get("score")
-            if not isinstance(scoreDict, dict):
-                continue
-            # 最新のtimeSetを記録
-            timeset = scoreDict.get("timeSet")
-            if timeset and (latest_cached_timeset is None or timeset > latest_cached_timeset):
-                latest_cached_timeset = timeset
-
+            ts = _ss_item_ts(it)
+            if ts and (latest_cached_timeset is None or ts > latest_cached_timeset):
+                latest_cached_timeset = ts
+    pending_ranges = _load_resume_ranges(cache_path, cached_scores) if cached_scores is not None else []
     print(f"ScoreSaberのキャッシュ読み込み完了: {scoresaber_id} 件数: {len(scores_by_lb_id)} 最新timeSet: {latest_cached_timeset}")
+    if pending_ranges:
+        print(f"ScoreSaberスコア取得: 前回の取りこぼし {pending_ranges}")
 
-    # 有効な停止基準を決定する
-    # fetch_until が指定されている場合はその日時を優先し、キャッシュの timeSet を無視して遡る
+    warnings: list[str] = []
+
+    def _warn(message: str) -> None:
+        print(message)
+        if message not in warnings:
+            warnings.append(message)
+
+    def _mark_incomplete() -> None:
+        if status is not None:
+            status["complete"] = False
+
     fetch_until_str: Optional[str] = None
     if fetch_until is not None:
-        fetch_until_str = fetch_until.strftime("%Y-%m-%dT%H:%M:%S") + "Z"
+        fetch_until_str = _until_str(fetch_until)
         print(f"ScoreSaber fetch_until 指定: {fetch_until_str}")
+    # Fetch ALL（利用者が選んだ全件取得）
+    full_fetch = fetch_until_str is not None and fetch_until_str <= "2001"
 
-    effective_stop_ts: Optional[str] = fetch_until_str if fetch_until_str is not None else latest_cached_timeset
-    # 前回の差分取得が途中で失敗していたら、そのとき目指していた所まで遡る。
-    # キャッシュの最新 timeSet だけを基準にすると、途中のページの抜けが二度と埋まらない。
-    if resume_stop_ts and (effective_stop_ts is None or resume_stop_ts < effective_stop_ts):
-        print(f"ScoreSaber: 前回の取得が途中で失敗したため {resume_stop_ts} まで遡ります")
-        effective_stop_ts = resume_stop_ts
-
-    append_pages: list[dict] = []
-    limit_param = 100
-    latest_total = 0
-    reached_cached_in_first_page = False  # 最初のページで既に停止基準に到達したか
-    
-    try:
-        url = SCORESABER_PLAYER_SCORES_URL.format(player_id=scoresaber_id)
-        params_check = {"limit": str(limit_param), "sort": "recent", "page": "1"}
-        resp = session.get(url, params=params_check, timeout=10)
-        print(f"最新スコアチェック... URL: {resp.url} params: {params_check}")
-        if resp.status_code != 404:
-            resp.raise_for_status()
-            data = resp.json()
-            items = data.get("playerScores") 
-            # metadataからtotalを取得
-            metadata = data.get("metadata") 
-            latest_total = metadata.get("total")
-            print(f"最新スコアの総譜面数: {latest_total} for {scoresaber_id}")
-            append_pages.append({"page": 1, "params": params_check, "data": data})
-
-            for item in items:
-                scoreDict = item.get("score")
-                if not isinstance(scoreDict, dict):
-                    continue
-                
-                # 停止基準（fetch_until またはキャッシュ最新timeSet）に到達したかチェック
-                timeset = scoreDict.get("timeSet")
-                if effective_stop_ts and timeset and timeset < effective_stop_ts:
-                    print(f"ScoreSaberの最初のページで停止基準 {effective_stop_ts} に到達しました。")
-                    reached_cached_in_first_page = True
-                    break
-                
-                lb = item.get("leaderboard") or {}
-                lb_id_raw = lb.get("id") if isinstance(lb, dict) else None
-                if lb_id_raw is None:
-                    continue
-                lb_id = str(lb_id_raw)
-                # APIからの最新データで上書き（再プレイ時に古いスコアを更新する）
-                scores_by_lb_id[lb_id] = item
-    except Exception as exc:  # noqa: BLE001
-        log_api_failure(
-            "scoresaber",
-            "_get_scoresaber_player_scores",
-            f"freshness check failed scoresaber_id={scoresaber_id}",
-            exc,
+    # 1 回目の読み（page 1 から）の止め所。None は一覧の終わりまで（初回取得）。
+    # 遡り取得（期間指定・60 日遡り）でも、キャッシュの最新 timeSet より新しいスコアは全部読む必要があるので、
+    # 止め所は「指定した日時」と「キャッシュの最新 timeSet」の早い方にする（指定がキャッシュの最新より新しいと、
+    # その間のスコアを読まないまま次の差分取得もそこで止まり、取りこぼしたままになる）。
+    main_stop: Optional[str] = fetch_until_str if fetch_until_str is not None else latest_cached_timeset
+    if main_stop is not None and latest_cached_timeset is not None and latest_cached_timeset < main_stop:
+        print(
+            f"ScoreSaber: 指定の日時 {main_stop} がキャッシュの最新 timeSet {latest_cached_timeset} より新しいため、"
+            "そこまで遡ります"
         )
-        _mark_incomplete()
-        # If anything goes wrong during the freshness check, fall back to cached data
-        pass
+        main_stop = latest_cached_timeset
+    # 途中で止まったときに「読めていない」と残す下限。Fetch ALL はキャッシュに古い値があるので、
+    # 取りこぼし（キャッシュに無いスコア）が出るのはキャッシュの最新 timeSet より新しい所だけ。
+    required_stop: Optional[str] = latest_cached_timeset if full_fetch and latest_cached_timeset else main_stop
+    for r in pending_ranges:
+        if r["newer_ts"] is None and main_stop is not None and r["older_ts"] < main_stop:
+            # 一覧の先頭からの範囲（止まった所が分からない古い印・page 1 から読めなかった遡り取得）は、
+            # 1 回目の読みをそこまで延ばして埋める
+            print(f"ScoreSaber: 前回の取得が途中で失敗したため {r['older_ts']} まで遡ります")
+            main_stop = r["older_ts"]
+            if required_stop is None or r["older_ts"] < required_stop:
+                required_stop = r["older_ts"]
+    # 1 回目の読みで届かない範囲だけ、あとで取り直す
+    gap_ranges = [r for r in pending_ranges if main_stop is not None and r["older_ts"] < main_stop]
+    if gap_ranges:
+        print(f"ScoreSaber: 前回の取りこぼし {len(gap_ranges)} 件は、差分取得のあとにその範囲だけ取り直します")
 
-    if progress is not None:
-        # キャッシュ読み込み時は 1 ページのみとして通知
-        progress(1, 1)
-    
-    # 最初のページでキャッシュに到達していれば、それ以降の取得はスキップ
-    if reached_cached_in_first_page:
-        print(f"ScoreSaberの差分取得完了: 最初のページでキャッシュに到達しました。{scoresaber_id}")
-        if scores_by_lb_id:
+    limit_param = 100
+    url = SCORESABER_PLAYER_SCORES_URL.format(player_id=scoresaber_id)
+    page_items: dict[int, list] = {}
+    requested_pages: list[int] = []
+    page_meta: dict[str, Optional[int]] = {"max_pages": None, "total": None}
+    last_error: dict[str, str] = {"text": ""}
+
+    def _load_page(page_no: int) -> tuple[Optional[list], bool]:
+        """ページを読んでキャッシュに足す。(items, not_found)。読めなければ items=None。"""
+        if page_no in page_items:
+            return page_items[page_no], False
+        requested_pages.append(page_no)
+        params = {"limit": str(limit_param), "sort": "recent", "page": str(page_no)}
+        print(f"ScoreSaberのキャッシュ取得API呼び出し: {scoresaber_id} ページ: {page_no}")
+        last_error["text"] = ""
+        data = None
+        for attempt in range(1, _PAGE_FETCH_ATTEMPTS + 1):
+            retry = False
             try:
-                _save_cached_player_scores(
-                    cache_path, scores_by_lb_id,
-                    resume_stop_ts=None if run_complete else (effective_stop_ts or _RESUME_FROM_BEGINNING),
+                resp = session.get(url, params=params, timeout=10)
+                print(f"Fetching ScoreSaber player scores page {page_no}... URL: {resp.url} params: {params}")
+                if resp.status_code == 404:
+                    return None, True
+                if _is_rate_limited(resp, "_get_scoresaber_player_scores", f"player={scoresaber_id} page={page_no}"):
+                    last_error["text"] = "HTTP 429"
+                    return None, False
+                retry = resp.status_code in _RETRYABLE_STATUS
+                resp.raise_for_status()
+                data = resp.json()
+            except Exception as exc:  # noqa: BLE001
+                text = str(exc).splitlines()[0] if str(exc) else ""
+                last_error["text"] = (text or type(exc).__name__)[:160]
+                retry = retry or isinstance(exc, (requests.Timeout, requests.ConnectionError))
+                log_api_failure(
+                    "scoresaber",
+                    "_get_scoresaber_player_scores",
+                    f"paged fetch failed url={url} scoresaber_id={scoresaber_id} params={params} "
+                    f"attempt={attempt}/{_PAGE_FETCH_ATTEMPTS}",
+                    exc,
                 )
-            except Exception:  # noqa: BLE001
-                pass
-        return list(scores_by_lb_id.values())
-    
-    page = 2  # ページ1は事前チェック済みのためページ2から開始
-    max_pages_sc: int | None = None
-    reached_cached_timeset = False  # キャッシュ済みtimeSetに到達したかのフラグ
-
-    while True:
-        url = SCORESABER_PLAYER_SCORES_URL.format(player_id=scoresaber_id)
-        params = {
-            "limit": str(limit_param),
-            "sort": "recent",
-            "page": str(page),
-        }
-        print(f"ScoreSaberのキャッシュ取得API呼び出し: {scoresaber_id} ページ: {page}")
-        try:
-            resp = session.get(url, params=params, timeout=10)
-            print(f"Fetching ScoreSaber player scores page {page} for star stats... URL: {resp.url} params: {params}")
-            if resp.status_code == 404:
-                break
-            if _is_rate_limited(resp, "_get_scoresaber_player_scores", f"player={scoresaber_id} page={page}"):
-                _mark_incomplete()
-                break
-            resp.raise_for_status()
-        except Exception as exc:  # noqa: BLE001
-            log_api_failure(
-                "scoresaber",
-                "_get_scoresaber_player_scores",
-                f"paged fetch failed url={url} scoresaber_id={scoresaber_id} params={params}",
-                exc,
-            )
-            _mark_incomplete()
-            break
-
-        try:
-            data = resp.json()
-        except Exception as exc:  # noqa: BLE001
-            log_api_failure(
-                "scoresaber",
-                "_get_scoresaber_player_scores",
-                f"invalid json url={resp.url} scoresaber_id={scoresaber_id} params={params}",
-                exc,
-            )
-            _mark_incomplete()
-            break
-
-        append_pages.append({"page": page, "params": params, "data": data})
-
-        items = data.get("playerScores")
-        if isinstance(items, list):
-            for it in items:
-                scoreDict = it.get("score")
-                if not isinstance(scoreDict, dict):
+                if retry and attempt < _PAGE_FETCH_ATTEMPTS:
+                    time.sleep(retry_backoff_seconds(attempt))
                     continue
-                
-                # 停止基準（fetch_until またはキャッシュ最新timeSet）に到達したら差分取得完了
-                timeset = scoreDict.get("timeSet")
-                if effective_stop_ts and timeset and timeset < effective_stop_ts:
-                    print(f"ScoreSaberの差分取得完了: 停止基準 {effective_stop_ts} に到達しました。ページ: {page}")
-                    reached_cached_timeset = True
-                    break
-                
-                lb = it.get("leaderboard") or {}
-                lb_id_raw = lb.get("id") if isinstance(lb, dict) else None
-                if lb_id_raw is None:
-                    continue
-                lb_id = str(lb_id_raw)
+                return None, False
+            break
+        items = data.get("playerScores") if isinstance(data, dict) else None
+        if not isinstance(items, list):
+            last_error["text"] = "invalid response"
+            return None, False
+        if page_meta["max_pages"] is None:
+            meta = data.get("metadata") or {}
+            try:
+                total = int(meta.get("total", 0))
+                per_page = int(meta.get("itemsPerPage", limit_param)) or limit_param
+            except (TypeError, ValueError):
+                total, per_page = 0, limit_param
+            if total > 0:
+                page_meta["total"] = total
+                page_meta["max_pages"] = math.ceil(total / per_page)
+        for it in items:
+            lb_id = _ss_item_lb_id(it)
+            if lb_id is not None:
                 # APIからの最新データで上書き（再プレイ時に古いスコアを更新する）
                 scores_by_lb_id[lb_id] = it
-        
-        print(f"ScoreSaberのキャッシュ取得中: {scoresaber_id} ページ: {page} 最新譜面数: {latest_total}  取得件数: {len(items)} 総件数: {len(scores_by_lb_id)}")
-
-        # ページ進捗をコールバックで通知
+        page_items[page_no] = items
         if progress is not None:
-            progress(page, max_pages_sc)
-        
-        # キャッシュ済みtimeSetに到達したら終了
-        if reached_cached_timeset:
-            print("ScoreSaberのキャッシュ取得完了条件に達しました。キャッシュ済みスコアに到達しました。" f"ページ: {page} 総件数: {len(scores_by_lb_id)}")
-            break
+            progress(page_no, page_meta["max_pages"])
+        return items, False
 
-        if len(items) < limit_param or (max_pages_sc is not None and page >= max_pages_sc):
-            print("ScoreSaberのキャッシュ取得完了条件に達しました。" f"ページ: {page} アイテム数: {len(items)}")
-            break
+    def _first_ts(items: list) -> Optional[str]:
+        for it in items:
+            ts = _ss_item_ts(it)
+            if ts is not None:
+                return ts
+        return None
 
-        if page >= _MAX_PAGES_GUARD:
-            print(f"ScoreSaberのスコア取得: ページ数上限 {_MAX_PAGES_GUARD} に達したため打ち切ります")
-            break
+    def _last_ts(items: list) -> Optional[str]:
+        return _first_ts(list(reversed(items)))
 
-        page += 1
+    def _is_last_page(page_no: int, items: list) -> bool:
+        max_pages = page_meta["max_pages"]
+        return len(items) < limit_param or (max_pages is not None and page_no >= max_pages)
+
+    def _ends_range(page_no: int, items: list, stop_ts: Optional[str]) -> bool:
+        """このページで stop_ts より古いスコアに届いたか、一覧が終わったか。"""
+        if not items or _is_last_page(page_no, items):
+            return True
+        lt = _last_ts(items)
+        return stop_ts is not None and lt is not None and lt < stop_ts
+
+    def _read_forward(start: int, stop_ts: Optional[str]) -> tuple[bool, int, Optional[str]]:
+        """start ページから、stop_ts より古いスコアに届くか一覧の終わりまで読む。
+
+        (最後まで読めたか, 最後に読めたページ, 読めた中で一番古い timeSet)。
+        """
+        p = start
+        last_ok = start - 1
+        oldest: Optional[str] = None
+        while True:
+            items, not_found = _load_page(p)
+            if items is None:
+                # 404 は一覧の終わり
+                return not_found, last_ok, oldest
+            last_ok = p
+            lt = _last_ts(items)
+            if lt is not None:
+                oldest = lt
+            if _ends_range(p, items, stop_ts):
+                return True, p, oldest
+            if p >= _MAX_PAGES_GUARD:
+                print(f"ScoreSaberのスコア取得: ページ数上限 {_MAX_PAGES_GUARD} に達したため打ち切ります")
+                return False, p, oldest
+            p += 1
+
+    def _contiguous_end() -> int:
+        """page 1 から続けて読めた最後のページ（読めていなければ 0）。"""
+        p = 0
+        while (p + 1) in page_items:
+            p += 1
+        return p
+
+    def _recover_range(r: dict) -> tuple[bool, Optional[dict]]:
+        """取りこぼした範囲を取り直す。(埋められたか, 残す範囲)。"""
+        newer = r["newer_ts"]
+        older = r["older_ts"]
+        head_end = _contiguous_end()
+        head_items = page_items.get(head_end) if head_end else None
+        head_last = _last_ts(head_items) if head_items else None
+        if head_items is not None and (not head_items or _is_last_page(head_end, head_items)):
+            # page 1 から一覧の終わりまで読めている
+            return True, None
+        if head_last is not None and head_last <= newer:
+            # page 1 からの読みが範囲の始まりより古い所まで届いている。続きから読む
+            if head_last < older:
+                return True, None
+            p = head_end + 1
+        else:
+            above = sum(1 for v in scores_by_lb_id.values() if (_ss_item_ts(v) or "") > newer)
+            p = above // limit_param + 1
+            if page_meta["max_pages"]:
+                p = min(p, int(page_meta["max_pages"]))
+            p = max(p, head_end + 1)
+            print(f"ScoreSaberスコア取得: 取りこぼし {r} を page {p} から取り直します")
+            back_fetches = 0
+            while True:
+                already = p in page_items
+                items, not_found = _load_page(p)
+                if items is None:
+                    if not_found and p > head_end + 1 and back_fetches < 5:
+                        # 見積もりが一覧の終わりを越えた。前のページへ戻る
+                        back_fetches += 1
+                        p -= 1
+                        continue
+                    return False, r
+                first = _first_ts(items)
+                if p > head_end + 1 and (first is None or first < newer):
+                    # このページは範囲の始まりより古い所から始まっている（キャッシュに API に無い古いスコアが
+                    # 残っていると見積もりが後ろにずれる）。間にあるキャッシュの件数の分だけ戻る。
+                    if not already:
+                        back_fetches += 1
+                    if back_fetches > 5:
+                        print(f"ScoreSaberスコア取得: 範囲の始まり（timeSet {newer}）を含むページが見つかりません")
+                        return False, r
+                    if first is None:
+                        step = 1
+                    else:
+                        between = sum(1 for v in scores_by_lb_id.values() if first <= (_ss_item_ts(v) or "") <= newer)
+                        step = max(1, between // limit_param)
+                    p = max(head_end + 1, p - step)
+                    continue
+                break
+            if _ends_range(p, items, older):
+                return True, None
+            p += 1
+        ok, _last_ok, oldest = _read_forward(p, older)
+        if ok:
+            return True, None
+        # 読めたところまで範囲を狭めて残す
+        if oldest is not None and older < oldest < newer:
+            return False, {"newer_ts": oldest, "older_ts": older}
+        return False, r
+
+    # 1) page 1 から差分（または遡り取得の境界・初回は一覧の終わり）まで読む
+    print(f"ScoreSaberスコア取得: page 1 から {main_stop or '一覧の終わり'} まで読みます")
+    main_ok, main_last, main_oldest = _read_forward(1, main_stop)
+    kept: list[dict] = []
+    filled = 0
+    if not main_ok:
+        _mark_incomplete()
+        cause = last_error["text"] or "unknown error"
+        # 前回の範囲のうち、今回読めた所（先頭から main_oldest まで）より古い部分は残す
+        for r in pending_ranges:
+            if main_last >= 1 and main_oldest is not None:
+                if r["older_ts"] >= main_oldest:
+                    continue  # 今回読めた所に収まった
+                if (r["newer_ts"] or _TOP_TS) > main_oldest:
+                    r = {"newer_ts": main_oldest, "older_ts": r["older_ts"]}
+            kept.append(r)
+        # 今回読めなかった範囲：読めた一番古い所（page 1 から読めなければ先頭）から required_stop まで
+        stop_ts = required_stop if required_stop is not None else _RESUME_FROM_BEGINNING
+        if main_last >= 1 and main_oldest is not None:
+            if main_oldest > stop_ts:
+                kept.append({"newer_ts": main_oldest, "older_ts": stop_ts})
+        else:
+            # page 1 から読めなかった。次の回に page 1 から stop_ts まで読む。普段の差分取得でも残す：
+            # 同じ Snapshot の PP の取り直し（sort=top）が最近のランク譜面のプレイをキャッシュに入れると、
+            # 次の回のキャッシュの最新 timeSet が進み、その間のランク外のスコアを読まなくなるため。
+            kept.append({"newer_ts": None, "older_ts": stop_ts})
+        kept = _merge_resume_ranges(kept)
+        if full_fetch and latest_cached_timeset is not None:
+            next_step = "Fetch ALL stopped; select it again to refetch the remaining pages."
+        elif kept:
+            next_step = "the next snapshot will refetch only the unfetched range."
+        else:
+            next_step = "the next snapshot will fetch new scores as usual."
+        _warn(
+            f"ScoreSaber player scores: page {main_last + 1} could not be fetched ({cause}); "
+            f"using existing cache for this snapshot; {next_step}"
+        )
+    else:
+        # 1 回目の読みで届いた範囲は埋まった
+        # （Fetch ALL は全部読んでいるので、取り直しの知らせは出さない）
+        # 普段の差分取得と同じ範囲（page 1 から読めなかった回の印）は、埋めても知らせない
+        filled = 0 if full_fetch else sum(
+            1 for r in pending_ranges if r not in gap_ranges
+            and not (r["newer_ts"] is None and latest_cached_timeset is not None
+                     and r["older_ts"] >= latest_cached_timeset)
+        )
+        # 2) 前回の取りこぼしだけを取り直す（新しい範囲から）
+        failed = False
+        for r in gap_ranges:
+            if failed:
+                # 障害中とみて打ち切る。残りは次に回す。
+                kept.append(r)
+                continue
+            ok, rest = _recover_range(r)
+            if ok:
+                filled += 1
+                continue
+            failed = True
+            _mark_incomplete()
+            if rest is not None:
+                kept.append(rest)
+            _warn(
+                "ScoreSaber player scores: the unfetched range from the previous snapshot could not be fetched "
+                f"({last_error['text'] or 'unknown error'}); the next snapshot will refetch only that range."
+            )
+        kept = _merge_resume_ranges(kept)
+
+    ok_pages = sorted(p for p in set(requested_pages) if p in page_items)
+    if requested_pages:
+        print(f"ScoreSaberスコア取得: 読んだページ {_compact_pages(ok_pages) or 'なし'} / {page_meta['max_pages'] or '?'}")
+    if filled:
+        _warn(
+            f"ScoreSaberスコア取得: 前回の取りこぼしを取り直しました（読んだページ {len(ok_pages)}/"
+            f"{page_meta['max_pages'] or '?'}: {_compact_pages(ok_pages) or 'なし'}。"
+            f"キャッシュ {len(scores_by_lb_id)} 件 / API {page_meta['total'] if page_meta['total'] is not None else '?'} 件）。"
+        )
+    if status is not None:
+        status.setdefault("warnings", [])
+        for w in warnings:
+            if w not in status["warnings"]:
+                status["warnings"].append(w)
+        status["pages_read"] = ok_pages
+        status["max_pages"] = page_meta["max_pages"]
 
     if scores_by_lb_id:
+        # 1 ページも読めなかった回は、取りこぼしの印だけ書き足し、fetched_at は前の値のままにする
+        keep_fetched_at = _load_cached_fetched_at(cache_path) if not ok_pages else None
         try:
-            _save_cached_player_scores(
-                cache_path, scores_by_lb_id,
-                resume_stop_ts=None if run_complete else (effective_stop_ts or _RESUME_FROM_BEGINNING),
-            )
+            _save_cached_player_scores(cache_path, scores_by_lb_id, resume_ranges=kept, fetched_at=keep_fetched_at)
         except Exception:  # noqa: BLE001
             pass
     print(f"ScoreSaberのキャッシュ返却: {scoresaber_id} 件数: {len(scores_by_lb_id)}")
@@ -1454,6 +1724,8 @@ def refresh_scoresaber_ranked_scores(
     if status is not None:
         # 一覧の終わりまで読めたか（404・空ページ・ページ上限で抜けたときは False）。新ランク譜面の検知済みの印に使う
         status["ranked_scores_read_to_end"] = bool(complete and natural_end)
+        # 今回 API から読めたスコアの leaderboard id（★同期で、キャッシュに元からあるスコアと区別するため）
+        status["refreshed_ids"] = sorted(fetched)
     if not fetched:
         return 0
     scores = _load_cached_player_scores(cache_path) or {}
@@ -1472,15 +1744,11 @@ def refresh_scoresaber_ranked_scores(
             )
         else:
             _prune_missing_ranked_scores(scores, fetched, seen_ranked_ids)
-    # 差分取得の途中失敗の印（resume_stop_ts）は残す
-    resume_stop_ts: Optional[str] = None
-    try:
-        _raw = json.loads(cache_path.read_text(encoding="utf-8")) if cache_path.exists() else None
-        if isinstance(_raw, dict) and isinstance(_raw.get("resume_stop_ts"), str):
-            resume_stop_ts = _raw["resume_stop_ts"]
-    except Exception:  # noqa: BLE001
-        resume_stop_ts = None
-    _save_cached_player_scores(cache_path, scores, resume_stop_ts=resume_stop_ts)
+    # 差分取得の途中失敗の印（resume_ranges / resume_stop_ts）は残す。fetched_at（60 日遡りの基準）も変えない
+    # （ランク譜面のスコアしか読んでいないので、差分取得を済ませたことにはならない）
+    _save_cached_player_scores(
+        cache_path, scores, fetched_at=_load_cached_fetched_at(cache_path), **_load_resume_fields(cache_path),
+    )
     return len(fetched)
 
 
@@ -1564,16 +1832,218 @@ def refresh_scores_of_newly_ranked_maps(
     return len(stale)
 
 
-def _resave_player_scores(cache_path: Path, scores: dict) -> None:
-    """スコアキャッシュを保存し直す（差分取得の途中失敗の印 resume_stop_ts は残す）。"""
-    resume_stop_ts: Optional[str] = None
+#: 取り直しても★の食い違いが残った譜面の印（同じ食い違いで毎回取り直さないため）。BL と同じファイル。
+_STAR_SYNC_CHECKED = CACHE_DIR / "star_sync_checked.json"
+#: ScoreSaber の search は 32 文字まで（2026-11-25、33 文字以上で 400 "Too big: expected string to have <=32 characters"）。
+_SS_SEARCH_MAX_LEN = 32
+#: 1 曲の検索で読むページの上限（曲名が短く、他の曲も多く当たるとき）。
+_SS_SEARCH_MAX_PAGES = 3
+
+
+def _ss_star_sync_targets(scores: dict, ranked: dict[str, dict]) -> dict[str, tuple[str, str]]:
+    """スコアキャッシュの★とランク譜面キャッシュの★が違うランクのスコアを返す（API は使わない）。
+
+    戻り値は {leaderboard id: (検索に使う曲名, 食い違いの印)}。ランク譜面キャッシュの★は、wiki の月例リウェイト
+    （ss_reweights）・60 日の窓の差分取得・全件取り直しで新しくなる。スコアキャッシュの★と pp はプレイし直すか
+    PP のずれの取り直しまで古いままなので、★が違うスコアは pp も古いとみなす。
+    """
+    targets: dict[str, tuple[str, str]] = {}
+    for k, item in scores.items():
+        if k not in ranked or not isinstance(item, dict) or not ranked[k].get("ranked", True):
+            continue
+        lb = item.get("leaderboard") or {}
+        if not lb.get("ranked"):
+            continue  # ランクになる前のスコアは refresh_scores_of_newly_ranked_maps が扱う
+        if stars_differ(lb.get("stars"), ranked[k].get("stars")):
+            name = str(lb.get("songName") or "")[:_SS_SEARCH_MAX_LEN].strip()
+            targets[k] = (name, f"stars {lb.get('stars')}->{ranked[k].get('stars')}")
+    return targets
+
+
+def sync_changed_ranked_scores(
+    scoresaber_id: str,
+    session: requests.Session,
+    progress: Optional[Callable[[int, Optional[int]], None]] = None,
+    status: Optional[dict] = None,
+) -> dict:
+    """ランク譜面キャッシュの★が変わった譜面だけ、自分のスコア（pp・★）を取り直す。
+
+    PP のずれの取り直し（collector の reconcile）は合計 PP が 0.1 以上ずれたときしか動かないので、重みの小さい
+    古いスコアのリウェイトは拾えない。ここではキャッシュ同士の比較（API なし）で★が食い違うスコアを見つけ、
+    曲名で /player/{id}/scores?search=<曲名>&sort=top を引いて取り直す（曲の数だけのリクエスト）。
+    曲の数がランクのスコアのページ数（約 57）を超えるときは、refresh_scoresaber_ranked_scores（全ページ）を使う。
+    取り直したスコアの★がランク譜面キャッシュと違えば（ランク譜面キャッシュが古い）、その譜面の★・maxPP を書き換える。
+    取り直しても食い違いが残った譜面は star_sync_checked.json に印を残し、同じ食い違いでは取り直さない。
+    検索しても目当ての譜面が返らなかったときは確認済みにせず、待ち時間（ranked_sync.star_sync_skip）の後に探し直す。
+    戻り値は結果のまとめ（ログ・テスト用）。
+    """
+    summary: dict = {"targets": 0, "songs": 0, "requests": 0, "mode": "none", "scores_updated": 0, "maps_updated": 0}
+    cache_path = CACHE_DIR / f"scoresaber_player_scores_{scoresaber_id}.json"
+    ranked_path = CACHE_DIR / "scoresaber_ranked_maps.json"
+    scores = _load_cached_player_scores(cache_path)
+    ranked = _load_cached_rank_maps(ranked_path)
+    if not scores or not ranked:
+        summary["mode"] = "no_cache"
+        return summary
+    checked = load_newly_ranked_checked(_STAR_SYNC_CHECKED, "scoresaber", scoresaber_id)
+    found = _ss_star_sync_targets(scores, ranked)
+    targets = {k: v for k, v in found.items() if not star_sync_skip(checked.get(k), v[1])}
+    summary["targets"] = len(targets)
+    if not targets:
+        print("ScoreSaber ★同期: スコアとランク譜面の★は一致（取り直しなし）")
+        if set(checked) - set(found):
+            save_newly_ranked_checked(
+                _STAR_SYNC_CHECKED, "scoresaber", scoresaber_id, {k: v for k, v in checked.items() if k in found},
+            )
+        return summary
+    for k, (_, why) in list(targets.items())[:10]:
+        print(f"ScoreSaber ★同期: {k} {why}")
+    names = sorted({n for n, _ in targets.values() if n})
+    summary["songs"] = len(names)
+    ranked_count = sum(
+        1 for item in scores.values()
+        if isinstance(item, dict) and (item.get("leaderboard") or {}).get("ranked") and _ss_score_pp(item) > 0
+    )
+    bulk_pages = max(1, math.ceil(ranked_count / 100))
+    refreshed: dict[str, dict] = {}
+    # 検索（取り直し）を最後まで終えた対象。ここに入っていて refreshed に無い対象は「探しても返らなかった」
+    searched: set[str] = set()
+    complete = True
+    if len(names) > bulk_pages:
+        print(
+            f"ScoreSaber ★同期: 食い違い {len(targets)} 譜面（{len(names)} 曲）が多いため、"
+            f"ランク譜面のスコアを全部取り直します（約 {bulk_pages} ページ）"
+        )
+        summary["mode"] = "bulk"
+        local_status: dict = {}
+        refresh_scoresaber_ranked_scores(
+            scoresaber_id, session, progress=progress, status=local_status, prune_missing=False,
+        )
+        summary["requests"] += bulk_pages
+        complete = local_status.get("complete") is not False
+        scores = _load_cached_player_scores(cache_path) or {}
+        # 今回 API から読めたスコアだけ（途中で止まったとき、キャッシュに元からある古いスコアを「取り直した」としない）
+        read_ids = {str(x) for x in local_status.get("refreshed_ids") or []}
+        refreshed = {k: scores[k] for k in targets if k in scores and k in read_ids}
+        if complete:
+            # 一覧の終わりまで読めなかった回（総数に届く前の空ページ・ページ上限）も「探した」に入れる。
+            # 返らなかった対象には「見つからなかった」の印（待ち時間の後にもう一度探す）を付け、
+            # 毎回の Snapshot で全部の取り直しを繰り返さない
+            searched = set(targets)
+    else:
+        print(f"ScoreSaber ★同期: 食い違い {len(targets)} 譜面（{len(names)} 曲）。曲ごとに取り直します")
+        summary["mode"] = "per_song"
+        url = SCORESABER_PLAYER_SCORES_URL.format(player_id=scoresaber_id)
+        rate_limited = False
+        for i, name in enumerate(names, start=1):
+            if rate_limited:
+                break  # 429 を受けたら残りの曲は次回に回す（印は付けない）
+            if progress is not None:
+                progress(i, len(names))
+            wanted = {k for k, (n, _) in targets.items() if n == name}
+            song_ok = True
+            for page in range(1, _SS_SEARCH_MAX_PAGES + 1):
+                params = {"search": name, "sort": "top", "limit": "100", "page": str(page)}
+                try:
+                    resp = session.get(url, params=params, timeout=15)
+                    summary["requests"] += 1
+                    if resp.status_code == 404:
+                        break
+                    if _is_rate_limited(resp, "sync_changed_ranked_scores", f"player={scoresaber_id} search={name}"):
+                        complete = False
+                        rate_limited = True
+                        song_ok = False
+                        break
+                    resp.raise_for_status()
+                    data = resp.json()
+                except Exception as exc:  # noqa: BLE001
+                    if isinstance(exc, RuntimeError) and str(exc) == "SNAPSHOT_CANCELLED":
+                        raise
+                    log_api_failure(
+                        "scoresaber", "sync_changed_ranked_scores",
+                        f"request failed url={url} scoresaber_id={scoresaber_id} params={params}", exc,
+                    )
+                    complete = False
+                    song_ok = False
+                    break
+                items = data.get("playerScores") if isinstance(data, dict) else None
+                if not isinstance(items, list) or not items:
+                    break
+                for item in items:
+                    lb_id = _ss_item_lb_id(item)
+                    # 今の値なので、キャッシュにある譜面は入れる（同じ曲の他の難易度など）
+                    if lb_id is not None and (lb_id in wanted or lb_id in scores):
+                        refreshed[lb_id] = item
+                if wanted <= set(refreshed) or len(items) < 100:
+                    break
+            if song_ok:
+                searched |= wanted
+        if refreshed:
+            scores.update(refreshed)
+            _resave_player_scores(cache_path, scores)
+    summary["scores_updated"] = len(refreshed)
+
+    # 取り直したスコアの★がランク譜面キャッシュと違う＝ランク譜面キャッシュが古い。その譜面だけ書き換える
+    maps_updated = 0
+    raw: dict = {}
     try:
-        _raw = json.loads(cache_path.read_text(encoding="utf-8")) if cache_path.exists() else None
-        if isinstance(_raw, dict) and isinstance(_raw.get("resume_stop_ts"), str):
-            resume_stop_ts = _raw["resume_stop_ts"]
+        raw = json.loads(ranked_path.read_text(encoding="utf-8"))
     except Exception:  # noqa: BLE001
-        resume_stop_ts = None
-    _save_cached_player_scores(cache_path, scores, resume_stop_ts=resume_stop_ts)
+        raw = {}
+    raw_lbs = raw.get("leaderboards") if isinstance(raw.get("leaderboards"), dict) else None
+    # refreshed は今回 API から読めたスコアだけ（全部の取り直しが途中で止まったときも、キャッシュに元からある古いスコアは
+    # read_ids で除いてある）。読めた譜面は今の★で書き換える（書き換えずに確認済みの印を付けると、★が古いまま固まる）
+    for lb_id, item in refreshed.items():
+        new_lb = item.get("leaderboard") or {}
+        if lb_id not in ranked or not new_lb.get("ranked") or not stars_differ(ranked[lb_id].get("stars"), new_lb.get("stars")):
+            continue
+        for target in (ranked[lb_id], (raw_lbs or {}).get(lb_id)):
+            if isinstance(target, dict):
+                target["stars"] = new_lb.get("stars")
+                if new_lb.get("maxPP") is not None:
+                    target["maxPP"] = new_lb.get("maxPP")
+        maps_updated += 1
+    summary["maps_updated"] = maps_updated
+    if maps_updated and raw_lbs is not None:
+        try:
+            # fetched_at は変えない（差分取得の 60 日の窓を進めない）
+            atomic_write_text(ranked_path, json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
+            print(f"ScoreSaber ★同期: ランク譜面キャッシュの★を {maps_updated} 譜面書き換えました")
+        except Exception as exc:  # noqa: BLE001
+            print(f"ScoreSaber ★同期: ランク譜面キャッシュを保存できませんでした（{exc}）")
+
+    remaining = _ss_star_sync_targets(scores, ranked)
+    marks = {k: v for k, v in checked.items() if k in remaining}
+    not_found = 0
+    for k, (_, why) in remaining.items():
+        if k not in targets:
+            continue
+        if k in refreshed:
+            # 取り直しても食い違いが残った（確認済み）。同じ食い違いでは取り直さない
+            marks[k] = why
+        elif k in searched:
+            # 探しても返らなかった。確認済みにはせず、待ち時間の後にもう一度探す
+            marks[k] = star_sync_not_found_mark(checked.get(k), why)
+            not_found += 1
+        # 取り直しが失敗・429 で止まった譜面は印を変えない（次の回に取り直す）
+    if not_found:
+        print(f"ScoreSaber ★同期: 検索しても返らなかった譜面 {not_found} 件は、時間を置いて探し直します")
+    save_newly_ranked_checked(_STAR_SYNC_CHECKED, "scoresaber", scoresaber_id, marks)
+    print(
+        f"ScoreSaber ★同期: スコア {len(refreshed)} 件・ランク譜面 {maps_updated} 件を更新"
+        f"（リクエスト {summary['requests']} 回、残り {len(remaining)} 件）"
+    )
+    if not complete and status is not None:
+        status["complete"] = False
+    return summary
+
+
+def _resave_player_scores(cache_path: Path, scores: dict) -> None:
+    """スコアキャッシュを保存し直す（差分取得の途中失敗の印 resume_ranges / resume_stop_ts と、
+    60 日遡りの基準の fetched_at は残す。一部のスコアを取り直しただけで、差分取得を済ませたことにはならないため）。"""
+    _save_cached_player_scores(
+        cache_path, scores, fetched_at=_load_cached_fetched_at(cache_path), **_load_resume_fields(cache_path),
+    )
 
 
 def _get_scoresaber_player_stats(scoresaber_id: str, session: requests.Session) -> dict:

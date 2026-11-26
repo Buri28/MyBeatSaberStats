@@ -12,7 +12,7 @@ from mybeatsaberstats.collector import beatleader as bl_collector  # noqa: E402
 from mybeatsaberstats.collector import collector  # noqa: E402
 from mybeatsaberstats.collector import scoresaber as ss_collector  # noqa: E402
 
-URL = "https://api.beatleader.xyz/player/1"
+URL = "https://api.beatleader.com/player/1"
 
 
 class FakeResponse:
@@ -134,5 +134,5 @@ def test_real_callers_share_one_fetch_per_snapshot_session():
         ss_collector._get_scoresaber_player_stats("1", s)
     bl_urls = [u for u in s.calls if "beatleader" in u]
     ss_urls = [u for u in s.calls if "scoresaber" in u]
-    assert bl_urls == ["https://api.beatleader.xyz/player/1"]
+    assert bl_urls == ["https://api.beatleader.com/player/1"]
     assert len(ss_urls) == 1 and ss_urls[0].endswith("/player/1/full")
