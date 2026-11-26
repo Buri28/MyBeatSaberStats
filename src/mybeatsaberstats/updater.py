@@ -131,6 +131,50 @@ def _version_gt(a: str, b: str) -> bool:
         return False
 
 # ------------------------------------------------------------------ #
+#  開発用フォルダのガード
+# ------------------------------------------------------------------ #
+
+# 配布物（release zip）には入っていない、開発用のフォルダ（git のリポジトリ）の目印。
+# 更新は配布物に無いファイルを消すので、リポジトリに更新をかけると .git やソースが消える
+# （2026-11-26、リポジトリ直下の exe から更新して .git と直下のファイルが消えた）。
+_DEV_CHECKOUT_MARKERS = (".git", "src/mybeatsaberstats")
+
+
+def find_dev_checkout_marker(install_dir: Path) -> Path | None:
+    """install_dir が開発用のフォルダなら、見つけた目印のパスを返す。配布物のフォルダなら None。"""
+    for marker in _DEV_CHECKOUT_MARKERS:
+        path = Path(install_dir) / marker
+        if path.exists():
+            return path
+    return None
+
+
+def ensure_update_allowed(install_dir: Path | None) -> None:
+    """更新してよいフォルダか確かめる。開発用のフォルダ・ソースからの起動なら RuntimeError。"""
+    if install_dir is None:
+        # ソースから起動している（run.bat）。更新は src を GitHub の版で上書きし、手元の修正が消える
+        raise RuntimeError(
+            "ソースから起動しているため、アップデートできません。\n"
+            "ソースの更新は git で行ってください。"
+        )
+    marker = find_dev_checkout_marker(install_dir)
+    if marker is not None:
+        raise RuntimeError(
+            "開発用のフォルダ（git のリポジトリ）のため、アップデートできません。\n"
+            "更新すると、配布物に無い .git やソースのファイルが消えます。\n"
+            f"フォルダ: {Path(install_dir).resolve()}\n"
+            f"見つけたもの: {marker.name}"
+        )
+
+
+def _running_install_dir() -> Path | None:
+    """実行中のアプリの更新先フォルダ。ソースから起動しているときは None。"""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return None
+
+
+# ------------------------------------------------------------------ #
 #  パスユーティリティ
 # ------------------------------------------------------------------ #
 
@@ -405,6 +449,8 @@ def apply_update(
     """指定タグの .py ファイルおよびリソースファイルを全ダウンロードして保存する。
     progress(message, current, total) で進捗を通知する。
     """
+    # ダウンロードの前に止める（開発用のフォルダ・ソースからの起動）
+    ensure_update_allowed(_running_install_dir())
     if _should_stage_external_update(info):
         _stage_external_update(info, progress, preserve_updater=preserve_updater)
         return
@@ -790,6 +836,7 @@ def apply_staged_update_package(
     target_version: str | None = None,
     preserve_updater: bool = False,
 ) -> None:
+    ensure_update_allowed(install_dir)
     _wait_for_process_exit(wait_pid)
 
     stage_root = cleanup_dir or zip_path.parent

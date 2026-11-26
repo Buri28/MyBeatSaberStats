@@ -770,6 +770,20 @@ static class UpdateInstaller
         return others.Length == 1 ? others[0] : null;
     }
 
+    // 配布物（release zip）には入っていない、開発用のフォルダの目印（updater.py の _DEV_CHECKOUT_MARKERS と同じ）
+    private static readonly string[] DevCheckoutMarkers = { ".git", Path.Combine("src", "mybeatsaberstats") };
+
+    public static string FindDevCheckoutMarker(string installDir)
+    {
+        foreach (string marker in DevCheckoutMarkers)
+        {
+            string path = Path.Combine(installDir, marker);
+            if (Directory.Exists(path) || File.Exists(path))
+                return path;
+        }
+        return null;
+    }
+
     public static string ValidateInstallDirectory(string installDir, string exePath)
     {
         if (string.IsNullOrEmpty(installDir))
@@ -778,6 +792,18 @@ static class UpdateInstaller
         string fullInstallDir = Path.GetFullPath(installDir);
         if (!Directory.Exists(fullInstallDir))
             throw new InvalidOperationException("更新先フォルダが見つかりません: " + fullInstallDir);
+
+        // 開発用のフォルダ（git のリポジトリ）には更新をかけない。MirrorDirectory は配布物に無いファイルを消すので、
+        // .git やソースが消える（2026-11-26、リポジトリ直下の exe から更新して .git と直下のファイルが消えた）。
+        string devMarker = FindDevCheckoutMarker(fullInstallDir);
+        if (devMarker != null)
+        {
+            throw new InvalidOperationException(
+                "開発用のフォルダ（git のリポジトリ）のため、アップデートできません。\r\n"
+                + "更新すると、配布物に無い .git やソースのファイルが消えます。\r\n"
+                + "フォルダ: " + fullInstallDir + "\r\n"
+                + "見つけたもの: " + Path.GetFileName(devMarker));
+        }
 
         string resolvedExe = exePath;
         if (!string.IsNullOrEmpty(resolvedExe))
